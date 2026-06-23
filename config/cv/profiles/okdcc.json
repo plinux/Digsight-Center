@@ -1,0 +1,21 @@
+{
+  "profile_name": "OKDCC",
+  "manufacturer_name": "OKDCC / OK 科技",
+  "source": "用户上传 OK 科技 DCC 数码音效芯片说明书照片；用户确认 CV8 默认值为 86、写入 174 为复位；官方 PDF 待确认",
+  "aliases": ["OKDCC", "OK 科技", "OK科技"],
+  "reset_method": {
+    "cv": 8,
+    "value": 174,
+    "label": "恢复出厂设置",
+    "source": "用户确认：OKDCC CV8 默认读取值为 86，写入 174 触发复位",
+    "default_address": 3,
+    "requires_power_cycle": true,
+    "notes": [
+      "CV8 默认读取值为 86；写入 174 才是 OKDCC 复位命令",
+      "OKDCC 厂家 ID 与 NMRA 当前公开列表可能存在冲突，若实际芯片不是 OKDCC，请调整 profile-map.json"
+    ]
+  },
+  "cv_definitions": {
+    "8": "生产厂家/复位（写入174恢复出厂）"
+  }
+}

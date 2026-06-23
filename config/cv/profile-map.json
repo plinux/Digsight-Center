@@ -1,0 +1,13 @@
+{
+  "source": "Project mapping from NMRA manufacturer ID to editable CV profile file",
+  "manufacturer_profiles": {
+    "30": "digsight",
+    "86": "okdcc",
+    "131": "marklin-trix",
+    "145": "zimo-roco-fleischmann",
+    "151": "esu",
+    "155": "fleischmann",
+    "161": "roco-fleischmann",
+    "162": "piko"
+  }
+}

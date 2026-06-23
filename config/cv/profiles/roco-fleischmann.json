@@ -1,0 +1,18 @@
+{
+  "profile_name": "Roco / Fleischmann",
+  "source": "NMRA manufacturer ID for Modelleisenbahn GmbH; Roco/Fleischmann models often use ZIMO or ESU decoder maps",
+  "aliases": ["ROCO", "Roco", "Fleischmann"],
+  "reset_method": {
+    "cv": 8,
+    "value": 8,
+    "label": "恢复出厂设置",
+    "source": "Roco/Fleischmann multiMAUS manual",
+    "default_address": 3,
+    "requires_power_cycle": true
+  },
+  "cv_definitions": {
+    "8": "生产厂家/复位（常见写入8恢复出厂）",
+    "63": "总音量（ESU 装车常见）",
+    "266": "总音量（ZIMO 装车常见）"
+  }
+}

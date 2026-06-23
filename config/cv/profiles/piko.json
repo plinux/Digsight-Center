@@ -1,0 +1,29 @@
+{
+  "profile_name": "PIKO SmartDecoder",
+  "source": "PIKO SmartDecoder XP 5.1 / 4.1 manuals",
+  "aliases": ["PIKO", "SmartDecoder"],
+  "reset_method": {
+    "cv": 8,
+    "value": 8,
+    "label": "恢复出厂设置",
+    "source": "PIKO SmartDecoder manual",
+    "default_address": 3,
+    "requires_power_cycle": true
+  },
+  "cv_definitions": {
+    "8": "生产厂家/复位（写入8恢复出厂）",
+    "12": "解码器运行模式",
+    "27": "制动信号设置",
+    "29": "DCC 标准配置",
+    "30": "错误代码",
+    "31": "索引寄存器高位",
+    "32": "索引寄存器低位",
+    "50": "索引配置",
+    "51": "索引配置",
+    "59": "复位范围选择",
+    "61": "扩展函数激活",
+    "156": "功能映射/延时",
+    "157": "功能映射/调车",
+    "257": "总音量（需 CV31=16, CV32=0）"
+  }
+}

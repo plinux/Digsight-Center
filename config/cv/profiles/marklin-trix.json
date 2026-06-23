@@ -1,0 +1,25 @@
+{
+  "profile_name": "Märklin / Trix mLD/mSD",
+  "source": "Märklin mLD/mSD DCC CV tables",
+  "aliases": ["Märklin", "Marklin", "TRIX", "Trix"],
+  "reset_method": {
+    "cv": 8,
+    "value": 8,
+    "label": "恢复出厂设置",
+    "source": "Märklin mLD/mSD CV-Liste DCC",
+    "default_address": 3,
+    "requires_power_cycle": true
+  },
+  "cv_definitions": {
+    "8": "生产厂家/复位（写入8恢复出厂）",
+    "50": "扩展配置",
+    "51": "扩展配置",
+    "57": "蒸汽喷发节奏",
+    "58": "蒸汽喷发节奏微调",
+    "63": "总音量",
+    "64": "制动尖叫阈值",
+    "112": "功能设置",
+    "116": "音量调节功能键",
+    "118": "总音量（部分 Minitrix/Trix 车型）"
+  }
+}
