@@ -77,6 +77,7 @@ const elements = {
   vehicleEditView: document.getElementById("vehicleEditView"),
   vehicleControlDetailView: document.getElementById("vehicleControlDetailView"),
   cvProgrammingView: document.getElementById("cvProgrammingView"),
+  cvTargetPanel: document.getElementById("cvTargetPanel"),
   chipInfoPanel: document.getElementById("chipInfoPanel"),
   cvListPanel: document.getElementById("cvListPanel"),
   cvEditStackPanel: document.getElementById("cvEditStackPanel"),
@@ -103,7 +104,8 @@ const cvState = {
   cvListReading: false,
   cvReadSessionId: "",
   cvReadCancelling: false,
-  address: null
+  address: null,
+  programmingVehicleId: ""
 };
 
 let gatewayBusyCount = 0;
@@ -197,6 +199,10 @@ function controllerReadStatusDetail(result) {
 
 function selectedVehicle() {
   return vehiclesForOperationMode(currentOperationMode()).find((vehicle) => vehicle.id === appState.selectedVehicleId) || null;
+}
+
+function selectedCvProgrammingVehicle() {
+  return vehiclesForOperationMode(currentOperationMode()).find((vehicle) => vehicle.id === cvState.programmingVehicleId) || null;
 }
 
 function editingVehicle() {
@@ -557,6 +563,16 @@ function vehiclesForOperationMode(mode = currentOperationMode()) {
   return appState.vehicles.filter((vehicle) => vehicleMatchesOperationMode(vehicle, mode));
 }
 
+function syncCvProgrammingVehicle(visibleVehicles) {
+  if (visibleVehicles.some((vehicle) => vehicle.id === cvState.programmingVehicleId)) {
+    return;
+  }
+  cvState.programmingVehicleId = visibleVehicles[0]?.id || "";
+  if (currentProgrammingTarget() === "main_track") {
+    cvState.address = visibleVehicles[0]?.address ?? cvState.address;
+  }
+}
+
 function functionsForVehicles(vehicles) {
   const visibleVehicleIds = new Set(vehicles.map((vehicle) => vehicle.id));
   return appState.functions.filter((fn) => visibleVehicleIds.has(fn.vehicle_id));
@@ -707,9 +723,9 @@ function cvProgrammingRequest(operationName) {
   const programmingTarget = currentProgrammingTarget();
   const payload = {programming_target: programmingTarget};
   if (programmingTarget === "main_track") {
-    const vehicle = selectedVehicle();
+    const vehicle = selectedCvProgrammingVehicle();
     if (!vehicle?.id) {
-      setStatus(`${operationName}选择主轨时需要先在车辆控制列表选择车辆`);
+      setStatus(`${operationName}选择主轨时需要先选择操作车号`);
       return null;
     }
     payload.vehicle_id = vehicle.id;
@@ -948,6 +964,14 @@ function buildVehicleEditorHandlers(vehicle) {
 
 function buildCvPanelHandlers(vehicle) {
   return {
+    onCvProgrammingVehicleChange: (vehicleId) => {
+      cvState.programmingVehicleId = vehicleId || "";
+      const targetVehicle = selectedCvProgrammingVehicle();
+      if (targetVehicle) {
+        cvState.address = targetVehicle.address ?? cvState.address;
+      }
+      renderAll();
+    },
     onReadChipInfo: readChipInfo,
     onResetDecoder: resetDecoder,
     onReadKnownCv: readKnownCvList,
@@ -969,7 +993,7 @@ function buildCvPanelHandlers(vehicle) {
         if (!safetyReady) {
           return;
         }
-        const result = await runCvRequestWithSafetyRetry("地址读取", targetPayload.programming_target, () => readAddress(vehicle?.id, targetPayload));
+        const result = await runCvRequestWithSafetyRetry("地址读取", targetPayload.programming_target, () => readAddress(targetPayload.vehicle_id, targetPayload));
         cvState.address = result.address;
         setStatus(`地址：${result.address}`);
         await refreshState();
@@ -991,7 +1015,7 @@ function buildCvPanelHandlers(vehicle) {
         if (!safetyReady) {
           return;
         }
-        const result = await runCvRequestWithSafetyRetry("地址写入", targetPayload.programming_target, () => writeAddress(vehicle?.id, address, true, targetPayload));
+        const result = await runCvRequestWithSafetyRetry("地址写入", targetPayload.programming_target, () => writeAddress(targetPayload.vehicle_id, address, true, targetPayload));
         cvState.address = result.address;
         setStatus(`地址 ${result.address} 已写入`);
         await refreshState();
@@ -1076,6 +1100,7 @@ function renderAll() {
   const visibleFunctions = functionsForVehicles(visibleVehicles);
   const leftVehicles = sortCabVehicles(filterCabVehicles(visibleVehicles, appState.cabs.left), appState.cabs.left);
   const rightVehicles = sortCabVehicles(filterCabVehicles(visibleVehicles, appState.cabs.right), appState.cabs.right);
+  syncCvProgrammingVehicle(visibleVehicles);
   syncCabSelectionForVisibleVehicles(visibleVehicles);
   updateVehicleHeader(visibleVehicles, operationMode);
   syncVehicleSelectionToolbar(visibleVehicles);
@@ -1167,9 +1192,355 @@ function renderAll() {
     }
   );
 
-  renderCvPanel(elements, vehicle, appState.cvMetadata, cvState, buildCvPanelHandlers(vehicle));
+  const cvProgrammingTargetVehicle = currentProgrammingTarget() === "main_track" ? selectedCvProgrammingVehicle() : null;
+  renderCvPanel(elements, cvProgrammingTargetVehicle, appState.cvMetadata, {
+    ...cvState,
+    programmingTarget: currentProgrammingTarget(),
+    programmingVehicles: visibleVehicles
+  }, buildCvPanelHandlers(vehicle));
 
   renderControllerSettings(elements, appState.controllerInfo, buildControllerSettingsHandlers());
   setVehicleSubviewState();
+}
+
+async function refreshCvSafety(operationName, programmingTarget = currentProgrammingTarget(), options = {}) {
+  await syncControllerEndpoint();
+  const target = normalizeProgrammingTarget(programmingTarget);
+  if (target === "main_track") {
+    if (options.force) {
+      setStatus(`主轨${operationName}状态未确认，正在重新读取控制器信息`);
+      await readControllerInfo();
+      await refreshState();
+    }
+    setStatus(`主轨${operationName}已选择车辆，正在等待后端校验 POM 协议状态`);
+    return true;
+  }
+  const warningMessages = userVisibleWarnings(appState.controllerInfo?.cv_safety_warnings || []);
+  if (!appState.controllerInfo?.safe_for_cv || options.force) {
+    setStatus(`控制器安全状态未确认，正在重新读取控制器信息：${warningMessages.join("，") || "等待 0x23 状态"}`);
+    const result = await readControllerInfo();
+    await refreshState();
+    if (!result.safe_for_cv) {
+      const nextWarningMessages = userVisibleWarnings(result.warnings || []);
+      setStatus(`控制器安全状态仍未确认：${nextWarningMessages.join("，") || "CV 安全状态未确认"}`);
+    }
+    return Boolean(result.safe_for_cv);
+  }
+  setStatus(`控制器安全状态已确认，正在执行${operationName}`);
+  return true;
+}
+
+async function runCvRequestWithSafetyRetry(operationName, programmingTarget, requestFn) {
+  try {
+    return await requestFn();
+  } catch (error) {
+    if (!isRetryableCvSafetyError(error)) {
+      throw error;
+    }
+    const safetyReady = await refreshCvSafety(operationName, programmingTarget, {force: true});
+    if (!safetyReady && normalizeProgrammingTarget(programmingTarget) !== "main_track") {
+      throw error;
+    }
+    return await requestFn();
+  }
+}
+
+function isRetryableCvSafetyError(error) {
+  const warningSet = new Set(error.payload?.debug?.warnings || []);
+  return error.payload?.error?.type === "protocol_not_ready"
+    && (
+      warningSet.has("programming_track_status_unconfirmed")
+      || warningSet.has("programming_track_status_stale")
+      || warningSet.has("booster_status_unconfirmed")
+      || warningSet.has("booster_status_stale")
+    );
+}
+
+async function readChipInfo() {
+  cvState.results = {};
+  cvState.chipInfo = null;
+  try {
+    const targetPayload = cvProgrammingRequest("芯片信息读取");
+    if (!targetPayload) {
+      return;
+    }
+    const safetyReady = await refreshCvSafety("芯片信息读取", targetPayload.programming_target);
+    if (!safetyReady) {
+      return;
+    }
+    const chipInfo = await runCvRequestWithSafetyRetry("芯片信息读取", targetPayload.programming_target, () => readChipInfoFromController(targetPayload));
+    for (const [cvNumber, result] of Object.entries(chipInfo.cvs || {})) {
+      cvState.results[Number(cvNumber)] = result.value;
+    }
+    cvState.chipInfo = chipInfo;
+    setStatus("芯片信息已读取");
+  } catch (error) {
+    cvState.chipInfo = null;
+    setStatus(formatError(error));
+  } finally {
+    renderAll();
+  }
+}
+
+async function resetDecoder() {
+  const resetMethod = resolveDecoderResetMethod();
+  const resetCommand = `CV${resetMethod.cv}=${resetMethod.value}`;
+  const sourceText = resetMethod.source ? `来源：${resetMethod.source}` : "来源：通用 DCC 复位约定";
+  const methodText = resetMethod.configured
+    ? `已按 ${resetMethod.profileName} 厂商 CV 表选择复位方法：${resetCommand}。`
+    : `未读取到可匹配的厂商 CV 表，将使用通用复位方法：${resetCommand}。`;
+  const manufacturerText = resetMethod.manufacturerName
+    ? `当前芯片厂商：${resetMethod.manufacturerName}${resetMethod.manufacturerId === null ? "" : ` (${resetMethod.manufacturerId})`}`
+    : "当前尚未读取芯片厂商信息。";
+  const message = [
+    "确认重置编程轨上的当前芯片？",
+    manufacturerText,
+    methodText,
+    sourceText,
+    `地址通常会变为 ${resetMethod.defaultAddress || 3}，当前 CV、功能映射、速度曲线和声音/厂家设置可能被恢复。`,
+    "少数厂家不使用通用复位值，请先确认该芯片手册。"
+  ].join("\n");
+  const confirmed = typeof globalThis.confirm === "function" ? globalThis.confirm(message) : false;
+  if (!confirmed) {
+    return;
+  }
+  try {
+    const targetPayload = cvProgrammingRequest("芯片重置");
+    if (!targetPayload) {
+      return;
+    }
+    const safetyReady = await refreshCvSafety("芯片重置", targetPayload.programming_target);
+    if (!safetyReady) {
+      return;
+    }
+    await runCvRequestWithSafetyRetry("芯片重置", targetPayload.programming_target, () => writeCv(resetMethod.cv, resetMethod.value, true, targetPayload));
+    cvState.chipInfo = null;
+    cvState.results = {};
+    cvState.cvList = {
+      manufacturer_id: null,
+      manufacturer_name: "",
+      rows: [],
+      readAt: ""
+    };
+    cvState.address = null;
+    setStatus(`芯片重置命令已发送：${resetCommand}；请按芯片手册等待或重新上下电后再读取地址/芯片信息`);
+    renderAll();
+  } catch (error) {
+    setStatus(formatError(error));
+    renderAll();
+  }
+}
+
+function resolveDecoderResetMethod() {
+  const manufacturerId = currentDecoderManufacturerId();
+  const catalog = appState.cvMetadata?.cv_catalog || {};
+  const profileName = manufacturerId === null || manufacturerId === undefined
+    ? null
+    : catalog.profile_map?.[String(manufacturerId)];
+  const profile = profileName ? catalog.vendor_profiles?.[profileName] : null;
+  const configuredMethod = profile?.reset_method || null;
+  const registry = appState.cvMetadata?.manufacturer_registry?.known_ids || {};
+  const unassigned = appState.cvMetadata?.manufacturer_registry?.unassigned_notes || {};
+  const manufacturerKey = manufacturerId === null || manufacturerId === undefined ? "" : String(manufacturerId);
+  const manufacturerName = cvState.chipInfo?.manufacturer_name
+    || cvState.cvList?.manufacturer_name
+    || profile?.manufacturer_name
+    || profile?.profile_name
+    || registry[manufacturerKey]
+    || unassigned[manufacturerKey]
+    || null;
+  if (isValidResetMethod(configuredMethod)) {
+    return {
+      cv: Number(configuredMethod.cv),
+      value: Number(configuredMethod.value),
+      label: configuredMethod.label || "恢复出厂设置",
+      source: configuredMethod.source || profile?.source || "",
+      defaultAddress: Number(configuredMethod.default_address || 3),
+      requiresPowerCycle: Boolean(configuredMethod.requires_power_cycle),
+      notes: configuredMethod.notes || [],
+      configured: true,
+      manufacturerId,
+      manufacturerName,
+      profileName
+    };
+  }
+  return {
+    cv: 8,
+    value: 8,
+    label: "恢复出厂设置",
+    source: "",
+    defaultAddress: 3,
+    requiresPowerCycle: true,
+    notes: [],
+    configured: false,
+    manufacturerId,
+    manufacturerName,
+    profileName
+  };
+}
+
+function currentDecoderManufacturerId() {
+  if (cvState.chipInfo?.manufacturer_id !== null && cvState.chipInfo?.manufacturer_id !== undefined) {
+    return Number(cvState.chipInfo.manufacturer_id);
+  }
+  if (cvState.cvList?.manufacturer_id !== null && cvState.cvList?.manufacturer_id !== undefined) {
+    return Number(cvState.cvList.manufacturer_id);
+  }
+  const cv8Value = Number(cvState.results?.[8]);
+  return Number.isInteger(cv8Value) ? cv8Value : null;
+}
+
+function isValidResetMethod(method) {
+  if (!method) {
+    return false;
+  }
+  const cvNumber = Number(method.cv);
+  const value = Number(method.value);
+  return Number.isInteger(cvNumber)
+    && cvNumber >= 1
+    && cvNumber <= 1024
+    && Number.isInteger(value)
+    && value >= 0
+    && value <= 255;
+}
+
+async function readKnownCvList() {
+  await readCvListWithMode("known");
+}
+
+async function readFullCvList() {
+  const confirmed = typeof globalThis.confirm === "function"
+    ? globalThis.confirm("完整扫描会逐个读取 CV1-CV1024，耗时明显更长。确认开始完整扫描？")
+    : false;
+  if (!confirmed) {
+    return;
+  }
+  await readCvListWithMode("full");
+}
+
+function newCvReadSessionId() {
+  if (globalThis.crypto?.randomUUID) {
+    return globalThis.crypto.randomUUID();
+  }
+  return `cv-read-${Date.now()}-${Math.round(Math.random() * 1000000)}`;
+}
+
+async function cancelCurrentCvRead() {
+  if (!cvState.cvReadSessionId || !cvState.cvListReading) {
+    return;
+  }
+  cvState.cvReadCancelling = true;
+  setStatus("正在中止 CV 读取");
+  renderAll();
+  try {
+    await cancelCvRead(cvState.cvReadSessionId);
+  } catch (error) {
+    setStatus(formatError(error));
+  }
+}
+
+async function readCvListWithMode(readMode) {
+  try {
+    const operationName = readMode === "full" ? "完整 CV 扫描" : "已知 CV 读取";
+    const targetPayload = cvProgrammingRequest(operationName);
+    if (!targetPayload) {
+      return;
+    }
+    const safetyReady = await refreshCvSafety(operationName, targetPayload.programming_target);
+    if (!safetyReady) {
+      return;
+    }
+    cvState.cvListReading = true;
+    cvState.cvReadCancelling = false;
+    cvState.cvReadSessionId = newCvReadSessionId();
+    renderAll();
+    const result = await runCvRequestWithSafetyRetry(operationName, targetPayload.programming_target, () => readAllCvValues({
+      ...targetPayload,
+      read_mode: readMode,
+      session_id: cvState.cvReadSessionId
+    }));
+    cvState.cvList = {
+      ...result,
+      rows: result.rows || [],
+      readAt: new Date().toISOString()
+    };
+    for (const row of cvState.cvList.rows) {
+      if (row.ok) {
+        cvState.results[Number(row.cv)] = Number(row.value);
+      }
+    }
+    const manufacturer = result.manufacturer_id === null || result.manufacturer_id === undefined
+      ? result.manufacturer_name
+      : `${result.manufacturer_name} (${result.manufacturer_id})`;
+    setStatus(result.cancelled
+      ? `CV 读取已中止：${result.ok_count}/${result.read_count}`
+      : `${operationName}完成：${result.ok_count}/${result.read_count}，${manufacturer}`);
+  } catch (error) {
+    setStatus(formatError(error));
+  } finally {
+    cvState.cvListReading = false;
+    cvState.cvReadSessionId = "";
+    cvState.cvReadCancelling = false;
+    renderAll();
+  }
+}
+
+function cvExportFileName(extension) {
+  const manufacturer = (cvState.cvList.manufacturer_name || "decoder").replace(/[^A-Za-z0-9_-]+/g, "-");
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return `cv-list-${manufacturer}-${stamp}.${extension}`;
+}
+
+function buildCvMarkdown(cvList) {
+  const rows = cvList.rows || [];
+  const manufacturer = cvList.manufacturer_id === null || cvList.manufacturer_id === undefined
+    ? (cvList.manufacturer_name || "未知厂家")
+    : `${cvList.manufacturer_name} (${cvList.manufacturer_id})`;
+  const lines = [
+    "# CV值列表",
+    "",
+    `- 生产厂家：${manufacturer}`,
+    `- 读取时间：${cvList.readAt || ""}`,
+    "",
+    "| CV地址 | 含义 | 值 |",
+    "| --- | --- | --- |"
+  ];
+  for (const row of rows) {
+    lines.push(`| ${row.cv} | ${escapeMarkdownCell(row.meaning)} | ${row.ok ? row.value : `读取失败：${escapeMarkdownCell(row.error || "")}`} |`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function buildCvCsv(cvList) {
+  const rows = cvList.rows || [];
+  const lines = [["CV地址", "含义", "值"].map(csvEscape).join(",")];
+  for (const row of rows) {
+    lines.push([row.cv, row.meaning, row.ok ? row.value : `读取失败：${row.error || ""}`].map(csvEscape).join(","));
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function escapeMarkdownCell(value) {
+  return String(value ?? "").replaceAll("|", "\\|").replace(/\r?\n/g, " ");
+}
+
+function csvEscape(value) {
+  const text = String(value ?? "");
+  if (/[",\r\n]/.test(text)) {
+    return `"${text.replaceAll('"', '""')}"`;
+  }
+  return text;
+}
+
+function downloadTextFile(fileName, content, mimeType) {
+  const blob = new Blob([content], {type: mimeType});
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 

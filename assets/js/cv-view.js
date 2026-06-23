@@ -1,10 +1,64 @@
 import {labeledInput} from "./ui-helpers.js";
 
 export function renderCvPanel(elements, selectedVehicle, metadata, cvState, handlers = {}) {
+  renderCvTargetPanel(elements.cvTargetPanel, cvState, handlers);
   renderChipInfoPanel(elements.chipInfoPanel, metadata, cvState, handlers);
   renderCvListPanel(elements.cvListPanel, metadata, cvState, handlers);
   renderAddressPanel(elements.addressPanel, selectedVehicle, metadata, cvState, handlers);
   renderCvEditorPanel(elements.cvEditorPanel, selectedVehicle, metadata, cvState, handlers);
+}
+
+function renderCvTargetPanel(container, cvState, handlers) {
+  if (!container) {
+    return;
+  }
+  container.replaceChildren();
+  const title = document.createElement("h2");
+  title.textContent = "CV 操作目标";
+  const programmingTarget = String(cvState.programmingTarget || "programming_track");
+  const vehicles = cvState.programmingVehicles || [];
+  const selectedVehicleId = vehicles.some((vehicle) => vehicle.id === cvState.programmingVehicleId)
+    ? cvState.programmingVehicleId
+    : (vehicles[0]?.id || "");
+
+  const label = document.createElement("label");
+  label.className = "cv-target-field";
+  const labelText = document.createElement("span");
+  labelText.textContent = "主轨操作车号";
+  const select = document.createElement("select");
+  select.disabled = programmingTarget !== "main_track" || !vehicles.length;
+  select.value = selectedVehicleId;
+
+  if (programmingTarget !== "main_track") {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "编程轨不使用车号";
+    select.append(option);
+  } else if (!vehicles.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "当前模式暂无车辆";
+    select.append(option);
+  } else {
+    for (const vehicle of vehicles) {
+      const option = document.createElement("option");
+      option.value = vehicle.id;
+      option.textContent = cvTargetVehicleLabel(vehicle);
+      select.append(option);
+    }
+    select.value = selectedVehicleId;
+  }
+  select.addEventListener("change", () => {
+    handlers.onCvProgrammingVehicleChange?.(select.value);
+  });
+  label.append(labelText, select);
+
+  const hint = document.createElement("p");
+  hint.className = "empty-state cv-target-hint";
+  hint.textContent = programmingTarget === "main_track"
+    ? "主轨读取和写入会按所选车号发送 POM 命令。"
+    : "编程轨模式直接操作编程轨上的芯片，不选择车号。";
+  container.append(title, label, hint);
 }
 
 function renderChipInfoPanel(container, metadata, cvState, handlers) {
@@ -233,6 +287,14 @@ function buildChipInfoSummary(metadata, cvState) {
       ? (software === null ? "--" : String(software))
       : String(chipInfo.software_version)
   };
+}
+
+function cvTargetVehicleLabel(vehicle) {
+  const address = vehicle.address === undefined || vehicle.address === null || vehicle.address === ""
+    ? "-"
+    : String(vehicle.address);
+  const name = vehicle.name || vehicle.full_name || "未命名车辆";
+  return `${address} - ${name}`;
 }
 
 function formatManufacturerName(name, manufacturerId) {
