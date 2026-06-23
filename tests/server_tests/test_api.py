@@ -1,4 +1,5 @@
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -16,8 +17,9 @@ from digsight_dxdcnet.constants import (
 )
 from digsight_dxdcnet.frames import build_udp_frame
 from digsight_dxdcnet.loco_control import build_loco_control_request_frame, build_loco_function_frame, build_loco_speed_frame
+from server.vehicle_store import VehicleStore
 from tests.server_tests.controller_test_env import controller_ip_payload, controller_test_ip
-from tests.server_tests.fake_udp import FakeRequestMappedUdpTransport
+from tests.server_tests.fake_udp import FakeRequestMappedUdpTransport, FakeUdpTransport
 
 
 class ApiRouterTest(unittest.TestCase):
@@ -72,6 +74,43 @@ class ApiRouterTest(unittest.TestCase):
         "last_read_info_at": "2026-06-22T00:00:00+08:00",
         "booster_status_fresh": True,
         "programming_track_status_fresh": True,
+      },
+    })
+    return state
+
+  def _fresh_track_power_state(self, track_mode="n"):
+    state = default_state()
+    state["controller"].update({
+      "track_mode": track_mode,
+      "last_probe_ok": True,
+      "controller_reachable": True,
+      "booster_status": {
+        "source": "dxdcnet_status_0x23",
+        "power_on": False,
+        "dcc_mode": track_mode != "dc",
+      },
+      "safety_snapshot": {
+        "controller_endpoint_version": 1,
+        "last_read_info_at": "2026-06-22T00:00:00+08:00",
+        "booster_status_fresh": True,
+        "programming_track_status_fresh": False,
+      },
+    })
+    return state
+
+  def _safe_programming_track_state(self):
+    state = default_state()
+    state["controller"].update({
+      "udp_port": 21105,
+      "udp_checksum_algorithm": "xor",
+      "programming_track_status": {
+        "source": "dxdcnet_status_0x23",
+        "track_mode": "n",
+        "dcc_mode": True,
+        "programming_track_busy": False,
+        "programming_track_current_ma": 60,
+        "output_value": 0x78,
+        "current_limit_ma": 200,
       },
     })
     return state
@@ -138,6 +177,21 @@ class ApiRouterTest(unittest.TestCase):
     self.assertFalse(payload["ok"])
     self.assertEqual(payload["error"]["type"], "protocol_not_ready")
 
+  def test_error_response_keeps_message_detail_and_debug_shape(self):
+    router = ApiRouter(state_store=None, udp_transport=FakeUdpTransport([]))
+    body, status = router.handle_json("POST", "/api/cv/read", b'{"cv":7}', self._safe_programming_track_state())
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 502)
+    self.assertFalse(payload["ok"])
+    self.assertEqual(payload["data"], None)
+    self.assertEqual(payload["error"]["type"], "cv_read_no_value")
+    self.assertEqual(payload["error"]["message"], "控制器未返回匹配的 CV 值")
+    self.assertIn("detail", payload["error"])
+    self.assertEqual(payload["debug"]["cv"], 7)
+    self.assertEqual(payload["debug"]["client_id"], 1)
+    self.assertIn("request_hex", payload["debug"])
+    self.assertEqual(payload["debug"]["responses"], [])
+
   def test_connect_rejects_invalid_controller_ip(self):
     router = ApiRouter(state_store=None)
     body, status = router.handle_json("POST", "/api/controller/connect", b'{"ip":"not-an-ip"}', default_state())
@@ -184,7 +238,7 @@ class ApiRouterTest(unittest.TestCase):
     self.assertFalse(state["controller"]["safety_snapshot"]["programming_track_status_fresh"])
 
   def test_track_power_turns_on_n_mode(self):
-    state = default_state()
+    state = self._fresh_track_power_state("n")
     request = bytes.fromhex("ff ff 17 01 20 01 90 78 df")
     transport = FakeRequestMappedUdpTransport({
       request: [
@@ -206,8 +260,19 @@ class ApiRouterTest(unittest.TestCase):
     self.assertEqual(state["controller"]["telemetry"]["track_voltage_v"], 12.0)
     self.assertEqual(state["controller"]["controller_reachable"], True)
 
-  def test_track_power_allows_user_click_without_operation_token(self):
+  def test_track_power_on_requires_fresh_controller_status(self):
     state = default_state()
+    body, status = ApiRouter(None).handle_json("POST", "/api/track-power", b'{"powered":true}', state)
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 409)
+    self.assertEqual(payload["error"]["type"], "protocol_not_ready")
+    self.assertEqual(payload["error"]["message"], "请先连接控制器并读取最新状态")
+    self.assertIn("controller_not_confirmed", payload["debug"]["warnings"])
+    self.assertIn("booster_status_stale", payload["debug"]["warnings"])
+    self.assertIn("booster_status_unconfirmed", payload["debug"]["warnings"])
+
+  def test_track_power_allows_user_click_without_operation_token(self):
+    state = self._fresh_track_power_state("n")
     request = bytes.fromhex("ff ff 17 01 20 01 90 78 df")
     transport = FakeRequestMappedUdpTransport({
       request: [
@@ -259,8 +324,110 @@ class ApiRouterTest(unittest.TestCase):
     self.assertEqual(payload["data"]["track_mode"], "ho")
     self.assertEqual(state["controller"]["track_mode"], "ho")
 
-  def test_track_power_status_missing_marks_controller_unreachable(self):
+  def test_persistent_write_routes_do_not_fail_with_operation_token_error(self):
     state = default_state()
+    router = ApiRouter(None)
+    request_meta = {"headers": {}, "client_ip": "127.0.0.1"}
+    route_cases = [
+      ("POST", "/api/vehicles", b"{}"),
+      ("PATCH", "/api/vehicles/order", b"{}"),
+      ("POST", "/api/vehicle-images", b"{}"),
+      ("POST", "/api/categories", b"{}"),
+      ("POST", "/api/consists", b"{}"),
+      ("PATCH", "/api/vehicles/local-vehicle-1", b"{}"),
+      ("PATCH", "/api/categories/local-category-1", b"{}"),
+      ("PATCH", "/api/consists/local-consist-1", b"{}"),
+      ("DELETE", "/api/vehicles/local-vehicle-1", b""),
+      ("DELETE", "/api/categories/local-category-1", b""),
+      ("DELETE", "/api/consists/local-consist-1", b""),
+    ]
+    for method, route, request_body in route_cases:
+      with self.subTest(method=method, route=route):
+        body, status = router.handle_json(method, route, request_body, state, request_meta=request_meta)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertNotEqual(status, 403)
+        if not payload["ok"]:
+          self.assertNotEqual(payload["error"]["type"], "operation_not_authorized")
+
+    for route, call in [
+      ("/api/import/config", lambda: router.import_config_bytes(
+        "z21_layout_config",
+        "HO.z21",
+        b"not a zip",
+        state,
+        request_meta=request_meta,
+      )),
+      ("/api/import/z21", lambda: router.import_z21_bytes(
+        "HO.z21",
+        b"not a zip",
+        state,
+        request_meta=request_meta,
+      )),
+    ]:
+      with self.subTest(route=route):
+        body, status = call()
+        payload = json.loads(body.decode("utf-8"))
+        self.assertNotEqual(status, 403)
+        if not payload["ok"]:
+          self.assertNotEqual(payload["error"]["type"], "operation_not_authorized")
+
+  def test_loco_control_uses_shared_target_executor_helpers(self):
+    source = Path("server/api.py").read_text(encoding="utf-8")
+    self.assertIn("def _validated_control_request(", source)
+    self.assertIn("def _execute_loco_targets(", source)
+    self.assertNotIn("def _execute_loco_speed_targets(", source)
+
+  def test_loco_speed_rejects_stale_booster_status_after_ip_change(self):
+    state = self._ready_loco_state()
+    state["vehicles"].append({"id": "v1", "name": "Test", "address": 3, "track_mode": "ho"})
+    body, status = ApiRouter(None).handle_json(
+      "PATCH",
+      "/api/controller/settings",
+      b'{"ip":"10.10.200.99"}',
+      state,
+    )
+    self.assertEqual(status, 200)
+    control_request = build_loco_control_request_frame(address=3, client_id=1)
+    speed_request = build_loco_speed_frame(address=3, speed=10, direction="forward", client_id=1)
+    transport = FakeRequestMappedUdpTransport({
+      control_request: [self._loco_control_ack(3)],
+      speed_request: [self._loco_speed_feedback(3, 10, "forward")],
+    })
+    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+      "POST",
+      "/api/loco/speed",
+      b'{"vehicle_id":"v1","speed":10,"direction":"forward"}',
+      state,
+    )
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 409)
+    self.assertEqual(payload["error"]["type"], "protocol_not_ready")
+    self.assertIn("booster_status_stale", payload["debug"]["warnings"])
+    self.assertEqual(transport.requests, [])
+
+  def test_loco_speed_continues_when_control_ack_is_missing(self):
+    state = self._ready_loco_state()
+    state["vehicles"].append({"id": "v1", "name": "Test", "address": 3, "track_mode": "ho"})
+    control_request = build_loco_control_request_frame(address=3, client_id=1)
+    speed_request = build_loco_speed_frame(address=3, speed=10, direction="forward", client_id=1)
+    transport = FakeRequestMappedUdpTransport({
+      control_request: [],
+      speed_request: [self._loco_speed_feedback(3, 10, "forward")],
+    })
+    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+      "POST",
+      "/api/loco/speed",
+      b'{"vehicle_id":"v1","speed":10,"direction":"forward"}',
+      state,
+    )
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 200)
+    self.assertEqual(payload["data"]["targets"][0]["control_feedback"], None)
+    self.assertEqual(payload["data"]["speed"], 10)
+    self.assertEqual([request["payload"] for request in transport.requests], [control_request, speed_request])
+
+  def test_track_power_status_missing_marks_controller_unreachable(self):
+    state = self._fresh_track_power_state("n")
     request = bytes.fromhex("ff ff 17 01 20 01 90 78 df")
     transport = FakeRequestMappedUdpTransport({request: []})
     body, status = ApiRouter(None, udp_transport=transport).handle_json("POST", "/api/track-power", b'{"powered":true}', state)
@@ -271,8 +438,7 @@ class ApiRouterTest(unittest.TestCase):
     self.assertEqual(state["controller"]["controller_unreachable_reason"], "track_power_status_missing")
 
   def test_track_power_allows_g_mode_on(self):
-    state = default_state()
-    state["controller"]["track_mode"] = "g"
+    state = self._fresh_track_power_state("g")
     request = bytes.fromhex("ff ff 17 01 20 01 90 b4 13")
     transport = FakeRequestMappedUdpTransport({
       request: [
@@ -292,8 +458,7 @@ class ApiRouterTest(unittest.TestCase):
     self.assertEqual(transport.requests[0]["payload"], request)
 
   def test_track_power_allows_dc_mode_on_with_default_positive_direction(self):
-    state = default_state()
-    state["controller"]["track_mode"] = "dc"
+    state = self._fresh_track_power_state("dc")
     request = bytes.fromhex("ff ff 17 01 20 01 f0 78 bf")
     transport = FakeRequestMappedUdpTransport({
       request: [
@@ -401,6 +566,120 @@ class ApiRouterTest(unittest.TestCase):
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 409)
     self.assertEqual(payload["error"]["type"], "unsafe_track_mode")
+
+  def test_type3_vehicle_speed_control_fans_out_to_consist_members(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      store = VehicleStore(Path(temp_dir) / "vehicles.sqlite3")
+      control = store.create_vehicle({"id": "mu", "name": "重联", "address": 3, "type": 3})
+      first = store.create_vehicle({"id": "loco-a", "name": "A", "address": 11})
+      second = store.create_vehicle({"id": "loco-b", "name": "B", "address": 22})
+      store.create_consist({
+        "name": "重联",
+        "control_vehicle_id": control["id"],
+        "members": [
+          {"vehicle_id": first["id"], "address": 11, "direction": "forward", "order": 1},
+          {"vehicle_id": second["id"], "address": 22, "direction": "forward", "order": 2},
+        ],
+      })
+      control_a = build_loco_control_request_frame(address=11, client_id=1)
+      control_b = build_loco_control_request_frame(address=22, client_id=1)
+      request_a = build_loco_speed_frame(address=11, speed=42, direction="forward", client_id=1)
+      request_b = build_loco_speed_frame(address=22, speed=42, direction="forward", client_id=1)
+      transport = FakeRequestMappedUdpTransport({
+        control_a: [self._loco_control_ack(11)],
+        request_a: [self._loco_speed_feedback(11, 42, "forward")],
+        control_b: [self._loco_control_ack(22)],
+        request_b: [self._loco_speed_feedback(22, 42, "forward")],
+      })
+      body, status = ApiRouter(None, udp_transport=transport, vehicle_store=store).handle_json(
+        "POST",
+        "/api/loco/speed",
+        b'{"vehicle_id":"mu","speed":42,"direction":"forward"}',
+        self._ready_loco_state(),
+      )
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 200)
+      self.assertEqual([request["payload"] for request in transport.requests], [control_a, request_a, control_b, request_b])
+      self.assertEqual([target["address"] for target in payload["data"]["targets"]], [11, 22])
+      self.assertEqual(payload["data"]["control_mode"], "consist_vehicle")
+
+  def test_type3_vehicle_speed_control_reverses_reversed_consist_member(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      store = VehicleStore(Path(temp_dir) / "vehicles.sqlite3")
+      control = store.create_vehicle({"id": "mu", "name": "重联", "address": 3, "type": 3})
+      first = store.create_vehicle({"id": "loco-a", "name": "A", "address": 11})
+      second = store.create_vehicle({"id": "loco-b", "name": "B", "address": 22})
+      store.create_consist({
+        "name": "重联",
+        "control_vehicle_id": control["id"],
+        "members": [
+          {"vehicle_id": first["id"], "address": 11, "direction": "forward", "order": 1},
+          {"vehicle_id": second["id"], "address": 22, "direction": "reverse", "order": 2},
+        ],
+      })
+      control_a = build_loco_control_request_frame(address=11, client_id=1)
+      control_b = build_loco_control_request_frame(address=22, client_id=1)
+      request_a = build_loco_speed_frame(address=11, speed=42, direction="forward", client_id=1)
+      request_b = build_loco_speed_frame(address=22, speed=42, direction="reverse", client_id=1)
+      transport = FakeRequestMappedUdpTransport({
+        control_a: [self._loco_control_ack(11)],
+        request_a: [self._loco_speed_feedback(11, 42, "forward")],
+        control_b: [self._loco_control_ack(22)],
+        request_b: [self._loco_speed_feedback(22, 42, "reverse")],
+      })
+      body, status = ApiRouter(None, udp_transport=transport, vehicle_store=store).handle_json(
+        "POST",
+        "/api/loco/speed",
+        b'{"vehicle_id":"mu","speed":42,"direction":"forward"}',
+        self._ready_loco_state(),
+      )
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 200)
+      self.assertEqual([request["payload"] for request in transport.requests], [control_a, request_a, control_b, request_b])
+      self.assertEqual([target["direction"] for target in payload["data"]["targets"]], ["forward", "reverse"])
+
+  def test_sync_function_control_fans_out_member_function_to_all_consist_members(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      store = VehicleStore(Path(temp_dir) / "vehicles.sqlite3")
+      control = store.create_vehicle({
+        "id": "mu",
+        "name": "重联",
+        "address": 3,
+        "type": 3,
+        "sync_function_control": True,
+      })
+      first = store.create_vehicle({"id": "loco-a", "name": "A", "address": 11})
+      second = store.create_vehicle({"id": "loco-b", "name": "B", "address": 22})
+      store.create_consist({
+        "name": "重联",
+        "control_vehicle_id": control["id"],
+        "members": [
+          {"vehicle_id": first["id"], "address": 11, "direction": "forward", "order": 1},
+          {"vehicle_id": second["id"], "address": 22, "direction": "forward", "order": 2},
+        ],
+      })
+      control_a = build_loco_control_request_frame(address=11, client_id=1)
+      control_b = build_loco_control_request_frame(address=22, client_id=1)
+      request_a = build_loco_function_frame(address=11, function_states={"0": True}, client_id=1)
+      request_b = build_loco_function_frame(address=22, function_states={"0": True}, client_id=1)
+      transport = FakeRequestMappedUdpTransport({
+        control_a: [self._loco_control_ack(11)],
+        request_a: [self._loco_function_feedback(11, True)],
+        control_b: [self._loco_control_ack(22)],
+        request_b: [self._loco_function_feedback(22, True)],
+      })
+      body, status = ApiRouter(None, udp_transport=transport, vehicle_store=store).handle_json(
+        "POST",
+        "/api/loco/function",
+        b'{"vehicle_id":"loco-a","function_number":0,"enabled":true,"function_states":{"0":true}}',
+        self._ready_loco_state(),
+      )
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 200)
+      self.assertEqual([request["payload"] for request in transport.requests], [control_a, request_a, control_b, request_b])
+      self.assertEqual([target["vehicle_id"] for target in payload["data"]["targets"]], ["loco-a", "loco-b"])
+      self.assertEqual(payload["data"]["control_mode"], "synced_consist_function")
+
 
 if __name__ == "__main__":
   unittest.main()

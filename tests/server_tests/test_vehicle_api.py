@@ -300,6 +300,20 @@ class VehicleApiTest(unittest.TestCase):
       stored = temp_dir / "vehicle-images" / Path(payload["data"]["image_path"]).name
       self.assertEqual(stored.read_bytes(), png_1x1)
 
+  def test_vehicle_image_upload_rejects_decoded_content_above_json_budget(self):
+    router = ApiRouter(None)
+    oversized = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"0" * (1536 * 1024)).decode("ascii")
+    body, status = router.handle_json(
+      "POST",
+      "/api/vehicle-images",
+      json.dumps({"file_name": "large.png", "content_base64": oversized}).encode("utf-8"),
+      default_state(),
+    )
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 400)
+    self.assertEqual(payload["error"]["type"], "invalid_vehicle_image")
+    self.assertIn("1.5MB", payload["error"]["detail"])
+
   def test_sqlite_vehicle_api_delete_cleans_functions_and_consists(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       vehicle_store = VehicleStore(Path(temp_dir) / "vehicles.sqlite3")
@@ -364,6 +378,167 @@ class VehicleApiTest(unittest.TestCase):
     self.assertEqual(status, 200)
     self.assertEqual(len(payload["data"]["functions"]), 2)
     self.assertEqual(state["functions"][0]["label"], "前灯")
+
+  def test_loco_speed_requires_protocol_ready(self):
+    state = default_state()
+    state["vehicles"].append({"id": "v1", "name": "车", "address": 3})
+    request = json.dumps({"vehicle_id": "v1", "speed": 10, "direction": "forward"}).encode("utf-8")
+    body, status = ApiRouter(None).handle_json("POST", "/api/loco/speed", request, state)
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 409)
+    self.assertEqual(payload["error"]["type"], "protocol_not_ready")
+
+  def test_loco_speed_rejects_dc_operation_mode(self):
+    state = default_state()
+    state["controller"]["track_mode"] = "dc"
+    state["controller"]["udp_port"] = 12000
+    state["controller"]["udp_checksum_algorithm"] = "xor"
+    request = json.dumps({"vehicle_id": "v1", "speed": 10, "direction": "forward"}).encode("utf-8")
+    body, status = ApiRouter(None).handle_json("POST", "/api/loco/speed", request, state)
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 409)
+    self.assertEqual(payload["error"]["type"], "unsafe_track_mode")
+
+  def test_loco_speed_requires_track_power(self):
+    state = default_state()
+    state["controller"]["track_mode"] = "n"
+    state["controller"]["udp_port"] = 12000
+    state["controller"]["udp_checksum_algorithm"] = "xor"
+    state["controller"]["last_probe_ok"] = True
+    state["controller"]["controller_reachable"] = True
+    state["controller"]["booster_status"] = {"source": "dxdcnet_status_0x23", "power_on": False, "dcc_mode": True}
+    self._mark_booster_status_fresh(state)
+    state["vehicles"].append({"id": "v1", "name": "车", "address": 3})
+    request = json.dumps({"vehicle_id": "v1", "speed": 10, "direction": "forward"}).encode("utf-8")
+    body, status = ApiRouter(None, udp_transport=FakeRequestMappedUdpTransport({})).handle_json("POST", "/api/loco/speed", request, state)
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 409)
+    self.assertEqual(payload["error"]["type"], "track_power_required")
+
+  def test_loco_speed_sends_dxdcnet_speed_command_after_protocol_ready(self):
+    state = default_state()
+    state["controller"]["track_mode"] = "n"
+    state["controller"]["udp_port"] = 12000
+    state["controller"]["udp_checksum_algorithm"] = "xor"
+    state["controller"]["last_probe_ok"] = True
+    state["controller"]["controller_reachable"] = True
+    state["controller"]["booster_status"] = {"source": "dxdcnet_status_0x23", "power_on": True, "dcc_mode": True}
+    self._mark_booster_status_fresh(state)
+    state["vehicles"].append({"id": "v1", "name": "车", "address": 3})
+    request = json.dumps({"vehicle_id": "v1", "speed": 10, "direction": "forward"}).encode("utf-8")
+    expected_control = build_loco_control_request_frame(3)
+    expected_frame = build_loco_speed_frame(3, 10, "forward")
+    transport = FakeRequestMappedUdpTransport({
+      expected_control: [self._loco_control_ack(3)],
+      expected_frame: [],
+    })
+    body, status = ApiRouter(None, udp_transport=transport).handle_json("POST", "/api/loco/speed", request, state)
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 200)
+    self.assertTrue(payload["ok"])
+    self.assertEqual([item["payload"] for item in transport.requests], [expected_control, expected_frame])
+    self.assertEqual(payload["data"]["request_hex"], expected_frame.hex(" "))
+
+  def test_loco_speed_requests_control_for_long_dcc_address(self):
+    state = default_state()
+    state["controller"]["track_mode"] = "ho"
+    state["controller"]["udp_port"] = 12000
+    state["controller"]["udp_checksum_algorithm"] = "xor"
+    state["controller"]["last_probe_ok"] = True
+    state["controller"]["controller_reachable"] = True
+    state["controller"]["booster_status"] = {"source": "dxdcnet_status_0x23", "power_on": True, "dcc_mode": True}
+    self._mark_booster_status_fresh(state)
+    state["vehicles"].append({"id": "v4945", "name": "车", "address": 4945})
+    request = json.dumps({"vehicle_id": "v4945", "speed": 10, "direction": "forward"}).encode("utf-8")
+    expected_control = build_loco_control_request_frame(4945)
+    expected_frame = build_loco_speed_frame(4945, 10, "forward")
+    transport = FakeRequestMappedUdpTransport({
+      expected_control: [self._loco_control_ack(4945)],
+      expected_frame: [],
+    })
+    body, status = ApiRouter(None, udp_transport=transport).handle_json("POST", "/api/loco/speed", request, state)
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 200)
+    self.assertEqual([item["payload"] for item in transport.requests], [expected_control, expected_frame])
+    self.assertEqual(payload["data"]["request_hex"], "ff ff 18 01 10 51 93 8a 02 43")
+
+  def test_loco_function_sends_dxdcnet_function_command_after_protocol_ready(self):
+    state = default_state()
+    state["controller"]["track_mode"] = "ho"
+    state["controller"]["udp_port"] = 12000
+    state["controller"]["udp_checksum_algorithm"] = "xor"
+    state["controller"]["last_probe_ok"] = True
+    state["controller"]["controller_reachable"] = True
+    state["controller"]["booster_status"] = {"source": "dxdcnet_status_0x23", "power_on": True, "dcc_mode": True}
+    self._mark_booster_status_fresh(state)
+    state["vehicles"].append({"id": "v1", "name": "车", "address": 3})
+    request = json.dumps({
+      "vehicle_id": "v1",
+      "function_number": 5,
+      "enabled": True,
+      "function_states": {"0": True, "2": True, "4": True, "5": True},
+    }).encode("utf-8")
+    expected_control = build_loco_control_request_frame(3)
+    expected_frame = build_loco_function_frame(3, {0: True, 2: True, 4: True, 5: True})
+    transport = FakeRequestMappedUdpTransport({
+      expected_control: [self._loco_control_ack(3)],
+      expected_frame: [],
+    })
+    body, status = ApiRouter(None, udp_transport=transport).handle_json("POST", "/api/loco/function", request, state)
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 200)
+    self.assertTrue(payload["ok"])
+    self.assertEqual([item["payload"] for item in transport.requests], [expected_control, expected_frame])
+    self.assertEqual(payload["data"]["function_number"], 5)
+
+  def test_loco_function_sends_f13_group_after_protocol_ready(self):
+    state = default_state()
+    state["controller"]["track_mode"] = "ho"
+    state["controller"]["udp_port"] = 12000
+    state["controller"]["udp_checksum_algorithm"] = "xor"
+    state["controller"]["last_probe_ok"] = True
+    state["controller"]["controller_reachable"] = True
+    state["controller"]["booster_status"] = {"source": "dxdcnet_status_0x23", "power_on": True, "dcc_mode": True}
+    self._mark_booster_status_fresh(state)
+    state["vehicles"].append({"id": "v4945", "name": "车", "address": 4945})
+    request = json.dumps({
+      "vehicle_id": "v4945",
+      "function_number": 13,
+      "enabled": True,
+      "function_states": {"0": True, "13": True},
+    }).encode("utf-8")
+    expected_control = build_loco_control_request_frame(4945)
+    expected_frame = build_loco_function_frame(4945, {0: True, 13: True}, function_number=13)
+    transport = FakeRequestMappedUdpTransport({
+      expected_control: [self._loco_control_ack(4945)],
+      expected_frame: [],
+    })
+    body, status = ApiRouter(None, udp_transport=transport).handle_json("POST", "/api/loco/function", request, state)
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 200)
+    self.assertEqual([item["payload"] for item in transport.requests], [expected_control, expected_frame])
+    self.assertEqual(payload["data"]["request_hex"], "ff ff 18 01 11 51 93 40 01 8b")
+    self.assertEqual(payload["data"]["function_number"], 13)
+
+  def test_loco_control_denial_stops_before_speed_command(self):
+    state = default_state()
+    state["controller"]["track_mode"] = "ho"
+    state["controller"]["udp_port"] = 12000
+    state["controller"]["udp_checksum_algorithm"] = "xor"
+    state["controller"]["last_probe_ok"] = True
+    state["controller"]["controller_reachable"] = True
+    state["controller"]["booster_status"] = {"source": "dxdcnet_status_0x23", "power_on": True, "dcc_mode": True}
+    self._mark_booster_status_fresh(state)
+    state["vehicles"].append({"id": "v1", "name": "车", "address": 3})
+    request = json.dumps({"vehicle_id": "v1", "speed": 10, "direction": "forward"}).encode("utf-8")
+    expected_control = build_loco_control_request_frame(3)
+    transport = FakeRequestMappedUdpTransport({expected_control: [self._loco_control_ack(3, granted_id=0)]})
+    body, status = ApiRouter(None, udp_transport=transport).handle_json("POST", "/api/loco/speed", request, state)
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 409)
+    self.assertEqual(payload["error"]["type"], "loco_control_denied")
+    self.assertEqual([item["payload"] for item in transport.requests], [expected_control])
+
 
 if __name__ == "__main__":
   unittest.main()

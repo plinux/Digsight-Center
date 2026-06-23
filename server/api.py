@@ -97,6 +97,7 @@ CURRENT_LIMIT_PARAM_TO_MODE = {
   models.DC_CURRENT_PARAM: models.TRACK_MODE_DC,
 }
 MODE_TO_CURRENT_LIMIT_PARAM = {mode: param for param, mode in CURRENT_LIMIT_PARAM_TO_MODE.items()}
+MAX_VEHICLE_IMAGE_BYTES = 1536 * 1024
 
 
 class ControllerParameterWriteError(RuntimeError):
@@ -960,10 +961,10 @@ class ApiRouter:
             "mode": mode,
             "param_address": param_address,
             "expected_raw_value": raw_value,
-            "write_request_hex": write_frame.hex(" "),
-            "read_request_hex": read_frame.hex(" "),
-            "write_responses": [frame.to_debug_dict() for frame in write_frames],
-            "read_responses": [frame.to_debug_dict() for frame in read_frames],
+            "write_request_hex": self._request_debug(write_frame),
+            "read_request_hex": self._request_debug(read_frame),
+            "write_responses": self._frame_debug_list(write_frames),
+            "read_responses": self._frame_debug_list(read_frames),
           },
         )
       parsed = parse_parameter_response(parameter_frame.payload)
@@ -975,8 +976,8 @@ class ApiRouter:
             "param_address": param_address,
             "expected_raw_value": raw_value,
             "actual": parsed,
-            "write_request_hex": write_frame.hex(" "),
-            "read_request_hex": read_frame.hex(" "),
+            "write_request_hex": self._request_debug(write_frame),
+            "read_request_hex": self._request_debug(read_frame),
           },
         )
       profile["current_limit_raw"] = raw_value
@@ -985,8 +986,8 @@ class ApiRouter:
         "param_address": param_address,
         "raw_value": raw_value,
         "current_limit_ma": int(current_limit_ma),
-        "write_request_hex": write_frame.hex(" "),
-        "read_request_hex": read_frame.hex(" "),
+        "write_request_hex": self._request_debug(write_frame),
+        "read_request_hex": self._request_debug(read_frame),
       })
     return results
 
@@ -1019,12 +1020,32 @@ class ApiRouter:
       {"warnings": ["booster_status_stale"]},
     ), 409
 
+  def _track_power_on_preflight_failure(self, controller: dict):
+    warnings = self._loco_control_readiness_warnings(controller)
+    if not self._default_safety_snapshot(controller)["booster_status_fresh"]:
+      warnings.append("booster_status_stale")
+    booster_status = controller.get("booster_status")
+    if not isinstance(booster_status, dict) or booster_status.get("source") != "dxdcnet_status_0x23":
+      warnings.append("booster_status_unconfirmed")
+    if not warnings:
+      return None
+    return response.failure(
+      "protocol_not_ready",
+      "请先连接控制器并读取最新状态",
+      "Power-on requires fresh controller status from the current session",
+      {"warnings": warnings},
+    ), 409
+
   def _handle_track_power(self, body: bytes, state: dict):
     request = self._json_body(body)
     if not isinstance(request.get("powered"), bool):
       return response.failure("invalid_track_power", "轨道输出参数无效", "powered must be true or false"), 400
     powered = bool(request["powered"])
     controller = state["controller"]
+    if powered:
+      preflight_failure = self._track_power_on_preflight_failure(controller)
+      if preflight_failure is not None:
+        return preflight_failure
     readiness_warnings = self._controller_readiness_warnings(controller)
     if readiness_warnings:
       return response.failure(
@@ -1151,12 +1172,14 @@ class ApiRouter:
       dc_direction_positive=dc_direction_positive,
     )
     try:
-      frames = self._exchange_dxdcnet(
+      adapter = self._controller_adapter(controller)
+      frames = adapter.send_track_output(
+        self.dxdcnet_session,
         controller,
         request_frame,
         timeout_seconds=float(controller.get("track_power_timeout_seconds", 1.5)),
-        max_packets=8,
         stop_when=self._build_raw_frame_matcher(CMD_DEVICE_STATUS, DEVICE_TYPE_BOOSTER),
+        transport=self.udp_transport,
       )
     except TimeoutError as exc:
       self._mark_controller_unreachable(state, "track_power_timeout")
@@ -1332,33 +1355,26 @@ class ApiRouter:
         DEVICE_TYPE_COMMAND_STATION,
       ))
 
-    request_debug = []
-    collected = {}
-    read_warnings = []
-    for name, request_frame, expected_command, expected_device_type in request_specs:
-      timeout_seconds = self._controller_info_timeout_seconds(controller, name)
-      try:
-        frames = self._exchange_dxdcnet(
-          controller,
-          request_frame,
-          timeout_seconds=timeout_seconds,
-          max_packets=8,
-          stop_when=self._build_raw_frame_matcher(expected_command, expected_device_type) if expected_command is not None else None,
-        )
-      except TimeoutError:
-        frames = []
-        read_warnings.append(f"{name}_timeout")
-      except (OSError, ValueError) as exc:
-        frames = []
-        read_warnings.append(f"{name}_transport_error:{exc}")
-      collected[name] = frames
-      request_debug.append({
-        "name": name,
-        "request_hex": request_frame.hex(" "),
-        "timeout_seconds": timeout_seconds,
-        "response_count": len(frames),
-        "responses": [frame.to_debug_dict() for frame in frames],
-      })
+    adapter = self._controller_adapter(controller)
+    read_info_result = adapter.read_info_frames(
+      self.dxdcnet_session,
+      controller,
+      [
+        {
+          "name": name,
+          "request_frame": request_frame,
+          "expected_command": expected_command,
+          "expected_device_type": expected_device_type,
+          "timeout_seconds": self._controller_info_timeout_seconds(controller, name),
+          "stop_when": self._build_raw_frame_matcher(expected_command, expected_device_type) if expected_command is not None else None,
+        }
+        for name, request_frame, expected_command, expected_device_type in request_specs
+      ],
+      transport=self.udp_transport,
+    )
+    collected = read_info_result["collected"]
+    read_warnings = read_info_result["warnings"]
+    request_debug = read_info_result["requests"]
 
     parsed = self._apply_controller_read_info(controller, track_mode, current_param, collected, read_warnings)
     controller["last_read_info_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -1427,12 +1443,14 @@ class ApiRouter:
 
   def _request_loco_control(self, controller: dict, address: int, client_id: int):
     request_frame = build_loco_control_request_frame(address=address, client_id=client_id)
-    frames = self._exchange_dxdcnet(
+    adapter = self._controller_adapter(controller)
+    frames = adapter.request_loco_control(
+      self.dxdcnet_session,
       controller,
       request_frame,
       timeout_seconds=float(controller.get("loco_control_request_timeout_seconds", 0.2)),
-      max_packets=4,
       stop_when=self._build_loco_control_ack_matcher(address),
+      transport=self.udp_transport,
     )
     return {
       "request_hex": request_frame.hex(" "),
@@ -1741,12 +1759,15 @@ class ApiRouter:
     context = cv_context or {}
     pom_address = context.get("pom_address")
     try:
-      frames = self._exchange_dxdcnet(
+      adapter = self._controller_adapter(controller)
+      frames = adapter.read_cv(
+        self.dxdcnet_session,
         controller,
         request_frame,
         timeout_seconds=timeout_seconds,
         max_packets=max_packets,
         stop_when=self._build_cv_value_matcher(client_id, cv_number, pom_address=pom_address),
+        transport=self.udp_transport,
       )
     except TimeoutError as exc:
       return self._failure(
@@ -1852,10 +1873,15 @@ class ApiRouter:
     last_busy_debug = None
     for attempt in range(retry_count + 1):
       try:
-        frames = self._exchange_dxdcnet(
+        adapter = self._controller_adapter(controller)
+        frames = adapter.write_cv(
+          self.dxdcnet_session,
           controller,
           request_frame,
+          timeout_seconds=None,
+          max_packets=32,
           stop_when=self._build_cv_ack_matcher(client_id),
+          transport=self.udp_transport,
         )
       except TimeoutError as exc:
         return self._failure(
@@ -2440,7 +2466,420 @@ class ApiRouter:
       "size": len(content),
     }), 200
 
+  def _handle_loco_control(self, route: str, body: bytes, state: dict):
+    blocked = self._loco_control_preflight(state, "数码车辆控制")
+    if blocked:
+      return blocked
+    request = self._json_body(body)
+    if self.vehicle_store:
+      self._refresh_state_vehicle_store_data(state)
+    vehicle = self._find_by_id(state["vehicles"], request.get("vehicle_id"))
+    if vehicle is None:
+      return response.failure("vehicle_not_found", "车辆不存在", str(request.get("vehicle_id", ""))), 404
 
+    try:
+      if route == "/api/loco/speed":
+        speed = validate_loco_speed(request.get("speed", 0))
+        direction = str(request.get("direction", "forward")).lower()
+        targets, control_mode = self._loco_speed_targets(state, vehicle)
+        target_results, error_response = self._execute_loco_targets(
+          state,
+          targets,
+          expected_feedback=CMD_LOCO_SPEED + 0x08,
+          build_request_frames=lambda target, address, client_id: self._loco_speed_request_frames(
+            target,
+            address,
+            client_id,
+            speed=speed,
+            direction=direction,
+          ),
+          feedback_from_frames=self._first_loco_speed_feedback,
+        )
+        if error_response:
+          return error_response
+        first_result = target_results[0]
+        return response.success({
+          "vehicle_id": vehicle.get("id"),
+          "address": first_result["address"],
+          "speed": speed,
+          "direction": direction,
+          "request_hex": first_result["request_hex"],
+          "feedback": first_result["feedback"],
+          "control_mode": control_mode,
+          "targets": target_results,
+        }), 200
+      else:
+        function_number = int(request.get("function_number"))
+        if function_number < 0 or function_number > 68:
+          raise ValueError("function number must be in F0..F68")
+        enabled = bool(request.get("enabled"))
+        function_states = dict(request.get("function_states") or {})
+        function_states[str(function_number)] = enabled
+        targets, control_mode = self._loco_function_targets(state, vehicle)
+    except (TypeError, ValueError) as exc:
+      return response.failure("invalid_loco_control", "车辆控制参数无效", str(exc)), 400
+
+    target_results, error_response = self._execute_loco_targets(
+      state,
+      targets,
+      expected_feedback=CMD_LOCO_FUNCTION + 0x08,
+      build_request_frames=lambda _target, address, client_id: (
+        build_loco_function_frames(
+          address=address,
+          function_states=function_states,
+          client_id=client_id,
+          function_number=function_number,
+        ),
+        {},
+      ),
+      feedback_from_frames=self._first_loco_function_feedback,
+    )
+    if error_response:
+      return error_response
+    first_result = target_results[0]
+    return response.success({
+      "vehicle_id": vehicle.get("id"),
+      "address": first_result["address"],
+      "function_number": function_number,
+      "enabled": enabled,
+      "request_hex": first_result["request_hex"],
+      "feedback": first_result["feedback"],
+      "control_mode": control_mode,
+      "targets": target_results,
+    }), 200
+
+  def _loco_control_preflight(self, state: dict, operation_name: str):
+    blocked = self._digital_operation_mode_failure(state["controller"], operation_name)
+    if blocked:
+      return blocked
+    stale_booster = self._fresh_booster_status_failure(state["controller"])
+    if stale_booster:
+      return stale_booster
+    readiness_warnings = self._loco_control_readiness_warnings(state["controller"])
+    if readiness_warnings:
+      return response.failure(
+        "protocol_not_ready",
+        "DXDCNet UDP 参数尚未确认",
+        f"不能发送真实{operation_name}命令",
+        {"warnings": readiness_warnings},
+      ), 409
+    booster_status = state["controller"].get("booster_status")
+    if not isinstance(booster_status, dict) or booster_status.get("source") != "dxdcnet_status_0x23":
+      return response.failure(
+        "protocol_not_ready",
+        "轨道状态尚未确认",
+        "需要先读取控制器或执行通电操作，得到 0x23 Booster 状态后再执行车辆控制",
+        {"warnings": ["booster_status_unconfirmed"]},
+      ), 409
+    if not booster_status.get("power_on", False):
+      return response.failure(
+        "track_power_required",
+        "车辆控制需要先给轨道通电",
+        "请先点击“通电”并确认状态灯变绿，再发送速度、方向或功能键命令",
+        {"warnings": ["track_power_required"]},
+      ), 409
+    if not booster_status.get("dcc_mode", False):
+      return response.failure(
+        "unsafe_track_mode",
+        "当前轨道不是 DCC 数码输出",
+        "车辆控制只允许在 N、HO 或 G 的 DCC 数码模式下执行",
+        {"warnings": ["main_track_not_dcc"]},
+      ), 409
+    return None
+
+  def _validated_control_request(self, controller: dict, address, client_id: int, target: dict):
+    address = validate_loco_address(address)
+    control_request = self._request_loco_control(controller, address, client_id)
+    control_feedback = control_request["feedback"]
+    if control_feedback and (
+      not control_feedback.get("granted")
+      or int(control_feedback.get("granted_device_type", -1)) != DEVICE_TYPE_THROTTLE
+      or int(control_feedback.get("granted_id", -1)) != int(client_id)
+    ):
+      return None, (response.failure(
+        "loco_control_denied",
+        "车辆控制权请求被拒绝",
+        f"车辆地址 {address} 当前不能由本手柄控制",
+        {
+          "vehicle_id": target.get("vehicle_id"),
+          "address": address,
+          "control_request_hex": control_request["request_hex"],
+          "control_feedback": control_feedback,
+        },
+      ), 409)
+    return {
+      "address": address,
+      "request_hex": control_request["request_hex"],
+      "feedback": control_feedback,
+    }, None
+
+  def _execute_loco_targets(
+    self,
+    state: dict,
+    targets: list[dict],
+    *,
+    expected_feedback: int,
+    build_request_frames,
+    feedback_from_frames,
+  ):
+    controller = state["controller"]
+    client_id = self._controller_client_id(controller)
+    target_results = []
+    for target in targets:
+      try:
+        control_request, error_response = self._validated_control_request(controller, target["address"], client_id, target)
+        if error_response:
+          return None, error_response
+        address = control_request["address"]
+        request_frames, target_result_extra = build_request_frames(target, address, client_id)
+      except (TypeError, ValueError) as exc:
+        return None, (response.failure("invalid_loco_control", "车辆控制参数无效", str(exc)), 400)
+      request_feedback = None
+      last_request_frame = None
+      try:
+        adapter = self._controller_adapter(controller)
+        for request_frame in request_frames:
+          last_request_frame = request_frame
+          send_method = adapter.send_loco_speed if expected_feedback == CMD_LOCO_SPEED + 0x08 else adapter.send_loco_function
+          frames = send_method(
+            self.dxdcnet_session,
+            controller,
+            request_frame,
+            timeout_seconds=float(controller.get("loco_control_timeout_seconds", 0.5)),
+            stop_when=self._build_raw_frame_matcher(expected_feedback),
+            transport=self.udp_transport,
+          )
+          request_feedback = feedback_from_frames(frames)
+      except TimeoutError as exc:
+        self._mark_controller_unreachable(state, "loco_control_timeout")
+        return None, (response.failure(
+          "loco_control_timeout",
+          "车辆控制命令超时",
+          str(exc),
+          {"request_hex": last_request_frame.hex(" ") if last_request_frame else "", "vehicle_id": target.get("vehicle_id")},
+        ), 504)
+      except (OSError, ValueError) as exc:
+        self._mark_controller_unreachable(state, "loco_control_transport_error")
+        return None, (response.failure(
+          "loco_control_transport_error",
+          "车辆控制通信失败",
+          str(exc),
+          {"request_hex": last_request_frame.hex(" ") if last_request_frame else "", "vehicle_id": target.get("vehicle_id")},
+        ), 502)
+      target_results.append({
+        **target,
+        "address": address,
+        "control_request_hex": control_request["request_hex"],
+        "control_feedback": control_request["feedback"],
+        **target_result_extra,
+        "request_hex": request_frames[-1].hex(" "),
+        "request_hexes": [frame.hex(" ") for frame in request_frames],
+        "feedback": request_feedback,
+      })
+
+    if not target_results:
+      return None, (response.failure("invalid_consist", "编组没有可控成员", "consist has no controllable members"), 400)
+    state["controller"]["controller_reachable"] = True
+    state["controller"]["controller_unreachable_reason"] = ""
+    self._save(state)
+    return target_results, None
+
+  def _loco_speed_request_frames(self, target: dict, address: int, client_id: int, *, speed: int, direction: str):
+    target_direction = self._consist_target_direction(direction, target)
+    return [build_loco_speed_frame(address=address, speed=speed, direction=target_direction, client_id=client_id)], {
+      "direction": target_direction,
+    }
+
+  def _loco_speed_targets(self, state: dict, vehicle: dict):
+    if int(vehicle.get("type", 0) or 0) == 3:
+      consist = self._find_controlled_consist(state, vehicle.get("id"))
+      if consist:
+        members = self._consist_member_targets(state, consist)
+        if members:
+          return members, "consist_vehicle"
+    return [self._vehicle_loco_target(vehicle)], "single"
+
+  def _loco_function_targets(self, state: dict, vehicle: dict):
+    consist = self._find_synced_function_consist(state, vehicle.get("id"))
+    if consist:
+      members = self._consist_member_targets(state, consist)
+      if members:
+        return members, "synced_consist_function"
+    return [self._vehicle_loco_target(vehicle)], "single"
+
+  def _find_controlled_consist(self, state: dict, vehicle_id):
+    if not vehicle_id:
+      return None
+    return next((consist for consist in state.get("consists", []) if consist.get("control_vehicle_id") == vehicle_id), None)
+
+  def _find_synced_function_consist(self, state: dict, vehicle_id):
+    if not vehicle_id:
+      return None
+    for consist in state.get("consists", []):
+      control_vehicle_id = consist.get("control_vehicle_id")
+      if not control_vehicle_id:
+        continue
+      control_vehicle = self._find_by_id(state.get("vehicles", []), control_vehicle_id)
+      if not control_vehicle or not control_vehicle.get("sync_function_control"):
+        continue
+      if control_vehicle_id == vehicle_id:
+        return consist
+      if any(member.get("vehicle_id") == vehicle_id for member in consist.get("members", [])):
+        return consist
+    return None
+
+  def _consist_member_targets(self, state: dict, consist: dict) -> list[dict]:
+    targets = []
+    for member in sorted(consist.get("members", []), key=lambda item: int(item.get("order", 0) or 0)):
+      member_vehicle = self._find_by_id(state.get("vehicles", []), member.get("vehicle_id"))
+      if member_vehicle is None:
+        continue
+      targets.append({
+        "vehicle_id": member_vehicle.get("id"),
+        "name": member_vehicle.get("name", ""),
+        "address": member.get("address", member_vehicle.get("address")),
+        "member_direction": member.get("direction", "forward"),
+      })
+    return targets
+
+  def _consist_target_direction(self, command_direction: str, target: dict) -> str:
+    direction = str(command_direction or "forward").lower()
+    if str(target.get("member_direction", "forward")).lower() != "reverse":
+      return direction
+    return "reverse" if direction == "forward" else "forward"
+
+  def _vehicle_loco_target(self, vehicle: dict) -> dict:
+    return {
+      "vehicle_id": vehicle.get("id"),
+      "name": vehicle.get("name", ""),
+      "address": vehicle.get("address"),
+    }
+
+  def _handle_create_consist(self, body: bytes, state: dict):
+    request = self._json_body(body)
+    members = request.get("members", [])
+    member_error = self._validate_consist_members(members)
+    if member_error:
+      return member_error
+    if self.vehicle_store:
+      self._apply_default_track_mode(request, state)
+      try:
+        consist = self.vehicle_store.create_consist(request)
+      except (TypeError, ValueError) as exc:
+        return response.failure("invalid_consist", "编组数据无效", str(exc)), 400
+      self._refresh_state_vehicle_store_data(state)
+      self._save(state)
+      return response.success(consist), 200
+    consist = {
+      "id": f"local-consist-{len(state['consists']) + 1}",
+      "source": "local",
+      "source_train_id": None,
+      "control_vehicle_id": request.get("control_vehicle_id"),
+      "name": request.get("name") or f"编组 {len(state['consists']) + 1}",
+      "members": members,
+      "note": request.get("note", ""),
+    }
+    state["consists"].append(consist)
+    self._save(state)
+    return response.success(consist), 200
+
+  def _handle_patch_consist(self, route: str, body: bytes, state: dict):
+    consist_id = self._resource_id(route)
+    if self.vehicle_store:
+      request = self._json_body(body)
+      if "members" in request:
+        member_error = self._validate_consist_members(request["members"])
+        if member_error:
+          return member_error
+      try:
+        consist = self.vehicle_store.update_consist(consist_id, request)
+      except (TypeError, ValueError) as exc:
+        return response.failure("invalid_consist", "编组数据无效", str(exc)), 400
+      if consist is None:
+        return response.failure("consist_not_found", "编组不存在", consist_id), 404
+      self._refresh_state_vehicle_store_data(state)
+      self._save(state)
+      return response.success(consist), 200
+    consist = self._find_by_id(state["consists"], consist_id)
+    if consist is None:
+      return response.failure("consist_not_found", "编组不存在", consist_id), 404
+    request = self._json_body(body)
+    if "members" in request:
+      member_error = self._validate_consist_members(request["members"])
+      if member_error:
+        return member_error
+      consist["members"] = request["members"]
+    for field in ("name", "note", "control_vehicle_id"):
+      if field in request:
+        consist[field] = request[field]
+    self._save(state)
+    return response.success(consist), 200
+
+  def _handle_delete_consist(self, route: str, state: dict):
+    consist_id = self._resource_id(route)
+    if self.vehicle_store:
+      if not self.vehicle_store.delete_consist(consist_id):
+        return response.failure("consist_not_found", "编组不存在", consist_id), 404
+      self._refresh_state_vehicle_store_data(state)
+      self._save(state)
+      return response.success({"id": consist_id, "deleted": True}), 200
+    original_count = len(state["consists"])
+    state["consists"] = [consist for consist in state["consists"] if consist.get("id") != consist_id]
+    if len(state["consists"]) == original_count:
+      return response.failure("consist_not_found", "编组不存在", consist_id), 404
+    self._save(state)
+    return response.success({"id": consist_id, "deleted": True}), 200
+
+  def _handle_consist_speed(self, route: str, body: bytes, state: dict):
+    blocked = self._loco_control_preflight(state, "数码编组控制")
+    if blocked:
+      return blocked
+    if self.vehicle_store:
+      self._refresh_state_vehicle_store_data(state)
+    route_parts = route.split("/")
+    consist_id = route_parts[3] if len(route_parts) > 3 else ""
+    consist = self._find_by_id(state.get("consists", []), consist_id)
+    if consist is None:
+      return response.failure("consist_not_found", "编组不存在", consist_id), 404
+    targets = self._consist_member_targets(state, consist)
+    if not targets:
+      return response.failure("invalid_consist", "编组没有可控成员", "consist has no controllable members"), 400
+    try:
+      if route.endswith("/stop"):
+        speed = 0
+        direction = str((self._json_body(body) if body else {}).get("direction", "forward")).lower()
+      else:
+        request = self._json_body(body)
+        speed = validate_loco_speed(request.get("speed", 0))
+        direction = str(request.get("direction", "forward")).lower()
+    except (TypeError, ValueError) as exc:
+      return response.failure("invalid_loco_control", "编组控制参数无效", str(exc)), 400
+    target_results, error_response = self._execute_loco_targets(
+      state,
+      targets,
+      expected_feedback=CMD_LOCO_SPEED + 0x08,
+      build_request_frames=lambda target, address, client_id: self._loco_speed_request_frames(
+        target,
+        address,
+        client_id,
+        speed=speed,
+        direction=direction,
+      ),
+      feedback_from_frames=self._first_loco_speed_feedback,
+    )
+    if error_response:
+      return error_response
+    first_result = target_results[0]
+    return response.success({
+      "vehicle_id": consist_id,
+      "address": first_result["address"],
+      "speed": speed,
+      "direction": direction,
+      "request_hex": first_result["request_hex"],
+      "feedback": first_result["feedback"],
+      "control_mode": "consist",
+      "targets": target_results,
+    }), 200
 
   def _save(self, state):
     if self.state_store:
@@ -2499,8 +2938,8 @@ class ApiRouter:
   def _validate_vehicle_image(self, file_name: str, content: bytes) -> str:
     if not content:
       raise ValueError("image content is empty")
-    if len(content) > 8 * 1024 * 1024:
-      raise ValueError("image is larger than 8MB")
+    if len(content) > MAX_VEHICLE_IMAGE_BYTES:
+      raise ValueError("image is larger than 1.5MB after compression")
     extension = Path(file_name).suffix.lower()
     signatures = {
       ".png": [b"\x89PNG\r\n\x1a\n"],
