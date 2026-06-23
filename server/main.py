@@ -19,6 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STARTED_AT = time.time()
 STATE_STORE = AppStateStore(PROJECT_ROOT / "data" / "app-state.json")
 VEHICLE_STORE = VehicleStore(PROJECT_ROOT / "data" / "vehicles.sqlite3")
+VEHICLE_STORE.ensure_initial_test_vehicles()
 API_ROUTER = ApiRouter(STATE_STORE, PROJECT_ROOT / "data" / "vehicle-images", vehicle_store=VEHICLE_STORE)
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8765
