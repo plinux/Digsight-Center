@@ -1,0 +1,18 @@
+{
+  "HO.z21": {
+    "fixture": "z21/HO.z21",
+    "vehicles": 91,
+    "functions": 1955,
+    "train_list": 16,
+    "control_station_controls": 32,
+    "control_station_routes": 2
+  },
+  "N.z21": {
+    "fixture": "z21/N.z21",
+    "vehicles": 71,
+    "functions": 1434,
+    "train_list": 28,
+    "control_station_controls": 0,
+    "control_station_routes": 0
+  }
+}
