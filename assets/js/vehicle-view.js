@@ -1914,3 +1914,499 @@ function formatCabAddressText(vehicle, context = {}) {
   return String(vehicle?.address || "--");
 }
 
+export function renderVehicleEditor(container, vehicle, functions, handlers = {}) {
+  container.replaceChildren();
+  if (!vehicle) {
+    container.hidden = true;
+    return;
+  }
+  if (Number(vehicle.type ?? 0) === 3) {
+    renderConsistVehicleEditor(container, vehicle, functions, handlers);
+    return;
+  }
+  container.hidden = false;
+  const toolbar = subviewToolbar("车辆编辑", handlers.onBack);
+  const basicInfo = document.createElement("div");
+  basicInfo.className = "vehicle-editor-basic-info";
+  const preview = renderVehicleImageUploader(vehicle, handlers);
+
+  const name = inputField("车辆名称", "text", vehicle.name || "");
+  const address = inputField("车辆编号", "number", vehicle.address || 3, {min: 1, max: 9999});
+  const fullName = inputField("完整名称", "text", vehicle.full_name || "");
+  const scale = selectField("比例", vehicle.track_mode || "ho", [["ho", "HO"], ["n", "N"]]);
+  const vehicleType = selectField("车辆类型", String(vehicle.type ?? 0), vehicleTypeOptions());
+  const energyType = renderVehicleKindChoiceField("能源类型", vehicle.energy_type || "electric", ["diesel", "electric", "steam", "hybrid"]);
+  const carSubtype = renderVehicleKindChoiceField("车厢子类", vehicle.car_subtype || "passenger", ["passenger", "engineering", "inspection", "crane"]);
+  const brand = inputField("模型品牌", "text", vehicle.brand || "");
+  const maxSpeed = inputField("最高速度 km/h", "number", vehicle.max_speed || "", {min: 0, max: 999});
+  const railway = inputField("铁路公司/局段", "text", vehicle.railway || "");
+  const articleNumber = inputField("货号", "text", vehicle.article_number || "");
+  const decoderType = inputField("芯片型号", "text", vehicle.decoder_type || "");
+  const description = inputField("备注", "text", vehicle.description || "");
+  const railwayOptions = createVehicleValueDatalist("vehicle-railway-options", handlers.railwayOptions || []);
+  const decoderTypeOptions = createVehicleValueDatalist("vehicle-decoder-type-options", handlers.decoderTypeOptions || []);
+  railway.input.setAttribute("list", "vehicle-railway-options");
+  decoderType.input.setAttribute("list", "vehicle-decoder-type-options");
+  name.label.classList.add("vehicle-field-name");
+  fullName.label.classList.add("vehicle-field-full-name");
+  scale.label.classList.add("vehicle-field-scale");
+  vehicleType.label.classList.add("vehicle-field-type");
+  energyType.label.classList.add("vehicle-kind-field", "vehicle-energy-field");
+  carSubtype.label.classList.add("vehicle-kind-field", "vehicle-car-subtype-field");
+  brand.label.classList.add("vehicle-field-brand");
+  maxSpeed.label.classList.add("vehicle-field-max-speed");
+  address.label.classList.add("vehicle-field-address");
+  railway.label.classList.add("vehicle-field-railway");
+  articleNumber.label.classList.add("vehicle-field-article-number");
+  decoderType.label.classList.add("vehicle-field-decoder-type");
+  const kindDynamicFields = document.createElement("div");
+  kindDynamicFields.className = "vehicle-kind-dynamic-fields";
+  const updateKindFieldVisibility = () => {
+    const selectedType = Number(vehicleType.input.value);
+    kindDynamicFields.replaceChildren();
+    if (selectedType === 0) {
+      energyType.input.disabled = false;
+      carSubtype.input.disabled = true;
+      kindDynamicFields.append(energyType.label);
+    } else if (selectedType === 1) {
+      energyType.input.disabled = true;
+      carSubtype.input.disabled = false;
+      kindDynamicFields.append(carSubtype.label);
+    } else {
+      energyType.input.disabled = true;
+      carSubtype.input.disabled = true;
+    }
+    kindDynamicFields.hidden = kindDynamicFields.childElementCount === 0;
+  };
+  vehicleType.input.addEventListener("change", () => {
+    updateKindFieldVisibility();
+    handlers.onTypeChange?.(Number(vehicleType.input.value));
+  });
+
+  const nameRow = document.createElement("div");
+  nameRow.className = "vehicle-editor-name-row";
+  nameRow.append(name.label, fullName.label);
+  const kindRow = document.createElement("div");
+  kindRow.className = "vehicle-editor-kind-row";
+  kindRow.append(vehicleType.label, kindDynamicFields);
+  const runningRow = document.createElement("div");
+  runningRow.className = "vehicle-editor-running-row";
+  runningRow.append(address.label, scale.label, maxSpeed.label, railway.label);
+  const modelRow = document.createElement("div");
+  modelRow.className = "vehicle-editor-model-row";
+  modelRow.append(brand.label, articleNumber.label, decoderType.label);
+  const categoryEditor = renderCategoryEditor(vehicle, handlers.categories || []);
+  basicInfo.append(
+    nameRow,
+    kindRow,
+    runningRow,
+    modelRow,
+    description.label,
+    categoryEditor
+  );
+  updateKindFieldVisibility();
+
+  const functionEditor = renderFunctionTable(functions, handlers.functionIconCatalog || DEFAULT_FUNCTION_ICON_CATALOG);
+  const actionRow = renderVehicleEditorActionRow(handlers);
+  const {form} = renderVehicleEditorLayout({
+    toolbar,
+    preview,
+    basicInfo,
+    functionPanel: functionEditor,
+    actionRow,
+    formClassName: "stack-form vehicle-editor-form",
+    leadingContent: [railwayOptions, decoderTypeOptions]
+  });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    handlers.onSave?.({
+      name: name.input.value.trim(),
+      address: Number(address.input.value),
+      full_name: fullName.input.value.trim(),
+      track_mode: scale.input.value,
+      type: Number(vehicleType.input.value),
+      sync_function_control: false,
+      energy_type: Number(vehicleType.input.value) === 0 ? energyType.input.value : "",
+      car_subtype: Number(vehicleType.input.value) === 1 ? carSubtype.input.value : "",
+      brand: brand.input.value.trim(),
+      max_speed: Number(maxSpeed.input.value || 0) || null,
+      railway: railway.input.value.trim(),
+      article_number: articleNumber.input.value.trim(),
+      decoder_type: decoderType.input.value.trim(),
+      description: description.input.value.trim(),
+      image_path: vehicle.image_path || "",
+      category_ids: collectCategoryIds(categoryEditor),
+      functions: collectFunctions(functionEditor)
+    });
+  });
+
+  container.append(toolbar, form);
+}
+
+function renderConsistVehicleEditor(container, vehicle, functions, handlers = {}) {
+  container.hidden = false;
+  const toolbar = subviewToolbar("重联/编组编辑", handlers.onBack);
+  const basicInfo = document.createElement("div");
+  basicInfo.className = "vehicle-editor-basic-info vehicle-consist-basic-info";
+  const preview = renderVehicleImageUploader(vehicle, handlers);
+  const existingConsist = findConsistForVehicle(vehicle.id, handlers.consists || []);
+  const name = inputField("编组名称", "text", vehicle.name || existingConsist?.name || "");
+  const scale = selectField("比例", vehicle.track_mode || "ho", [["ho", "HO"], ["n", "N"]]);
+  const consistKind = renderConsistKindChoiceField(vehicle.consist_kind || existingConsist?.consist_kind || "multiple_unit");
+  const syncFunctionControl = checkboxField("同步控制功能", Boolean(vehicle.sync_function_control));
+  syncFunctionControl.label.classList.add("sync-toggle-inline");
+  name.label.classList.add("vehicle-field-name");
+  scale.label.classList.add("vehicle-field-scale");
+  const categoryEditor = renderCategoryEditor(vehicle, handlers.categories || []);
+  const memberEditor = renderConsistMemberEditor(existingConsist, vehicle, handlers.vehicles || []);
+
+  const functionPanel = document.createElement("div");
+  functionPanel.className = "vehicle-consist-function-panel";
+  let functionEditor = renderFunctionTable(functions, handlers.functionIconCatalog || DEFAULT_FUNCTION_ICON_CATALOG);
+  const syncFirstMember = document.createElement("button");
+  syncFirstMember.type = "button";
+  syncFirstMember.textContent = "同步编组内第一台车功能表";
+  syncFirstMember.addEventListener("click", () => {
+    const firstMember = collectConsistMembers(memberEditor)[0];
+    if (!firstMember) {
+      return;
+    }
+    const firstFunctions = functionsForVehicle(handlers.functionsByVehicle, firstMember.vehicle_id);
+    functionEditor = renderFunctionTable(firstFunctions, handlers.functionIconCatalog || DEFAULT_FUNCTION_ICON_CATALOG);
+    functionPanel.replaceChildren(syncFirstMember, functionEditor);
+  });
+  functionPanel.append(syncFirstMember, functionEditor);
+
+  const updateConsistFormState = () => {
+    functionPanel.hidden = !syncFunctionControl.input.checked;
+  };
+  syncFunctionControl.input.addEventListener("change", updateConsistFormState);
+  memberEditor.addEventListener("change", updateConsistFormState);
+  memberEditor.addEventListener("click", () => globalThis.setTimeout(updateConsistFormState, 0));
+  updateConsistFormState();
+
+  const actionRow = renderVehicleEditorActionRow(handlers);
+
+  const consistNameRow = document.createElement("div");
+  consistNameRow.className = "vehicle-editor-name-row vehicle-consist-name-row";
+  consistNameRow.append(name.label, scale.label, syncFunctionControl.label);
+  const consistKindRow = document.createElement("div");
+  consistKindRow.className = "vehicle-editor-kind-row vehicle-consist-kind-row";
+  consistKindRow.append(consistKind.label);
+  basicInfo.append(
+    consistNameRow,
+    consistKindRow,
+    categoryEditor,
+    memberEditor
+  );
+  const {form} = renderVehicleEditorLayout({
+    toolbar,
+    preview,
+    basicInfo,
+    functionPanel,
+    actionRow,
+    formClassName: "stack-form vehicle-consist-editor",
+    layoutClassName: "vehicle-consist-editor-layout",
+    leftColumnClassName: "vehicle-editor-left-column vehicle-consist-editor-left-column",
+    functionColumnClassName: "vehicle-editor-function-column vehicle-consist-editor-function-column"
+  });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const members = collectConsistMembers(memberEditor);
+    handlers.onSave?.({
+      name: name.input.value.trim(),
+      address: Number(vehicle.address || 3),
+      full_name: "",
+      track_mode: scale.input.value,
+      type: 3,
+      sync_function_control: syncFunctionControl.input.checked,
+      energy_type: "",
+      car_subtype: "",
+      consist_kind: consistKind.input.value,
+      max_speed: null,
+      railway: "",
+      article_number: "",
+      decoder_type: "",
+      description: "",
+      image_path: vehicle.image_path || "",
+      category_ids: collectCategoryIds(categoryEditor),
+      functions: syncFunctionControl.input.checked ? collectFunctions(functionEditor) : [],
+      consist_members: collectConsistMembers(memberEditor),
+      consist: {
+        id: existingConsist?.id || "",
+        name: name.input.value.trim(),
+        track_mode: scale.input.value,
+        consist_kind: consistKind.input.value,
+        members
+      }
+    });
+  });
+  container.append(toolbar, form);
+}
+
+function renderVehicleEditorLayout({
+  toolbar,
+  preview,
+  basicInfo,
+  functionPanel,
+  actionRow,
+  leadingContent = [],
+  formClassName = "stack-form vehicle-editor-form",
+  layoutClassName = "vehicle-editor-layout",
+  leftColumnClassName = "vehicle-editor-left-column",
+  functionColumnClassName = "vehicle-editor-function-column"
+}) {
+  const form = document.createElement("form");
+  form.className = formClassName;
+  const layout = document.createElement("div");
+  layout.className = `editor-layout ${layoutClassName}`;
+  const leftColumn = document.createElement("div");
+  leftColumn.className = leftColumnClassName;
+  const functionColumn = document.createElement("section");
+  functionColumn.className = functionColumnClassName;
+  leftColumn.append(preview, basicInfo, actionRow);
+  functionColumn.append(functionPanel);
+  layout.append(leftColumn, functionColumn);
+  form.append(...leadingContent, layout);
+  return {toolbar, form, layout, leftColumn, functionColumn};
+}
+
+function renderVehicleEditorActionRow(handlers = {}) {
+  const actionRow = document.createElement("div");
+  actionRow.className = "vehicle-editor-actions";
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.textContent = "保存车辆";
+  const deleteVehicleButton = document.createElement("button");
+  deleteVehicleButton.type = "button";
+  deleteVehicleButton.className = "danger";
+  deleteVehicleButton.textContent = handlers.isNew ? "取消" : "删除车辆";
+  deleteVehicleButton.addEventListener("click", () => handlers.onDelete?.());
+  actionRow.append(save, deleteVehicleButton);
+  return actionRow;
+}
+
+function renderConsistMemberEditor(consist, controlVehicle, vehicles) {
+  const fieldset = document.createElement("fieldset");
+  fieldset.className = "vehicle-consist-member-list";
+  const legend = document.createElement("legend");
+  legend.textContent = "编组成员";
+  const rows = document.createElement("div");
+  rows.className = "vehicle-consist-member-rows";
+  const availableVehicles = vehicles.filter((vehicle) => {
+    return String(vehicle.id) !== String(controlVehicle.id)
+      && Number(vehicle.type ?? 0) !== 3
+      && String(vehicle.track_mode || "").toLowerCase() === String(controlVehicle.track_mode || "").toLowerCase();
+  });
+  const appendRow = (member = {}) => {
+    const row = document.createElement("div");
+    row.className = "vehicle-consist-member-row";
+    const vehicleSelect = document.createElement("select");
+    vehicleSelect.className = "vehicle-consist-member-select";
+    vehicleSelect.dataset.pendingValue = String(member.vehicle_id || "");
+    const thumb = renderConsistMemberImage(member.vehicle_id, availableVehicles);
+    vehicleSelect.addEventListener("change", () => {
+      updateConsistMemberImage(thumb, vehicleSelect.value, availableVehicles);
+      refreshConsistMemberOptions(rows, availableVehicles);
+      fieldset.dispatchEvent(new Event("change", {bubbles: true}));
+    });
+    const reverse = toggleButtonField("反转运行", member.direction === "reverse");
+    reverse.button.addEventListener("click", () => fieldset.dispatchEvent(new Event("change", {bubbles: true})));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "移除";
+    remove.addEventListener("click", () => {
+      row.remove();
+      refreshConsistMemberOptions(rows, availableVehicles);
+      fieldset.dispatchEvent(new Event("change", {bubbles: true}));
+    });
+    row.append(thumb, vehicleSelect, reverse.button, remove);
+    rows.append(row);
+    refreshConsistMemberOptions(rows, availableVehicles);
+  };
+  for (const member of consist?.members || []) {
+    appendRow(member);
+  }
+  const add = document.createElement("button");
+  add.type = "button";
+  add.textContent = "添加车辆";
+  add.addEventListener("click", () => {
+    appendRow();
+    refreshConsistMemberOptions(rows, availableVehicles);
+    fieldset.dispatchEvent(new Event("change", {bubbles: true}));
+  });
+  if (!rows.childElementCount) {
+    appendRow();
+  }
+  fieldset.append(legend, rows, add);
+  return fieldset;
+}
+
+function refreshConsistMemberOptions(rows, availableVehicles) {
+  const selects = Array.from(rows.querySelectorAll(".vehicle-consist-member-select"));
+  const selectedVehicleIds = new Set(selects.map((select) => select.value || select.dataset.pendingValue || "").filter(Boolean));
+  for (const select of selects) {
+    const currentValue = select.value || select.dataset.pendingValue || "";
+    select.replaceChildren(option("", "选择车辆"));
+    for (const candidate of availableVehicles) {
+      const candidateId = String(candidate.id);
+      if (selectedVehicleIds.has(candidateId) && candidateId !== currentValue) {
+        continue;
+      }
+      select.append(option(candidateId, renderConsistMemberOptionLabel(candidate)));
+    }
+    select.value = currentValue;
+    select.dataset.pendingValue = "";
+  }
+}
+
+function renderConsistMemberOptionLabel(vehicle) {
+  return `${vehicle.name || vehicle.address} / ${vehicle.address || "-"}`;
+}
+
+function renderConsistMemberImage(vehicleId, availableVehicles) {
+  const thumb = document.createElement("span");
+  thumb.className = "vehicle-consist-member-thumb";
+  updateConsistMemberImage(thumb, vehicleId, availableVehicles);
+  return thumb;
+}
+
+function updateConsistMemberImage(thumb, vehicleId, availableVehicles) {
+  const vehicle = (availableVehicles || []).find((candidate) => String(candidate.id) === String(vehicleId || ""));
+  thumb.replaceChildren();
+  if (vehicle) {
+    thumb.append(vehicleImage(vehicle));
+    thumb.title = vehicle.name || String(vehicle.address || "");
+  } else {
+    const placeholder = document.createElement("span");
+    placeholder.textContent = "-";
+    thumb.append(placeholder);
+    thumb.removeAttribute("title");
+  }
+}
+
+function collectConsistMembers(memberEditor) {
+  return Array.from(memberEditor.querySelectorAll(".vehicle-consist-member-row"))
+    .map((row, index) => {
+      const vehicleId = row.querySelector(".vehicle-consist-member-select")?.value || "";
+      const reverse = row.querySelector(".vehicle-consist-reverse-button")?.getAttribute("aria-pressed") === "true";
+      return vehicleId ? {
+        vehicle_id: vehicleId,
+        direction: reverse ? "reverse" : "forward",
+        order: index + 1
+      } : null;
+    })
+    .filter(Boolean);
+}
+
+function findConsistForVehicle(vehicleId, consists) {
+  return (consists || []).find((consist) => String(consist.control_vehicle_id || "") === String(vehicleId || "")) || null;
+}
+
+function functionsForVehicle(functionsByVehicle, vehicleId) {
+  if (functionsByVehicle instanceof Map) {
+    return functionsByVehicle.get(vehicleId) || functionsByVehicle.get(String(vehicleId)) || [];
+  }
+  return functionsByVehicle?.[vehicleId] || functionsByVehicle?.[String(vehicleId)] || [];
+}
+
+function renderVehicleImageUploader(vehicle, handlers) {
+  const preview = document.createElement("div");
+  preview.className = "image-preview vehicle-image-upload";
+  const fileInput = document.createElement("input");
+  fileInput.type = "file";
+  fileInput.accept = "image/png,image/jpeg,image/webp";
+  fileInput.hidden = true;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "vehicle-image-upload-button";
+  if (vehicle?.image_path) {
+    button.append(vehicleImage(vehicle));
+  } else {
+    const add = document.createElement("span");
+    add.className = "vehicle-image-add";
+    add.textContent = "+";
+    const text = document.createElement("span");
+    text.textContent = "添加图片";
+    button.append(add, text);
+  }
+  button.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", () => {
+    const file = fileInput.files?.[0];
+    if (file) {
+      handlers.onImageFile?.(file);
+    }
+    fileInput.value = "";
+  });
+  preview.append(button, fileInput);
+  return preview;
+}
+
+export function renderLocoControl(container, vehicle, functions, control, handlers = {}) {
+  container.replaceChildren();
+  if (!vehicle) {
+    container.hidden = true;
+    return;
+  }
+  container.hidden = false;
+  const toolbar = subviewToolbar("车辆控制", handlers.onBack);
+  const shell = document.createElement("div");
+  shell.className = "loco-control";
+  const imagePanel = document.createElement("div");
+  imagePanel.className = "image-preview large";
+  imagePanel.append(vehicleImage(vehicle));
+
+  const speedPanel = document.createElement("section");
+  speedPanel.className = "speed-panel";
+  const name = document.createElement("h2");
+  name.textContent = `${vehicle.name} / ${vehicle.address}`;
+  const gauge = document.createElement("meter");
+  gauge.className = "speed-gauge";
+  gauge.min = "0";
+  gauge.max = "126";
+  gauge.value = String(control.speed || 0);
+  const speedText = document.createElement("strong");
+  speedText.textContent = `${control.speed || 0}`;
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.min = "0";
+  slider.max = "126";
+  slider.value = String(control.speed || 0);
+  slider.addEventListener("input", () => handlers.onSpeed?.(Number(slider.value), control.direction || "forward"));
+  const directionRow = document.createElement("div");
+  directionRow.className = "segmented";
+  const reverse = segmentButton("←", control.direction === "reverse", () => handlers.onDirection?.("reverse"));
+  reverse.title = "后退";
+  reverse.setAttribute("aria-label", "后退");
+  const forward = segmentButton("→", control.direction !== "reverse", () => handlers.onDirection?.("forward"));
+  forward.title = "前进";
+  forward.setAttribute("aria-label", "前进");
+  directionRow.append(reverse, forward);
+  const stop = document.createElement("button");
+  stop.type = "button";
+  stop.className = "danger";
+  stop.textContent = "紧急停车";
+  stop.addEventListener("click", () => handlers.onEmergencyStop?.());
+  speedPanel.append(name, gauge, speedText, slider, directionRow, stop);
+
+  const functionPanel = document.createElement("section");
+  functionPanel.className = "function-grid";
+  const functionIconCatalog = handlers.functionIconCatalog || DEFAULT_FUNCTION_ICON_CATALOG;
+  for (const fn of functions) {
+    const button = document.createElement("button");
+    button.type = "button";
+    const icon = resolveFunctionIcon(fn, functionIconCatalog);
+    appendFunctionButtonContent(button, fn, icon);
+    button.addEventListener("click", () => handlers.onFunction?.(fn.function_number, true));
+    functionPanel.append(button);
+  }
+  if (!functions.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "暂无功能键";
+    functionPanel.append(empty);
+  }
+  shell.append(imagePanel, speedPanel, functionPanel);
+  container.append(toolbar, shell);
+}
+

@@ -228,6 +228,9 @@ function editingVehicle() {
   if (appState.editingVehicleId === NEW_VEHICLE_ID) {
     return appState.editingVehicleDraft;
   }
+  if (appState.editingVehicleDraft?.id === appState.editingVehicleId) {
+    return appState.editingVehicleDraft;
+  }
   return vehiclesForOperationMode(currentOperationMode()).find((vehicle) => vehicle.id === appState.editingVehicleId) || null;
 }
 
@@ -917,6 +920,29 @@ function buildVehicleEditorHandlers(vehicle) {
     decoderTypeOptions: editorOptions.decoderTypeOptions,
     functionIconCatalog,
     onBack: showVehicleRegistry,
+    onTypeChange: (type) => {
+      appState.editingVehicleDraft = {...vehicle, ...(appState.editingVehicleDraft || {}), type};
+      if (type === 3) {
+        appState.editingVehicleDraft.sync_function_control = Boolean(appState.editingVehicleDraft.sync_function_control);
+        appState.editingVehicleDraft.consist_kind = appState.editingVehicleDraft.consist_kind || "multiple_unit";
+        appState.editingVehicleDraft.energy_type = "";
+        appState.editingVehicleDraft.car_subtype = "";
+      } else {
+        appState.editingVehicleDraft.sync_function_control = false;
+        appState.editingVehicleDraft.consist_kind = "";
+        if (type === 0) {
+          appState.editingVehicleDraft.energy_type = appState.editingVehicleDraft.energy_type || "electric";
+          appState.editingVehicleDraft.car_subtype = "";
+        } else if (type === 1) {
+          appState.editingVehicleDraft.energy_type = "";
+          appState.editingVehicleDraft.car_subtype = appState.editingVehicleDraft.car_subtype || "passenger";
+        } else {
+          appState.editingVehicleDraft.energy_type = "";
+          appState.editingVehicleDraft.car_subtype = "";
+        }
+      }
+      renderAll();
+    },
     onSave: async (changes) => {
       try {
         const existingConsist = consistForVehicle(vehicle.id);
