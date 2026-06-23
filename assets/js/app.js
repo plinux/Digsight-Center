@@ -789,3 +789,387 @@ async function setProgrammingTarget(target) {
   }
 }
 
+function buildCabWorkspaceHandlers(operationMode, leftVehicles, rightVehicles) {
+  if (isDcOperationMode(operationMode)) {
+    return {
+      emptyText: "DC 模式不显示车辆"
+    };
+  }
+  return {
+    emptyText: `当前 ${operationModeName(operationMode)} 模式暂无车辆，请导入对应的 Z21 配置文件`,
+    onActivateCab: activateCab,
+    onSelectVehicle: selectCabVehicle,
+    selectionMode: appState.vehicleSelectionMode,
+    selectedVehicleIds: appState.selectedVehicleIds,
+    onToggleVehicleSelection: toggleVehicleSelection,
+    onEdit: showVehicleEditor,
+    onToggleCabExpanded: toggleCabExpanded,
+    onToggleCabFunctionNumbers: toggleCabFunctionNumbers,
+    onToggleCabFunctionLabels: toggleCabFunctionLabels,
+    onSwitchConsistMember: switchCabConsistMember,
+    cabVehicles: {left: leftVehicles, right: rightVehicles},
+    vehicles: appState.vehicles || [],
+    consists: appState.consists || [],
+    categories: appState.categories || [],
+    onCabCategoryFilter: (cabId, categoryId) => {
+      const cab = appState.cabs[cabId];
+      cab.categoryId = categoryId;
+      renderAll();
+    },
+    onCabSortChange: (cabId, sortKey, sortDirection) => {
+      const cab = appState.cabs[cabId];
+      cab.sortKey = sortKey;
+      cab.sortDirection = sortDirection;
+      renderAll();
+    },
+    onVehicleDragStart: (_cabId, vehicleId, event) => {
+      draggedVehicleId = vehicleId;
+      event.dataTransfer?.setData("text/plain", vehicleId);
+    },
+    onVehicleDragOver: (_cabId, _vehicleId, event) => {
+      event.preventDefault();
+    },
+    onVehicleDrop: async (cabId, vehicleId, event, orderedVehicleIds = []) => {
+      event.preventDefault();
+      try {
+        await saveCustomVehicleOrder(cabId, vehicleId, orderedVehicleIds);
+      } catch (error) {
+        setStatus(formatError(error));
+      } finally {
+        draggedVehicleId = "";
+      }
+    },
+    onDirection: async (cabId, direction) => {
+      const cab = appState.cabs[cabId];
+      cab.direction = direction;
+      await sendCabSpeed(cabId, cab.speed, direction);
+    },
+    onSpeedPreview: (cabId, speed, direction) => {
+      const cab = appState.cabs[cabId];
+      if (!cab) {
+        return;
+      }
+      appState.activeCabId = cabId;
+      cab.speed = clampSpeed(speed);
+      cab.direction = direction;
+      syncLegacyControlFromCab(cabId);
+    },
+    onSpeed: async (cabId, speed, direction) => {
+      const cab = appState.cabs[cabId];
+      cab.speed = clampSpeed(speed);
+      cab.direction = direction;
+      await sendCabSpeed(cabId, cab.speed, direction);
+    },
+    onEmergencyStop: async (cabId) => {
+      const cab = appState.cabs[cabId];
+      cab.speed = 0;
+      await sendCabSpeed(cabId, 0, cab.direction);
+    },
+    onFunction: async (cabId, functionNumber, eventType = "click") => {
+      await sendCabFunctionByMode(cabId, functionNumber, eventType);
+    },
+    functionIconCatalog
+  };
+}
+
+function buildVehicleEditorHandlers(vehicle) {
+  const editorOptions = vehicleEditorOptions(appState.vehicles);
+  return {
+    isNew: vehicle?.id === NEW_VEHICLE_ID,
+    categories: appState.categories || [],
+    vehicles: appState.vehicles || [],
+    consists: appState.consists || [],
+    functionsByVehicle: functionsByVehicle(),
+    railwayOptions: editorOptions.railwayOptions,
+    decoderTypeOptions: editorOptions.decoderTypeOptions,
+    functionIconCatalog,
+    onBack: showVehicleRegistry,
+    onSave: async (changes) => {
+      try {
+        const existingConsist = consistForVehicle(vehicle.id);
+        let savedVehicle = null;
+        if (vehicle.id === NEW_VEHICLE_ID) {
+          savedVehicle = await createVehicle(changes);
+          setStatus("车辆已添加");
+        } else {
+          savedVehicle = await updateVehicle(vehicle.id, changes);
+          setStatus("车辆已保存");
+        }
+        if (Number(changes.type) === 3) {
+          await saveVehicleConsist(changes, savedVehicle.id || vehicle.id);
+          setStatus(existingConsist ? "重联/编组已保存" : "重联/编组已创建");
+        }
+        appState.editingVehicleId = "";
+        appState.editingVehicleDraft = null;
+        appState.vehicleSubview = "registry";
+        await refreshState();
+      } catch (error) {
+        setStatus(formatError(error));
+      }
+    },
+    onDelete: async () => {
+      if (vehicle.id === NEW_VEHICLE_ID) {
+        showVehicleRegistry();
+        return;
+      }
+      const confirmed = typeof globalThis.confirm === "function"
+        ? globalThis.confirm(`确认删除车辆 ${vehicle.name || vehicle.address}？`)
+        : false;
+      if (!confirmed) {
+        return;
+      }
+      try {
+        await deleteVehicle(vehicle.id);
+        setStatus("车辆已删除");
+        showVehicleRegistry();
+        await refreshState();
+      } catch (error) {
+        setStatus(formatError(error));
+      }
+    },
+    onImageFile: async (file) => {
+      try {
+        const result = await uploadVehicleImage(file);
+        if (vehicle.id === NEW_VEHICLE_ID) {
+          appState.editingVehicleDraft.image_path = result.image_path;
+          setStatus("车辆图片已上传，保存车辆后生效");
+          renderAll();
+        } else {
+          await updateVehicle(vehicle.id, {image_path: result.image_path});
+          setStatus("车辆图片已更新");
+          await refreshState();
+        }
+      } catch (error) {
+        setStatus(formatError(error));
+      }
+    }
+  };
+}
+
+function buildCvPanelHandlers(vehicle) {
+  return {
+    onReadChipInfo: readChipInfo,
+    onResetDecoder: resetDecoder,
+    onReadKnownCv: readKnownCvList,
+    onReadFullCv: readFullCvList,
+    onCancelCvRead: cancelCurrentCvRead,
+    onExportCvMarkdown: () => {
+      downloadTextFile(cvExportFileName("md"), buildCvMarkdown(cvState.cvList), "text/markdown;charset=utf-8");
+    },
+    onExportCvCsv: () => {
+      downloadTextFile(cvExportFileName("csv"), buildCvCsv(cvState.cvList), "text/csv;charset=utf-8");
+    },
+    onReadAddress: async () => {
+      try {
+        const targetPayload = cvProgrammingRequest("地址读取");
+        if (!targetPayload) {
+          return;
+        }
+        const safetyReady = await refreshCvSafety("地址读取", targetPayload.programming_target);
+        if (!safetyReady) {
+          return;
+        }
+        const result = await runCvRequestWithSafetyRetry("地址读取", targetPayload.programming_target, () => readAddress(vehicle?.id, targetPayload));
+        cvState.address = result.address;
+        setStatus(`地址：${result.address}`);
+        await refreshState();
+      } catch (error) {
+        setStatus(formatError(error));
+      }
+    },
+    onWriteAddress: async (address) => {
+      try {
+        const targetPayload = cvProgrammingRequest("地址写入");
+        if (!targetPayload) {
+          return;
+        }
+        const confirmed = globalThis.confirm ? globalThis.confirm(`确认写入车辆地址 ${address}？`) : true;
+        if (!confirmed) {
+          return;
+        }
+        const safetyReady = await refreshCvSafety("地址写入", targetPayload.programming_target);
+        if (!safetyReady) {
+          return;
+        }
+        const result = await runCvRequestWithSafetyRetry("地址写入", targetPayload.programming_target, () => writeAddress(vehicle?.id, address, true, targetPayload));
+        cvState.address = result.address;
+        setStatus(`地址 ${result.address} 已写入`);
+        await refreshState();
+      } catch (error) {
+        setStatus(formatError(error));
+      }
+    },
+    onReadCv: async (cvNumber) => {
+      cvState.cvNumber = cvNumber;
+      try {
+        const targetPayload = cvProgrammingRequest("CV 读取");
+        if (!targetPayload) {
+          return;
+        }
+        const safetyReady = await refreshCvSafety("CV 读取", targetPayload.programming_target);
+        if (!safetyReady) {
+          return;
+        }
+        const result = await runCvRequestWithSafetyRetry("CV 读取", targetPayload.programming_target, () => readCv(cvNumber, targetPayload));
+        cvState.results[cvNumber] = result.value;
+        cvState.value = Number(result.value);
+        setStatus(`CV${cvNumber}: ${result.value}`);
+        renderAll();
+      } catch (error) {
+        setStatus(formatError(error));
+      }
+    },
+    onWriteCv: async (cvNumber, value) => {
+      cvState.cvNumber = cvNumber;
+      cvState.value = value;
+      try {
+        const targetPayload = cvProgrammingRequest("CV 写入");
+        if (!targetPayload) {
+          return;
+        }
+        const confirmed = globalThis.confirm ? globalThis.confirm(`确认写入 CV${cvNumber}=${value}？`) : true;
+        if (!confirmed) {
+          return;
+        }
+        const safetyReady = await refreshCvSafety("CV 写入", targetPayload.programming_target);
+        if (!safetyReady) {
+          return;
+        }
+        await runCvRequestWithSafetyRetry("CV 写入", targetPayload.programming_target, () => writeCv(cvNumber, value, true, targetPayload));
+        setStatus(`CV${cvNumber} 写入完成`);
+      } catch (error) {
+        setStatus(formatError(error));
+      }
+    }
+  };
+}
+
+function buildControllerSettingsHandlers() {
+  return {
+    onReadInfo: async () => {
+      try {
+        await syncControllerEndpoint();
+        const result = await readControllerInfo();
+        setStatus(controllerReadStatusMessage(result), controllerReadStatusDetail(result));
+        await refreshState();
+      } catch (error) {
+        setStatus(formatError(error));
+      }
+    },
+    onSave: async (changes) => {
+      try {
+        const result = await saveControllerSettings({...changes, apply_to_device: true});
+        setStatus(result.applied_to_device ? "参数已保存到控制器" : "参数已保存为本地待应用配置");
+        await refreshState();
+      } catch (error) {
+        setStatus(formatError(error));
+      }
+    }
+  };
+}
+
+function renderAll() {
+  const operationMode = currentOperationMode();
+  const digitalMode = isDigitalOperationMode(operationMode);
+  const isDcMode = isDcOperationMode(operationMode);
+  const visibleVehicles = vehiclesForOperationMode(operationMode);
+  const visibleFunctions = functionsForVehicles(visibleVehicles);
+  const leftVehicles = sortCabVehicles(filterCabVehicles(visibleVehicles, appState.cabs.left), appState.cabs.left);
+  const rightVehicles = sortCabVehicles(filterCabVehicles(visibleVehicles, appState.cabs.right), appState.cabs.right);
+  syncCabSelectionForVisibleVehicles(visibleVehicles);
+  updateVehicleHeader(visibleVehicles, operationMode);
+  syncVehicleSelectionToolbar(visibleVehicles);
+  if (!digitalMode && appState.activeView === "cv") {
+    appState.activeView = "vehicle";
+  }
+  if (!digitalMode && appState.vehicleSubview !== "registry") {
+    appState.vehicleSubview = "registry";
+  }
+  renderControllerHeader(elements, appState.controller, {busy: isGatewayBusy(), controllerInfo: appState.controllerInfo});
+  setNavState();
+  setVehicleSubviewState();
+  elements.vehicleControlView.classList.toggle("dc-control-mode", isDcMode);
+  if (elements.importStrip) {
+    elements.importStrip.hidden = isDcMode;
+  }
+
+  if (isDcMode) {
+    appState.vehicleSubview = "registry";
+    setVehicleSubviewState();
+    elements.vehicleCount.textContent = "DC";
+    elements.vehicleModeHint.textContent = "电压控制";
+    elements.vehicleEditView.hidden = true;
+    elements.vehicleControlDetailView.hidden = true;
+    renderDcControl(elements.vehicleRegistry, {
+      ...appState.dcControl,
+      maxVoltageV: currentTrackProfile("dc").max_voltage_v || 15.2
+    }, {
+      onVoltagePreview: (voltageV) => {
+        appState.dcControl.voltageV = voltageV;
+      },
+      onVoltage: async (voltageV, direction) => {
+        appState.dcControl.voltageV = voltageV;
+        appState.dcControl.direction = direction;
+        await sendDcControl();
+      },
+      onDirection: async (direction) => {
+        appState.dcControl.direction = direction;
+        await sendDcControl();
+      },
+      onEmergencyStop: async () => {
+        appState.dcControl.voltageV = 0;
+        await sendDcControl();
+      }
+    });
+    renderControllerSettings(elements, appState.controllerInfo, buildControllerSettingsHandlers());
+    return;
+  }
+
+  renderVehicleControlWorkspace(elements.vehicleRegistry, visibleVehicles, visibleFunctions, {
+    activeCabId: appState.activeCabId,
+    cabs: appState.cabs
+  }, buildCabWorkspaceHandlers(operationMode, leftVehicles, rightVehicles));
+
+  const vehicle = editingVehicle();
+  renderVehicleEditor(elements.vehicleEditView, vehicle, editingFunctions(vehicle), buildVehicleEditorHandlers(vehicle));
+
+  const controlVehicle = controlledVehicle();
+  renderLocoControl(
+    elements.vehicleControlDetailView,
+    controlVehicle,
+    selectedFunctions(controlVehicle?.id),
+    appState.control,
+    {
+      onBack: showVehicleRegistry,
+      onDirection: async (direction) => {
+        appState.control.direction = direction;
+        await sendLocoSpeed(appState.control.speed, direction);
+      },
+      onSpeed: async (speed, direction) => {
+        appState.control.speed = clampSpeed(speed);
+        appState.control.direction = direction;
+        await sendLocoSpeed(appState.control.speed, direction);
+      },
+      onEmergencyStop: async () => {
+        appState.control.speed = 0;
+        await sendLocoSpeed(0, appState.control.direction);
+      },
+      onFunction: async (functionNumber, enabled) => {
+        try {
+          await syncControllerEndpoint();
+          await setLocoFunction(controlVehicle.id, functionNumber, enabled);
+          setStatus(`F${functionNumber} 已发送`);
+        } catch (error) {
+          setStatus(formatError(error));
+        }
+      },
+      functionIconCatalog
+    }
+  );
+
+  renderCvPanel(elements, vehicle, appState.cvMetadata, cvState, buildCvPanelHandlers(vehicle));
+
+  renderControllerSettings(elements, appState.controllerInfo, buildControllerSettingsHandlers());
+  setVehicleSubviewState();
+}
+
