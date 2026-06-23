@@ -119,6 +119,14 @@ class ApiRouterTest(unittest.TestCase):
     self.assertNotIn("operation_token", controller)
     self.assertNotIn("operation_token_configured", controller)
 
+  def test_cv_read_requires_protocol_ready(self):
+    router = ApiRouter(state_store=None)
+    body, status = router.handle_json("POST", "/api/cv/read", b'{"vehicle_id":"v1","cv":1}', default_state())
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 409)
+    self.assertFalse(payload["ok"])
+    self.assertEqual(payload["error"]["type"], "protocol_not_ready")
+
   def test_connect_rejects_invalid_controller_ip(self):
     router = ApiRouter(state_store=None)
     body, status = router.handle_json("POST", "/api/controller/connect", b'{"ip":"not-an-ip"}', default_state())
@@ -372,6 +380,16 @@ class ApiRouterTest(unittest.TestCase):
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 400)
     self.assertEqual(payload["error"]["type"], "invalid_track_power")
+
+  def test_cv_read_rejects_dc_track_mode(self):
+    state = default_state()
+    state["controller"]["udp_port"] = 12345
+    state["controller"]["track_mode"] = "dc"
+    router = ApiRouter(state_store=None)
+    body, status = router.handle_json("POST", "/api/cv/read", b'{"vehicle_id":"v1","cv":1}', state)
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 409)
+    self.assertEqual(payload["error"]["type"], "unsafe_track_mode")
 
 if __name__ == "__main__":
   unittest.main()
