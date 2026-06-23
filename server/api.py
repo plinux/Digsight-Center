@@ -2306,6 +2306,140 @@ class ApiRouter:
       "vehicle_synced": synced,
     }), 200
 
+  def _handle_create_category(self, body: bytes):
+    if not self.vehicle_store:
+      return self._vehicle_store_not_ready()
+    request = self._json_body(body)
+    try:
+      category = self.vehicle_store.create_category(request)
+    except (TypeError, ValueError) as exc:
+      return response.failure("invalid_category", "车辆分类无效", str(exc)), 400
+    return response.success(category), 200
+
+  def _handle_patch_category(self, route: str, body: bytes):
+    if not self.vehicle_store:
+      return self._vehicle_store_not_ready()
+    category_id = self._resource_id(route)
+    try:
+      category = self.vehicle_store.update_category(category_id, self._json_body(body))
+    except (TypeError, ValueError) as exc:
+      return response.failure("invalid_category", "车辆分类无效", str(exc)), 400
+    if category is None:
+      return response.failure("category_not_found", "车辆分类不存在", category_id), 404
+    return response.success(category), 200
+
+  def _handle_delete_category(self, route: str):
+    if not self.vehicle_store:
+      return self._vehicle_store_not_ready()
+    category_id = self._resource_id(route)
+    if not self.vehicle_store.delete_category(category_id):
+      return response.failure("category_not_found", "车辆分类不存在", category_id), 404
+    return response.success({"id": category_id, "deleted": True}), 200
+
+  def _handle_create_vehicle(self, body: bytes, state: dict):
+    if not self.vehicle_store:
+      return self._vehicle_store_not_ready()
+    request = self._json_body(body)
+    self._apply_default_track_mode(request, state)
+    functions = request.pop("functions", [])
+    try:
+      vehicle = self.vehicle_store.create_vehicle_with_functions(request, functions)
+    except (TypeError, ValueError) as exc:
+      return response.failure("invalid_vehicle", "车辆数据无效", str(exc)), 400
+    self._refresh_state_vehicle_store_data(state)
+    self._save(state)
+    return response.success(self._vehicle_with_store_functions(vehicle)), 200
+
+  def _handle_patch_vehicle(self, route: str, body: bytes, state: dict):
+    vehicle_id = self._resource_id(route)
+    if self.vehicle_store:
+      vehicle = self.vehicle_store.get_vehicle(vehicle_id)
+      if vehicle is None:
+        return response.failure("vehicle_not_found", "车辆不存在", vehicle_id), 404
+      request = self._json_body(body)
+      functions = request.pop("functions", None)
+      try:
+        updated = self.vehicle_store.update_vehicle_with_functions(vehicle_id, request, functions)
+        if "address" in request:
+          self._sync_consist_member_addresses(state, vehicle_id, updated["address"])
+      except (TypeError, ValueError) as exc:
+        return response.failure("invalid_vehicle", "车辆地址无效" if "address" in request else "车辆数据无效", str(exc)), 400
+      self._refresh_state_vehicle_store_data(state)
+      self._save(state)
+      return response.success(self._vehicle_with_store_functions(updated)), 200
+
+    vehicle = self._find_by_id(state["vehicles"], vehicle_id)
+    if vehicle is None:
+      return response.failure("vehicle_not_found", "车辆不存在", vehicle_id), 404
+
+    request = self._json_body(body)
+    if "address" in request:
+      try:
+        vehicle["address"] = self._validate_vehicle_address(request["address"])
+      except (TypeError, ValueError) as exc:
+        return response.failure("invalid_vehicle", "车辆地址无效", str(exc)), 400
+      self._sync_consist_member_addresses(state, vehicle_id, vehicle["address"])
+
+    for field in ("name", "description", "full_name", "track_mode", "brand", "railway", "article_number", "decoder_type", "image", "type", "sync_function_control", "energy_type", "car_subtype", "consist_kind"):
+      if field in request:
+        vehicle[field] = request[field]
+    if "functions" in request:
+      self._replace_vehicle_functions(state, vehicle_id, request["functions"])
+    self._save(state)
+    return response.success(self._vehicle_with_functions(state, vehicle)), 200
+
+  def _handle_reorder_vehicles(self, body: bytes, state: dict):
+    if not self.vehicle_store:
+      return self._vehicle_store_not_ready(code="vehicle_store_required", message="车辆库不可用", status=503)
+    request = self._json_body(body)
+    vehicle_ids = request.get("vehicle_ids") or []
+    if not isinstance(vehicle_ids, list) or not all(isinstance(item, str) for item in vehicle_ids):
+      return response.failure("invalid_vehicle_order", "车辆排序列表无效", "vehicle_ids"), 400
+    vehicles = self.vehicle_store.update_vehicle_custom_order(vehicle_ids)
+    self._refresh_state_vehicle_store_data(state)
+    self._save(state)
+    return response.success({"vehicles": [self._vehicle_with_store_functions(vehicle) for vehicle in vehicles]}), 200
+
+  def _handle_delete_vehicle(self, route: str, state: dict):
+    vehicle_id = self._resource_id(route)
+    if self.vehicle_store:
+      if not self.vehicle_store.delete_vehicle(vehicle_id):
+        return response.failure("vehicle_not_found", "车辆不存在", vehicle_id), 404
+      self._remove_consist_members_for_vehicle(state, vehicle_id)
+      self._refresh_state_vehicle_store_data(state)
+      self._save(state)
+      return response.success({"id": vehicle_id, "deleted": True}), 200
+    original_count = len(state["vehicles"])
+    state["vehicles"] = [vehicle for vehicle in state["vehicles"] if vehicle.get("id") != vehicle_id]
+    if len(state["vehicles"]) == original_count:
+      return response.failure("vehicle_not_found", "车辆不存在", vehicle_id), 404
+    state["functions"] = [function for function in state["functions"] if function.get("vehicle_id") != vehicle_id]
+    self._remove_consist_members_for_vehicle(state, vehicle_id)
+    self._save(state)
+    return response.success({"id": vehicle_id, "deleted": True}), 200
+
+  def _handle_vehicle_image_upload(self, body: bytes):
+    request = self._json_body(body)
+    file_name = str(request.get("file_name") or "vehicle-image.png")
+    raw_content = request.get("content_base64")
+    if not isinstance(raw_content, str) or not raw_content.strip():
+      return response.failure("invalid_vehicle_image", "车辆图片无效", "content_base64 is required"), 400
+    try:
+      content = base64.b64decode(raw_content, validate=True)
+    except (binascii.Error, ValueError) as exc:
+      return response.failure("invalid_vehicle_image", "车辆图片无效", str(exc)), 400
+    try:
+      extension = self._validate_vehicle_image(file_name, content)
+    except ValueError as exc:
+      return response.failure("invalid_vehicle_image", "车辆图片无效", str(exc)), 400
+    self.image_dir.mkdir(parents=True, exist_ok=True)
+    target = self.image_dir / f"vehicle-{uuid.uuid4().hex}{extension}"
+    target.write_bytes(content)
+    return response.success({
+      "image_path": f"/data/vehicle-images/{target.name}",
+      "size": len(content),
+    }), 200
+
 
 
   def _save(self, state):

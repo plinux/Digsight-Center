@@ -42,6 +42,17 @@ class ApiRouterTest(unittest.TestCase):
     self.assertEqual(payload["error"]["type"], "not_found")
     self.assertEqual(payload["error"]["detail"], "/api/missing")
 
+  def test_category_write_requires_vehicle_store(self):
+    body, status = ApiRouter(None).handle_json(
+      "POST",
+      "/api/categories",
+      json.dumps({"name": "未启用"}).encode("utf-8"),
+      default_state(),
+    )
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 409)
+    self.assertEqual(payload["error"]["type"], "vehicle_store_not_ready")
+
   def _ready_loco_state(self):
     state = default_state()
     state["controller"].update({
