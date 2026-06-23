@@ -1242,3 +1242,675 @@ export async function loadFunctionIconCatalog(fetchImpl = globalThis.fetch) {
   }
 }
 
+export function renderVehicleRegistry(container, vehicles, handlers = {}) {
+  container.replaceChildren();
+  const header = document.createElement("div");
+  header.className = "section-title";
+  const count = document.createElement("span");
+  count.textContent = `${vehicles.length} 辆`;
+  header.append(count);
+
+  const grid = document.createElement("div");
+  grid.className = "vehicle-grid";
+  for (const vehicle of vehicles) {
+    const card = document.createElement("article");
+    card.className = "vehicle-card";
+    card.append(vehicleImage(vehicle), vehicleText(vehicle, handlers));
+    const actions = document.createElement("div");
+    actions.className = "card-actions";
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.textContent = "编辑";
+    edit.addEventListener("click", () => handlers.onEdit?.(vehicle.id));
+    const control = document.createElement("button");
+    control.type = "button";
+    control.textContent = "控制";
+    control.addEventListener("click", () => handlers.onControl?.(vehicle.id));
+    actions.append(edit, control);
+    card.append(actions);
+    grid.append(card);
+  }
+  if (!vehicles.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "暂无车辆";
+    grid.append(empty);
+  }
+  container.append(header, grid);
+}
+
+export function renderVehicleControlWorkspace(container, vehicles, functions, cabState, handlers = {}) {
+  const previousListScroll = captureCabVehicleListScroll(container);
+  container.replaceChildren();
+
+  if (!vehicles.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = handlers.emptyText || "暂无车辆，请先导入 Z21 配置";
+    container.append(empty);
+    return;
+  }
+
+  const workspace = document.createElement("div");
+  workspace.className = "cab-workspace";
+  const leftVehicles = handlers.cabVehicles?.left || vehicles;
+  const rightVehicles = handlers.cabVehicles?.right || vehicles;
+  workspace.append(
+    renderCabColumn("left", "左控制台", leftVehicles, functions, cabState, handlers),
+    renderCabColumn("right", "右控制台", rightVehicles, functions, cabState, handlers)
+  );
+  container.append(workspace);
+  restoreCabVehicleListScroll(workspace, previousListScroll);
+}
+
+function captureCabVehicleListScroll(container) {
+  const positions = {};
+  for (const cabId of ["left", "right"]) {
+    const list = container.querySelector(`.cab-column[data-cab-id="${cabId}"] .cab-vehicle-list`);
+    if (list) {
+      positions[cabId] = list.scrollTop;
+    }
+  }
+  return positions;
+}
+
+function restoreCabVehicleListScroll(workspace, positions) {
+  for (const [cabId, scrollTop] of Object.entries(positions)) {
+    if (!Number.isFinite(scrollTop)) {
+      continue;
+    }
+    const list = workspace.querySelector(`.cab-column[data-cab-id="${cabId}"] .cab-vehicle-list`);
+    if (list) {
+      list.scrollTop = scrollTop;
+    }
+  }
+}
+
+function renderCabColumn(cabId, titleText, vehicles, functions, cabState, handlers) {
+  const cab = cabState.cabs?.[cabId] || {};
+  const selectedVehicle = vehicles.find((vehicle) => vehicle.id === cab.vehicleId) || null;
+  const showFunctionNumbers = cab.showFunctionNumbers !== false;
+  const showFunctionLabels = cab.showFunctionLabels !== false;
+  const section = document.createElement("section");
+  section.className = `cab-column ${cabState.activeCabId === cabId ? "active-cab" : ""}`;
+  section.dataset.cabId = cabId;
+  section.addEventListener("pointerdown", (event) => {
+    if (!isCabActivationTarget(event.target)) {
+      return;
+    }
+    handlers.onActivateCab?.(cabId);
+  });
+
+  const header = document.createElement("div");
+  header.className = "cab-header";
+  const title = document.createElement("h2");
+  title.textContent = titleText;
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "cab-toggle-control";
+  toggle.textContent = cab.expanded ? "返回列表" : "展开控制";
+  toggle.disabled = !selectedVehicle || !showFunctionLabels;
+  toggle.title = showFunctionLabels ? "" : "隐藏功能名称时默认显示全部功能控制";
+  toggle.addEventListener("click", (event) => {
+    event.stopPropagation();
+    handlers.onToggleCabExpanded?.(cabId);
+  });
+  const headerControls = document.createElement("div");
+  headerControls.className = "cab-header-controls";
+  headerControls.append(renderCabFilters(cabId, cab, handlers.categories || [], handlers), toggle);
+  header.append(title, headerControls);
+
+  section.append(header);
+  const context = selectedVehicle ? resolveCabConsistContext(selectedVehicle, cab, functions, handlers) : null;
+  const controlPanel = selectedVehicle ? renderCabControlPanel(cabId, selectedVehicle, cab, context.functions, handlers, {
+    expanded: Boolean(cab.expanded && showFunctionLabels),
+    showFunctionNumbers,
+    showFunctionLabels,
+    context,
+    displayVehicle: context.displayVehicle,
+    maxFunctionNumber: context.maxFunctionNumber
+  }) : null;
+  if (controlPanel) {
+    section.append(controlPanel);
+  }
+  section.append(renderCabVehicleList(cabId, vehicles, cab, cabState, handlers));
+  return section;
+}
+
+function renderCabFilters(cabId, cab, categories, handlers) {
+  const bar = document.createElement("div");
+  bar.className = "cab-filter-bar";
+  const showFunctionNumbers = cab.showFunctionNumbers !== false;
+  const showFunctionLabels = cab.showFunctionLabels !== false;
+
+  const numberToggle = cabToggleButton({
+    className: "cab-function-number-toggle",
+    active: showFunctionNumbers,
+    label: "显示功能编号",
+    activeTitle: "功能键显示编号",
+    inactiveTitle: "功能键隐藏编号",
+    onClick: () => handlers.onToggleCabFunctionNumbers?.(cabId)
+  });
+
+  const nameToggle = cabToggleButton({
+    className: "cab-function-label-toggle",
+    active: showFunctionLabels,
+    label: "显示功能名称",
+    activeTitle: "功能键显示名称",
+    inactiveTitle: "功能键只显示编号和图标",
+    onClick: () => handlers.onToggleCabFunctionLabels?.(cabId)
+  });
+
+  const category = document.createElement("select");
+  category.append(option("", "全部分类"));
+  for (const item of categories) {
+    category.append(option(item.id, item.name));
+  }
+  category.value = String(cab.categoryId || "");
+  category.addEventListener("change", () => handlers.onCabCategoryFilter?.(cabId, category.value));
+
+  const sort = document.createElement("select");
+  for (const [value, label] of [["custom", "自定义排序"], ["created_at", "添加时间"], ["address", "车辆号"], ["name", "车辆名称"], ["railway", "局段"]]) {
+    sort.append(option(value, label));
+  }
+  sort.value = cab.sortKey || "custom";
+  sort.addEventListener("change", () => handlers.onCabSortChange?.(cabId, sort.value, cab.sortDirection || "asc"));
+
+  const direction = document.createElement("button");
+  direction.type = "button";
+  direction.textContent = cab.sortDirection === "desc" ? "降序" : "升序";
+  direction.addEventListener("click", () => {
+    handlers.onCabSortChange?.(cabId, cab.sortKey || "custom", cab.sortDirection === "desc" ? "asc" : "desc");
+  });
+
+  bar.append(numberToggle, nameToggle, category, sort, direction);
+  return bar;
+}
+
+function cabToggleButton({className, active, label, activeTitle, inactiveTitle, onClick}) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.classList.toggle("active", active);
+  button.textContent = label;
+  button.setAttribute("aria-pressed", active ? "true" : "false");
+  button.title = active ? activeTitle : inactiveTitle;
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function option(value, label) {
+  const item = document.createElement("option");
+  item.value = value;
+  item.textContent = label;
+  return item;
+}
+
+function renderCabVehicleList(cabId, vehicles, cab, cabState, handlers) {
+  const list = document.createElement("div");
+  list.className = "cab-vehicle-list";
+  list.addEventListener("dragover", (event) => {
+    const targetRow = event.target?.closest?.(".cab-vehicle-row");
+    if (!targetRow || targetRow === draggedVehicleRow) {
+      return;
+    }
+    event.preventDefault();
+    renderDragInsertionPreview(list, targetRow, event);
+    handlers.onVehicleDragOver?.(cabId, targetRow.dataset.vehicleId, event);
+  });
+  list.addEventListener("drop", (event) => {
+    const targetRow = event.target?.closest?.(".cab-vehicle-row");
+    if (!targetRow && !draggedVehicleRow) {
+      return;
+    }
+    event.preventDefault();
+    const vehicleId = targetRow?.dataset.vehicleId || draggedVehicleRow?.dataset.vehicleId || "";
+    const orderedVehicleIds = orderedVehicleIdsFromList(list);
+    handlers.onVehicleDrop?.(cabId, vehicleId, event, orderedVehicleIds);
+    clearDragPreview();
+  });
+  for (const vehicle of vehicles) {
+    const isSelected = cab.vehicleId === vehicle.id;
+    const isMultiSelected = handlers.selectedVehicleIds?.has?.(vehicle.id) || false;
+    const selectionMode = Boolean(handlers.selectionMode);
+    const disabledByOtherCab = selectedByOtherCab(cabId, cabState, vehicle.id);
+    const row = document.createElement("div");
+    row.className = `cab-vehicle-row ${isSelected ? "selected" : ""}`;
+    row.dataset.vehicleId = String(vehicle.id);
+    row.draggable = true;
+    row.classList.toggle("multi-selected", isMultiSelected);
+    row.classList.toggle("disabled-by-other-cab", disabledByOtherCab && !selectionMode);
+    row.setAttribute("aria-disabled", disabledByOtherCab && !selectionMode ? "true" : "false");
+    row.addEventListener("click", () => {
+      if (selectionMode) {
+        handlers.onToggleVehicleSelection?.(vehicle.id);
+        return;
+      }
+      if (disabledByOtherCab) {
+        return;
+      }
+      handlers.onSelectVehicle?.(cabId, vehicle.id);
+    });
+    if (selectionMode) {
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.className = "vehicle-multi-select";
+      checkbox.checked = isMultiSelected;
+      checkbox.addEventListener("click", (event) => {
+        event.stopPropagation();
+        handlers.onToggleVehicleSelection?.(vehicle.id);
+      });
+      row.append(checkbox);
+    }
+    const select = document.createElement("button");
+    select.type = "button";
+    select.className = "cab-vehicle-select";
+    select.disabled = disabledByOtherCab && !selectionMode;
+    select.setAttribute("aria-disabled", disabledByOtherCab && !selectionMode ? "true" : "false");
+    select.setAttribute("aria-pressed", isSelected ? "true" : "false");
+    select.title = `选择 ${vehicle.name || "未命名车辆"} 作为${cabId === "left" ? "左控制台" : "右控制台"}当前控制车辆`;
+    select.append(vehicleImage(vehicle), vehicleText(vehicle, handlers));
+    select.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (selectionMode) {
+        handlers.onToggleVehicleSelection?.(vehicle.id);
+        return;
+      }
+      if (disabledByOtherCab) {
+        return;
+      }
+      handlers.onSelectVehicle?.(cabId, vehicle.id);
+    });
+    const statusSlot = document.createElement("span");
+    statusSlot.className = "cab-current-badge-slot";
+    if (isSelected) {
+      const badge = document.createElement("span");
+      badge.className = "cab-current-badge";
+      badge.textContent = "当前控制";
+      statusSlot.append(badge);
+    }
+    if (disabledByOtherCab) {
+      const disabledBadge = document.createElement("span");
+      disabledBadge.className = "cab-disabled-badge";
+      disabledBadge.textContent = "另一侧已选";
+      select.append(disabledBadge);
+    }
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "cab-vehicle-edit";
+    edit.textContent = "编辑";
+    edit.addEventListener("click", (event) => {
+      event.stopPropagation();
+      handlers.onEdit?.(vehicle.id);
+    });
+    const drag = document.createElement("button");
+    drag.type = "button";
+    drag.className = "vehicle-drag-handle";
+    drag.draggable = true;
+    drag.title = "拖动调整自定义排序";
+    drag.textContent = "☰";
+    drag.addEventListener("click", (event) => event.stopPropagation());
+    drag.addEventListener("pointerdown", (event) => event.stopPropagation());
+    row.addEventListener("dragstart", (event) => {
+      if (disabledByOtherCab) {
+        event.preventDefault();
+        return;
+      }
+      draggedVehicleRow = row;
+      row.classList.add("dragging");
+      event.dataTransfer?.setData("text/plain", vehicle.id);
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+      }
+      handlers.onVehicleDragStart?.(cabId, vehicle.id, event);
+    });
+    row.addEventListener("dragend", clearDragPreview);
+    row.append(select, statusSlot, edit, drag);
+    list.append(row);
+  }
+  return list;
+}
+
+function isCabActivationTarget(target) {
+  return !target?.closest?.("button, input, select, textarea, label, .cab-vehicle-row, .cab-control-panel, .cab-filter-bar");
+}
+
+function renderDragInsertionPreview(list, targetRow, event) {
+  if (!draggedVehicleRow || targetRow === draggedVehicleRow) {
+    return;
+  }
+  const rect = targetRow.getBoundingClientRect();
+  const insertAfter = event.clientY > rect.top + rect.height / 2;
+  list.insertBefore(draggedVehicleRow, insertAfter ? targetRow.nextSibling : targetRow);
+}
+
+function orderedVehicleIdsFromList(list) {
+  return Array.from(list.querySelectorAll(".cab-vehicle-row"))
+    .map((row) => row.dataset.vehicleId)
+    .filter(Boolean);
+}
+
+function clearDragPreview() {
+  draggedVehicleRow?.classList.remove("dragging");
+  draggedVehicleRow = null;
+}
+
+function resolveCabConsistContext(selectedVehicle, cab, functions, handlers) {
+  const base = {
+    controlVehicle: selectedVehicle,
+    displayVehicle: selectedVehicle,
+    functionVehicle: selectedVehicle,
+    functions: vehicleFunctions(functions, selectedVehicle.id),
+    consist: null,
+    members: [],
+    memberIndex: null,
+    maxFunctionNumber: cab.showFunctionLabels === false ? 31 : 9
+  };
+  if (Number(selectedVehicle.type ?? 0) !== 3) {
+    return base;
+  }
+  const consist = findConsistForVehicle(selectedVehicle.id, handlers.consists || []);
+  const members = sortedConsistMembers(consist, handlers.vehicles || []);
+  base.consist = consist;
+  base.members = members;
+  if (selectedVehicle.sync_function_control) {
+    return base;
+  }
+  const memberIndex = Number.isInteger(cab.memberIndex) ? cab.memberIndex : null;
+  const member = memberIndex === null ? null : members[memberIndex] || null;
+  if (!member) {
+    return {
+      ...base,
+      functions: [{function_number: 0, label: "", icon_name: "function-generic", is_configured: true, position: 0}],
+      memberIndex: null,
+      maxFunctionNumber: 0
+    };
+  }
+  return {
+    ...base,
+    displayVehicle: member.vehicle,
+    functionVehicle: member.vehicle,
+    functions: vehicleFunctions(functions, member.vehicle.id),
+    memberIndex
+  };
+}
+
+function renderConsistImageSwitcher(cabId, image, context, handlers) {
+  if (!context?.consist || context.controlVehicle?.sync_function_control || !context.members?.length) {
+    return image;
+  }
+  const switcher = document.createElement("div");
+  switcher.className = "cab-consist-image-switcher";
+  const previous = document.createElement("button");
+  previous.type = "button";
+  previous.textContent = "‹";
+  previous.title = "上一台成员车";
+  previous.addEventListener("click", () => handlers.onSwitchConsistMember?.(cabId, -1));
+  const next = document.createElement("button");
+  next.type = "button";
+  next.textContent = "›";
+  next.title = "下一台成员车";
+  next.addEventListener("click", () => handlers.onSwitchConsistMember?.(cabId, 1));
+  switcher.append(previous, image, next);
+  return switcher;
+}
+
+function renderCabControlPanel(cabId, vehicle, cab, functions, handlers, options = {}) {
+  const panel = document.createElement("section");
+  panel.className = "cab-control-panel";
+  const showFunctionNumbers = options.showFunctionNumbers !== false;
+  const showFunctionLabels = options.showFunctionLabels !== false;
+  const displayVehicle = options.displayVehicle || vehicle;
+  const context = options.context || {};
+
+  const mainRow = document.createElement("div");
+  mainRow.className = "cab-control-main-row";
+
+  const identity = document.createElement("div");
+  identity.className = "cab-control-identity";
+  const nameLine = document.createElement("strong");
+  nameLine.className = "cab-control-identity-line cab-control-identity-primary cab-control-vehicle-name";
+  nameLine.textContent = vehicle.name || "未命名车辆";
+  const addressLine = document.createElement("span");
+  addressLine.className = "cab-control-identity-line cab-control-address-row";
+  const addressBadge = document.createElement("span");
+  addressBadge.className = "cab-control-address-badge";
+  addressBadge.textContent = formatCabAddressText(vehicle, context);
+  const fullNameTag = cabControlInfoTag(formatVehicleField(vehicle.full_name), "cab-control-full-name-tag", "完整名称");
+  addressLine.append(addressBadge, fullNameTag);
+  const metaLine = document.createElement("span");
+  metaLine.className = "cab-control-identity-line cab-control-meta-row";
+  const brandTag = cabControlInfoTag(formatVehicleField(vehicle.brand), "cab-control-meta-tag", "品牌");
+  const articleNumberTag = cabControlInfoTag(formatVehicleField(vehicle.article_number), "cab-control-meta-tag", "货号");
+  metaLine.append(brandTag, articleNumberTag);
+
+  const media = document.createElement("div");
+  media.className = "cab-control-media";
+  const image = document.createElement("div");
+  image.className = "cab-control-image";
+  image.append(vehicleImage(displayVehicle));
+
+  const speed = Number(cab.speed || 0);
+  const speedControl = document.createElement("div");
+  speedControl.className = "cab-speed-control";
+  const speedValue = document.createElement("strong");
+  speedValue.className = "cab-speed-value";
+  speedValue.textContent = formatCabSpeedValue(speed, vehicle.max_speed);
+  const throttle = document.createElement("div");
+  throttle.className = "cab-speed-throttle";
+  throttle.tabIndex = 0;
+  throttle.setAttribute("role", "slider");
+  throttle.setAttribute("aria-label", "速度");
+  throttle.setAttribute("aria-valuemin", "0");
+  throttle.setAttribute("aria-valuemax", "126");
+  const throttleFill = document.createElement("div");
+  throttleFill.className = "cab-speed-throttle-fill";
+  throttle.append(throttleFill);
+  let pendingSpeed = speed;
+  let isDraggingThrottle = false;
+  updateCabSpeedThrottleFill(throttle, speed);
+  const previewThrottleSpeed = (nextSpeed) => {
+    pendingSpeed = clampCabSpeedStep(nextSpeed);
+    updateCabSpeedThrottleFill(throttle, pendingSpeed);
+    speedValue.textContent = formatCabSpeedValue(pendingSpeed, vehicle.max_speed);
+    handlers.onSpeedPreview?.(cabId, pendingSpeed, cab.direction || "forward");
+  };
+  const commitThrottleSpeed = (nextSpeed) => {
+    pendingSpeed = clampCabSpeedStep(nextSpeed);
+    updateCabSpeedThrottleFill(throttle, pendingSpeed);
+    speedValue.textContent = formatCabSpeedValue(pendingSpeed, vehicle.max_speed);
+    handlers.onSpeed?.(cabId, pendingSpeed, cab.direction || "forward");
+  };
+  const updateFromPointer = (event, commit = false) => {
+    const nextSpeed = speedFromThrottlePointer(throttle, event);
+    if (commit) {
+      commitThrottleSpeed(nextSpeed);
+      return;
+    }
+    previewThrottleSpeed(nextSpeed);
+  };
+  throttle.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    handlers.onActivateCab?.(cabId, {render: false});
+    throttle.focus({preventScroll: true});
+    isDraggingThrottle = true;
+    throttle.setPointerCapture?.(event.pointerId);
+    updateFromPointer(event);
+  });
+  throttle.addEventListener("pointermove", (event) => {
+    if (!isDraggingThrottle) {
+      return;
+    }
+    event.preventDefault();
+    updateFromPointer(event);
+  });
+  throttle.addEventListener("pointerup", (event) => {
+    if (!isDraggingThrottle) {
+      return;
+    }
+    event.preventDefault();
+    isDraggingThrottle = false;
+    throttle.releasePointerCapture?.(event.pointerId);
+    updateFromPointer(event, true);
+  });
+  throttle.addEventListener("pointercancel", (event) => {
+    if (!isDraggingThrottle) {
+      return;
+    }
+    isDraggingThrottle = false;
+    throttle.releasePointerCapture?.(event.pointerId);
+    commitThrottleSpeed(pendingSpeed);
+  });
+  throttle.addEventListener("keydown", (event) => {
+    const keySteps = {
+      ArrowUp: 1,
+      ArrowRight: 1,
+      PageUp: 10,
+      ArrowDown: -1,
+      ArrowLeft: -1,
+      PageDown: -10
+    };
+    if (event.key === "Home") {
+      event.preventDefault();
+      event.stopPropagation();
+      commitThrottleSpeed(0);
+      return;
+    }
+    if (event.key === "End") {
+      event.preventDefault();
+      event.stopPropagation();
+      commitThrottleSpeed(126);
+      return;
+    }
+    if (!(event.key in keySteps)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    commitThrottleSpeed(pendingSpeed + keySteps[event.key]);
+  });
+  speedControl.append(speedValue, throttle);
+  identity.append(nameLine, addressLine, metaLine);
+  media.append(renderConsistImageSwitcher(cabId, image, context, handlers));
+
+  const infoColumn = document.createElement("div");
+  infoColumn.className = "cab-control-info";
+  infoColumn.append(identity);
+
+  const functionGrid = document.createElement("div");
+  functionGrid.className = `function-grid cab-function-grid ${showFunctionLabels ? "show-function-labels" : "show-all-functions hide-function-labels"}`;
+  functionGrid.dataset.showFunctionLabels = showFunctionLabels ? "true" : "false";
+  const functionIconCatalog = handlers.functionIconCatalog || DEFAULT_FUNCTION_ICON_CATALOG;
+  const slotOptions = {maxFunctionNumber: showFunctionLabels ? 9 : 31};
+  if (Number.isFinite(options.maxFunctionNumber)) {
+    slotOptions.maxFunctionNumber = options.maxFunctionNumber;
+  }
+  for (const fn of buildFunctionSlots(functions, slotOptions.maxFunctionNumber)) {
+    if (fn.visible === false) {
+      functionGrid.append(renderEmptyFunctionSlot(fn.function_number));
+      continue;
+    }
+    functionGrid.append(renderFunctionSlotButton(
+      fn,
+      resolveFunctionIcon(fn, functionIconCatalog),
+      (eventType) => handlers.onFunction?.(cabId, fn.function_number, eventType),
+      {enabled: cab.functions?.[String(fn.function_number)], showLabel: showFunctionLabels, showNumber: showFunctionNumbers}
+    ));
+  }
+
+  const reverse = segmentButton("←", cab.direction === "reverse", () => handlers.onDirection?.(cabId, "reverse"));
+  reverse.title = "后退";
+  reverse.setAttribute("aria-label", "后退");
+  const forward = segmentButton("→", cab.direction !== "reverse", () => handlers.onDirection?.(cabId, "forward"));
+  forward.title = "前进";
+  forward.setAttribute("aria-label", "前进");
+  const directionRow = document.createElement("div");
+  directionRow.className = "cab-direction-row";
+  directionRow.append(reverse, forward);
+
+  const stop = document.createElement("button");
+  stop.type = "button";
+  stop.className = "danger cab-economic-stop";
+  stop.textContent = "紧急停车";
+  stop.addEventListener("click", () => handlers.onEmergencyStop?.(cabId));
+  const sideActions = document.createElement("div");
+  sideActions.className = "cab-control-side-actions";
+  sideActions.append(speedControl, directionRow, stop);
+  mainRow.append(infoColumn, media, functionGrid, sideActions);
+
+  panel.append(mainRow);
+  if (options.expanded && showFunctionLabels) {
+    const extraGrid = document.createElement("div");
+    extraGrid.className = "function-grid function-extra-grid";
+    for (const fn of buildExpandedFunctionSlots(functions)) {
+      if (fn.visible === false) {
+        extraGrid.append(renderEmptyFunctionSlot(fn.function_number));
+        continue;
+      }
+      extraGrid.append(renderFunctionSlotButton(
+        fn,
+        resolveFunctionIcon(fn, functionIconCatalog),
+        (eventType) => handlers.onFunction?.(cabId, fn.function_number, eventType),
+        {enabled: cab.functions?.[String(fn.function_number)], showLabel: true, showNumber: showFunctionNumbers}
+      ));
+    }
+    if (extraGrid.childElementCount) {
+      panel.append(extraGrid);
+    }
+  }
+  return panel;
+}
+
+function formatCabSpeedValue(speedStep, maxSpeed) {
+  const step = clampCabSpeedStep(speedStep);
+  if (Number(maxSpeed) > 0) {
+    const scaled = Math.round((step / 126) * Number(maxSpeed));
+    return `${scaled} km/h`;
+  }
+  return String(step);
+}
+
+function cabControlInfoTag(valueText, className, labelText) {
+  const tag = document.createElement("span");
+  tag.className = className;
+  tag.dataset.label = labelText;
+  tag.textContent = labelText === "完整名称" ? valueText : `${labelText} ${valueText}`;
+  tag.title = `${labelText} ${valueText}`;
+  tag.setAttribute("aria-label", `${labelText} ${valueText}`);
+  return tag;
+}
+
+function clampCabSpeedStep(speedStep) {
+  return Math.max(0, Math.min(126, Math.round(Number(speedStep || 0))));
+}
+
+function updateCabSpeedThrottleFill(throttle, speedStep) {
+  const step = clampCabSpeedStep(speedStep);
+  const percent = Math.round((step / 126) * 1000) / 10;
+  throttle.style.setProperty("--speed-fill-percent", `${percent}%`);
+  throttle.setAttribute("aria-valuenow", String(step));
+}
+
+function speedFromThrottlePointer(throttle, event) {
+  const rect = throttle.getBoundingClientRect();
+  if (!rect.height) {
+    return 0;
+  }
+  const ratio = (rect.bottom - event.clientY) / rect.height;
+  return clampCabSpeedStep(ratio * 126);
+}
+
+function formatCabAddressText(vehicle, context = {}) {
+  if (Number(vehicle?.type ?? 0) === 3 && context.consist) {
+    if (context.memberIndex !== null && context.displayVehicle) {
+      return String(context.displayVehicle.address || "--");
+    }
+    const addresses = (context.members || [])
+      .map((member) => member.address || member.vehicle?.address)
+      .filter((address) => address !== null && address !== undefined && String(address).trim() !== "")
+      .map((address) => String(address));
+    return addresses.slice(0, 3).join("|") || "--";
+  }
+  return String(vehicle?.address || "--");
+}
+
