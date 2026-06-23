@@ -1,0 +1,17 @@
+[run]
+branch = True
+source =
+    server
+    packages/digsight-dxdcnet/src/digsight_dxdcnet
+    packages/train-dcc/src/train_dcc
+    digsight_dxdcnet
+    train_dcc
+omit =
+    server/dcc_address.py
+    server/dcc_packets.py
+    server/dxdcnet/*.py
+    packages/*/src/*/__init__.py
+
+[report]
+precision = 2
+show_missing = True

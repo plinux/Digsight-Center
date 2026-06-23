@@ -1,0 +1,19 @@
+# macOS and editor noise
+.DS_Store
+
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+.coverage
+coverage.json
+htmlcov/
+
+# Local runtime state and imported assets
+data/app-state.json
+data/app-state.json.tmp
+data/*.log
+data/*.pid
+data/*.sqlite3
+data/*.sqlite3-*
+data/vehicle-images/*
+!data/vehicle-images/.gitkeep

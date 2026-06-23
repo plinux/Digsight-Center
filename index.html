@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Digsight Center</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/assets/css/app.css?v=20260620-cv-api">
+</head>
+<body>
+  <main class="app-shell">
+    <header id="controllerHeader" class="controller-header" aria-label="控制器状态">
+      <div class="header-controls">
+        <select id="controllerKindSelect" class="controller-kind" aria-label="控制器品牌型号">
+          <option value="digsight_controller">动芯 DXDCNet</option>
+        </select>
+        <label class="ip-field" for="controllerIp">IP</label>
+        <input id="controllerIp" name="controllerIp" value="10.10.200.98" inputmode="decimal">
+        <button id="powerOnButton" class="primary" type="button">通电</button>
+        <button id="powerOffButton" class="danger" type="button">断电</button>
+      </div>
+      <div id="connectionStatus" class="header-status" role="status" aria-live="polite">
+        <span id="connectionLamp" class="lamp lamp-off" aria-label="控制器未能连通"></span>
+        <span id="connectionStatusText" class="status-text">正在连接本地后端</span>
+        <button id="statusDetailButton" class="status-detail-button" type="button" hidden>详情</button>
+      </div>
+      <div id="headerRuntime" class="header-runtime">
+        <div id="programmingTargetSelector" class="target-selector" aria-label="CV 编程位置">
+          <div class="target-buttons" role="group" aria-label="CV 编程位置">
+            <button id="targetProgrammingTrackButton" type="button" data-programming-target="programming_track">编程轨</button>
+            <button id="targetMainTrackButton" type="button" data-programming-target="main_track">主轨</button>
+          </div>
+        </div>
+        <div id="operationModeSelector" class="mode-selector" aria-label="操作模式">
+          <div class="mode-buttons" role="group" aria-label="操作模式">
+            <button id="modeNButton" type="button" data-track-mode="n">N</button>
+            <button id="modeHoButton" type="button" data-track-mode="ho">HO</button>
+            <button id="modeGButton" type="button" data-track-mode="g">G</button>
+            <button id="modeDcButton" type="button" data-track-mode="dc">DC</button>
+          </div>
+        </div>
+        <dl class="header-metrics">
+          <div><dt>温度</dt><dd id="headerTemperature">--</dd></div>
+          <div><dt>电压</dt><dd id="headerVoltage">--</dd></div>
+          <div><dt>电流</dt><dd id="headerCurrent">--</dd></div>
+          <div><dt>功率</dt><dd id="headerPower">--</dd></div>
+        </dl>
+      </div>
+      <div class="header-brand brand" aria-label="Digsight Center">
+        <span class="brand-line">Digsight</span>
+        <span class="brand-line">Center</span>
+      </div>
+    </header>
+
+    <nav class="main-nav" aria-label="主功能">
+      <button id="navVehicleControl" type="button" class="active">车辆控制</button>
+      <button id="navCvProgramming" type="button">CV 编程</button>
+      <button id="navControllerSettings" type="button">控制器设置</button>
+    </nav>
+
+    <section id="vehicleControlView" class="view active" aria-label="车辆控制">
+      <div class="vehicle-view-toolbar">
+        <div class="section-title vehicle-title">
+          <h1>车辆控制</h1>
+          <span id="vehicleCount">0 辆</span>
+          <span id="vehicleModeHint"></span>
+        </div>
+        <section class="import-strip" aria-label="车辆导入">
+          <input id="z21FileInput" type="file" accept=".z21">
+          <select id="importFormatSelect" class="import-format" aria-label="导入格式">
+            <option value="z21_layout_config">Z21</option>
+          </select>
+          <button id="importZ21Button" type="button">导入配置</button>
+          <button id="selectVehiclesButton" type="button">选择</button>
+          <button id="addVehicleButton" type="button">添加</button>
+          <button id="deleteVehiclesButton" class="danger" type="button">删除</button>
+        </section>
+      </div>
+      <div id="vehicleRegistry"></div>
+      <div id="vehicleEditView" class="subview" hidden></div>
+      <div id="vehicleControlDetailView" class="subview" hidden></div>
+    </section>
+
+    <section id="cvProgrammingView" class="view" aria-label="CV 编程" hidden>
+      <div class="three-panel cv-programming-layout">
+        <section id="chipInfoPanel" class="panel"></section>
+        <section id="cvListPanel" class="panel"></section>
+        <div id="cvEditStackPanel" class="panel-stack">
+          <section id="addressPanel" class="panel"></section>
+          <section id="cvEditorPanel" class="panel">
+            <div id="cvBitEditor"></div>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <section id="controllerSettingsView" class="view" aria-label="控制器设置" hidden>
+      <div class="two-panel">
+        <section id="controllerInfoPanel" class="panel"></section>
+        <section id="trackProfilePanel" class="panel"></section>
+      </div>
+    </section>
+  </main>
+  <dialog id="statusDetailDialog" class="status-detail-dialog" aria-labelledby="statusDetailTitle">
+    <div class="status-detail-header">
+      <h2 id="statusDetailTitle">状态详情</h2>
+      <button id="statusDetailCloseButton" class="status-detail-close" type="button" aria-label="关闭">×</button>
+    </div>
+    <pre id="statusDetailText" class="status-detail-text"></pre>
+  </dialog>
+  <script type="module" src="/assets/js/app.js?v=20260620-cv-api"></script>
+</body>
+</html>
