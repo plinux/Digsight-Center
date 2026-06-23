@@ -12,9 +12,9 @@ import {
   readChipInfo as readChipInfoFromController,
   readControllerInfo,
   readCv,
-  rememberOperationTokenFromState,
   reorderVehicles,
   saveControllerSettings,
+  setControllerTrackMode,
   setDcControl,
   setTrackPower,
   setLocoFunction,
@@ -158,7 +158,6 @@ const controllerWarningMessages = {
   "booster_dc_mode_reported": "控制器回报为 DC 模式",
   "booster_status_missing": "未收到轨道输出状态回包",
   "command_station_status_missing": "未收到命令站状态回包",
-  "operation_mode_not_safe_for_current_decoder": "当前模式不适合当前数码芯片",
   "programming_track_current_limit_unconfirmed": "编程轨限流未确认",
   "programming_track_safety_failed": "编程轨安全校验未通过",
   "programming_track_status_stale": "编程轨状态已过期，请重新读取控制器信息",
@@ -773,16 +772,14 @@ async function setOperationMode(trackMode) {
     return;
   }
   try {
-    const result = await saveControllerSettings({track_mode: trackMode});
+    const result = await setControllerTrackMode(trackMode);
     const nextTrackMode = normalizeTrackMode(result.track_mode || trackMode);
     const modeName = operationModeName(nextTrackMode);
-    const warnings = result.warnings || [];
-    const unsafe = warnings.includes("operation_mode_not_safe_for_current_decoder");
     if (!isDigitalOperationMode(nextTrackMode)) {
       appState.activeView = "vehicle";
       appState.vehicleSubview = "registry";
     }
-    setStatus(unsafe ? `已设置为 ${modeName} 模式；当前测试夹具不要执行 G 比例实车 CV、速度或功能控制` : `已设置为 ${modeName} 模式`);
+    setStatus(`已设置为 ${modeName} 模式`);
     await refreshState();
   } catch (error) {
     setStatus(formatError(error));
@@ -1544,3 +1541,403 @@ function downloadTextFile(fileName, content, mimeType) {
   URL.revokeObjectURL(url);
 }
 
+async function sendDcControl() {
+  try {
+    await syncControllerEndpoint();
+    await setDcControl(appState.dcControl.voltageV, appState.dcControl.direction);
+    const voltage = Number(appState.dcControl.voltageV || 0).toFixed(1);
+    const direction = appState.dcControl.direction === "reverse" ? "反向" : "正向";
+    setStatus(`DC ${voltage} V / ${direction}`);
+    await refreshState();
+  } catch (error) {
+    setStatus(formatError(error));
+  }
+}
+
+async function sendLocoSpeed(speed, direction) {
+  const vehicle = controlledVehicle();
+  if (!vehicle || !isDigitalOperationMode()) {
+    return;
+  }
+  try {
+    await syncControllerEndpoint();
+    await setLocoSpeed(vehicle.id, speed, direction);
+    setStatus(`速度 ${speed} / ${direction === "reverse" ? "后退" : "前进"}`);
+  } catch (error) {
+    setStatus(formatError(error));
+  } finally {
+    renderAll();
+  }
+}
+
+async function sendCabSpeed(cabId, speed, direction) {
+  const vehicle = cabVehicle(cabId);
+  const cab = appState.cabs[cabId];
+  if (!vehicle || !cab || !isDigitalOperationMode()) {
+    return;
+  }
+  appState.activeCabId = cabId;
+  appState.selectedVehicleId = vehicle.id;
+  syncLegacyControlFromCab(cabId);
+  try {
+    await syncControllerEndpoint();
+    await setLocoSpeed(vehicle.id, speed, direction);
+    setStatus(`${cabId === "left" ? "左控制台" : "右控制台"}：${vehicle.name} 速度 ${speed} / ${direction === "reverse" ? "后退" : "前进"}`);
+  } catch (error) {
+    setStatus(formatError(error));
+  } finally {
+    renderAll();
+  }
+}
+
+async function setCabFunctionState(cabId, functionNumber, enabled) {
+  const vehicle = cabVehicle(cabId);
+  const targetVehicle = cabFunctionVehicle(cabId);
+  const cab = appState.cabs[cabId];
+  if (!vehicle || !targetVehicle || !cab || !isDigitalOperationMode()) {
+    return;
+  }
+  appState.activeCabId = cabId;
+  appState.selectedVehicleId = vehicle.id;
+  const functionKey = String(functionNumber);
+  const previousEnabled = Boolean(cab.functions[functionKey]);
+  cab.functions[functionKey] = Boolean(enabled);
+  syncLegacyControlFromCab(cabId);
+  renderAll();
+  try {
+    await syncControllerEndpoint();
+    await setLocoFunction(targetVehicle.id, functionNumber, Boolean(enabled), cab.functions);
+    setStatus(`${cabId === "left" ? "左控制台" : "右控制台"}：${targetVehicle.name} F${functionNumber} ${enabled ? "开启" : "关闭"}`);
+  } catch (error) {
+    cab.functions[functionKey] = previousEnabled;
+    syncLegacyControlFromCab(cabId);
+    setStatus(formatError(error));
+  } finally {
+    renderAll();
+  }
+}
+
+async function sendCabFunction(cabId, functionNumber) {
+  const cab = appState.cabs[cabId];
+  await setCabFunctionState(cabId, functionNumber, !Boolean(cab?.functions?.[String(functionNumber)]));
+}
+
+function functionTimerKey(cabId, functionNumber) {
+  return `${cabId}:${functionNumber}`;
+}
+
+function clearCabFunctionTimer(cabId, functionNumber) {
+  const key = functionTimerKey(cabId, functionNumber);
+  const timer = cabFunctionTimers.get(key);
+  if (timer) {
+    globalThis.clearTimeout(timer);
+    cabFunctionTimers.delete(key);
+  }
+}
+
+async function sendCabFunctionByMode(cabId, functionNumber, eventType = "click") {
+  const vehicle = cabVehicle(cabId);
+  const targetVehicle = cabFunctionVehicle(cabId);
+  const cab = appState.cabs[cabId];
+  if (!vehicle || !targetVehicle || !cab || !isDigitalOperationMode()) {
+    return;
+  }
+  const definition = functionDefinition(targetVehicle.id, functionNumber);
+  const mode = definition.trigger_mode || "toggle";
+  if (mode === "momentary") {
+    if (eventType === "down") {
+      clearCabFunctionTimer(cabId, functionNumber);
+      await setCabFunctionState(cabId, functionNumber, true);
+    } else if (eventType === "up") {
+      await setCabFunctionState(cabId, functionNumber, false);
+    }
+    return;
+  }
+  if (eventType !== "click") {
+    return;
+  }
+  if (mode === "timed") {
+    clearCabFunctionTimer(cabId, functionNumber);
+    await setCabFunctionState(cabId, functionNumber, true);
+    const delay = Math.min(Math.max(Number(definition.duration_ms || 1000), 250), 60000);
+    const timer = globalThis.setTimeout(() => {
+      cabFunctionTimers.delete(functionTimerKey(cabId, functionNumber));
+      setCabFunctionState(cabId, functionNumber, false);
+    }, delay);
+    cabFunctionTimers.set(functionTimerKey(cabId, functionNumber), timer);
+    return;
+  }
+  clearCabFunctionTimer(cabId, functionNumber);
+  await setCabFunctionState(cabId, functionNumber, !Boolean(cab.functions[String(functionNumber)]));
+}
+
+async function saveCustomVehicleOrder(cabId, vehicleId, orderedVehicleIds) {
+  const cab = appState.cabs[cabId];
+  const vehicles = sortCabVehicles(filterCabVehicles(vehiclesForOperationMode(), cab), {
+    ...cab,
+    sortKey: "custom",
+    sortDirection: "asc"
+  });
+  const nextVehicleIds = Array.isArray(orderedVehicleIds) && orderedVehicleIds.length
+    ? mergeVisibleCustomOrder(cab, orderedVehicleIds)
+    : fallbackCustomOrder(vehicles, vehicleId);
+  if (!nextVehicleIds.length) {
+    return;
+  }
+  const result = await reorderVehicles(nextVehicleIds);
+  appState.vehicles = result.vehicles || appState.vehicles;
+  cab.sortKey = "custom";
+  cab.sortDirection = "asc";
+}
+
+function fallbackCustomOrder(vehicles, targetVehicleId) {
+  const from = vehicles.findIndex((vehicle) => vehicle.id === draggedVehicleId);
+  const to = vehicles.findIndex((vehicle) => vehicle.id === targetVehicleId);
+  if (from < 0 || to < 0 || from === to) {
+    return [];
+  }
+  const nextVehicles = [...vehicles];
+  const [moved] = nextVehicles.splice(from, 1);
+  nextVehicles.splice(to, 0, moved);
+  return nextVehicles.map((vehicle) => vehicle.id);
+}
+
+function mergeVisibleCustomOrder(cab, orderedVisibleIds) {
+  const visibleSet = new Set(orderedVisibleIds);
+  const orderedOperationVehicles = sortCabVehicles(vehiclesForOperationMode(), {
+    ...cab,
+    categoryId: "",
+    sortKey: "custom",
+    sortDirection: "asc"
+  });
+  let nextVisibleIndex = 0;
+  return orderedOperationVehicles.map((vehicle) => {
+    if (!visibleSet.has(vehicle.id)) {
+      return vehicle.id;
+    }
+    const nextVisibleId = orderedVisibleIds[nextVisibleIndex];
+    nextVisibleIndex += 1;
+    return nextVisibleId;
+  });
+}
+
+async function refreshState() {
+  const [state, controllerInfo] = await Promise.all([getState(), getControllerInfo()]);
+  replaceState(state);
+  appState.controllerInfo = controllerInfo;
+  elements.controllerKindSelect.value = appState.controller.kind || "digsight_controller";
+  elements.controllerIp.value = appState.controller.ip || "0.0.0.0";
+  renderAll();
+}
+
+async function runTrackPowerRequestWithStatusRetry(powered, requestFn) {
+  try {
+    return await requestFn();
+  } catch (error) {
+    if (!powered || !isRetryableTrackPowerStatusError(error)) {
+      throw error;
+    }
+    setStatus("轨道状态未确认，正在重新读取控制器信息");
+    await readControllerInfo();
+    await refreshState();
+    return await requestFn();
+  }
+}
+
+function isRetryableTrackPowerStatusError(error) {
+  const warningSet = new Set(error.payload?.debug?.warnings || []);
+  return error.payload?.error?.type === "protocol_not_ready"
+    && (
+      warningSet.has("booster_status_unconfirmed")
+      || warningSet.has("booster_status_stale")
+      || warningSet.has("controller_not_confirmed")
+    );
+}
+
+async function initialize() {
+  functionIconCatalog = await loadFunctionIconCatalog();
+  appState.cvMetadata = await getCvMetadata();
+  await refreshState();
+  setStatus("正在读取控制器信息");
+  try {
+    const result = await readControllerInfo();
+    setStatus(controllerReadStatusMessage(result), controllerReadStatusDetail(result));
+    await refreshState();
+  } catch (error) {
+    const formatted = formatError(error);
+    setStatus(
+      `本地后端已就绪，控制器信息启动读取失败：${typeof formatted === "object" ? formatted.summary : formatted}`,
+      typeof formatted === "object" ? formatted.detail : ""
+    );
+  }
+}
+
+elements.navVehicleControl.addEventListener("click", () => setActiveView("vehicle"));
+elements.navCvProgramming.addEventListener("click", () => setActiveView("cv"));
+elements.navControllerSettings.addEventListener("click", () => setActiveView("controller"));
+for (const button of elements.operationModeButtons) {
+  button.addEventListener("click", () => setOperationMode(button.dataset.trackMode));
+}
+for (const button of elements.programmingTargetButtons) {
+  button.addEventListener("click", () => setProgrammingTarget(button.dataset.programmingTarget));
+}
+
+globalThis.addEventListener?.("digsight:gateway-busy", (event) => {
+  setGatewayBusy(Boolean(event.detail?.active));
+});
+
+elements.statusDetailButton?.addEventListener("click", () => {
+  if (typeof elements.statusDetailDialog?.showModal === "function") {
+    elements.statusDetailDialog.showModal();
+  }
+});
+
+elements.statusDetailCloseButton?.addEventListener("click", () => {
+  elements.statusDetailDialog?.close();
+});
+
+elements.powerOnButton.addEventListener("click", async () => {
+  try {
+    await syncControllerEndpoint();
+    const result = await runTrackPowerRequestWithStatusRetry(true, () => setTrackPower(true));
+    setStatus(`${operationModeName(result.track_mode)} 轨道已通电`);
+    await refreshState();
+  } catch (error) {
+    setStatus(formatError(error));
+  }
+});
+
+elements.powerOffButton.addEventListener("click", async () => {
+  try {
+    await syncControllerEndpoint();
+    const result = await setTrackPower(false);
+    setStatus(`${operationModeName(result.track_mode)} 轨道已断电`);
+    await refreshState();
+  } catch (error) {
+    setStatus(formatError(error));
+  }
+});
+
+elements.importZ21Button.addEventListener("click", async () => {
+  const file = elements.z21FileInput.files[0];
+  if (!file) {
+    setStatus("请选择配置文件");
+    return;
+  }
+  try {
+    const importFormat = elements.importFormatSelect.value || "z21_layout_config";
+    const importResult = await importConfig(importFormat, file);
+    const summary = importResult.summary || importResult;
+    setStatus(`导入完成：${summary.vehicles_imported} 辆车，${summary.functions_imported} 个功能键，${summary.categories_imported || 0} 个分类`);
+    await refreshState();
+  } catch (error) {
+    setStatus(formatError(error));
+  }
+});
+elements.selectVehiclesButton.addEventListener("click", toggleVehicleSelectionMode);
+elements.addVehicleButton.addEventListener("click", createNewVehicle);
+elements.deleteVehiclesButton.addEventListener("click", deleteSelectedVehicles);
+
+document.addEventListener("keydown", handleVehicleKeyboard);
+document.addEventListener("keyup", handleVehicleKeyboardRelease);
+
+const digitShortcutMap = {
+  Digit0: 0,
+  Digit1: 1,
+  Digit2: 2,
+  Digit3: 3,
+  Digit4: 4,
+  Digit5: 5,
+  Digit6: 6,
+  Digit7: 7,
+  Digit8: 8,
+  Digit9: 9,
+  Numpad0: 0,
+  Numpad1: 1,
+  Numpad2: 2,
+  Numpad3: 3,
+  Numpad4: 4,
+  Numpad5: 5,
+  Numpad6: 6,
+  Numpad7: 7,
+  Numpad8: 8,
+  Numpad9: 9,
+};
+
+async function handleVehicleKeyboard(event) {
+  if (appState.activeView !== "vehicle" || !isDigitalOperationMode() || isEditableKeyboardTarget(event.target)) {
+    return;
+  }
+  const cab = activeCab();
+  if (!cab?.vehicleId) {
+    return;
+  }
+  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(event.key) || digitShortcut(event) !== null) {
+    event.preventDefault();
+  }
+  if (event.key === "ArrowUp") {
+    cab.speed = clampSpeed(cab.speed + 5);
+    await sendCabSpeed(appState.activeCabId, cab.speed, cab.direction);
+  } else if (event.key === "ArrowDown") {
+    cab.speed = clampSpeed(cab.speed - 5);
+    await sendCabSpeed(appState.activeCabId, cab.speed, cab.direction);
+  } else if (event.key === "ArrowLeft") {
+    cab.direction = "reverse";
+    await sendCabSpeed(appState.activeCabId, cab.speed, "reverse");
+  } else if (event.key === "ArrowRight") {
+    cab.direction = "forward";
+    await sendCabSpeed(appState.activeCabId, cab.speed, "forward");
+  } else if (event.key === " ") {
+    cab.speed = 0;
+    await sendCabSpeed(appState.activeCabId, 0, cab.direction);
+  } else {
+    const digit = digitShortcut(event);
+    if (digit !== null) {
+      if (pressedFunctionKeys.has(event.code)) {
+        return;
+      }
+      const cabId = appState.activeCabId;
+      pressedFunctionKeys.set(event.code, {cabId, digit});
+      if (isMomentaryCabFunction(cabId, digit)) {
+        await sendCabFunctionByMode(appState.activeCabId, digit, "down");
+      } else {
+        await sendCabFunctionByMode(cabId, digit, "click");
+      }
+    }
+  }
+}
+
+async function handleVehicleKeyboardRelease(event) {
+  if (appState.activeView !== "vehicle" || !isDigitalOperationMode() || isEditableKeyboardTarget(event.target)) {
+    return;
+  }
+  const digit = digitShortcut(event);
+  const pressed = digit === null ? null : pressedFunctionKeys.get(event.code);
+  if (!pressed) {
+    return;
+  }
+  event.preventDefault();
+  const cabId = pressed.cabId;
+  pressedFunctionKeys.delete(event.code);
+  await sendCabFunctionByMode(cabId, digit, "up");
+}
+
+function isMomentaryCabFunction(cabId, functionNumber) {
+  const vehicle = cabVehicle(cabId);
+  return functionDefinition(vehicle?.id, functionNumber).trigger_mode === "momentary";
+}
+
+function isEditableKeyboardTarget(target) {
+  const tagName = String(target?.tagName || "").toLowerCase();
+  return tagName === "input" || tagName === "textarea" || tagName === "select" || Boolean(target?.isContentEditable);
+}
+
+function digitShortcut(event) {
+  return digitShortcutMap[event.code] ?? null;
+}
+
+function clampSpeed(speed) {
+  return Math.max(0, Math.min(126, Number(speed) || 0));
+}
+
+initialize().catch((error) => setStatus(formatError(error)));

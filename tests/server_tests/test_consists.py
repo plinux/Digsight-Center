@@ -196,6 +196,16 @@ class ConsistApiTest(unittest.TestCase):
     self.assertEqual(payload["data"]["speed"], 0)
     self.assertEqual([request["payload"] for request in transport.requests], [control_a, request_a, control_b, request_b])
 
+  def test_g_operation_mode_uses_primary_dcc_mode_gate_without_fixture_whitelist(self):
+    models_source = Path("server/models.py").read_text(encoding="utf-8")
+    api_source = Path("server/api.py").read_text(encoding="utf-8")
+    app_source = Path("assets/js/app.js").read_text(encoding="utf-8")
+    self.assertIn("DCC_TRACK_MODES = {TRACK_MODE_N, TRACK_MODE_HO, TRACK_MODE_G}", models_source)
+    self.assertNotIn("CURRENT_FIXTURE_TESTED_DCC_TRACK_MODES", models_source)
+    self.assertNotIn("CURRENT_FIXTURE_TESTED_DCC_TRACK_MODES", api_source)
+    self.assertNotIn("operation_mode_not_safe_for_current_decoder", api_source)
+    self.assertNotIn("operation_mode_not_safe_for_current_decoder", app_source)
+
   def test_patch_consist_updates_name_and_members(self):
     with temporary_vehicle_router() as (router, vehicle_store, state):
       self._seed_member_vehicles(vehicle_store, 3)
