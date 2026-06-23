@@ -137,7 +137,7 @@ function renderCvListPanel(container, metadata, cvState, handlers) {
   thead.append(header);
   const tbody = document.createElement("tbody");
   for (const row of cvState.cvList?.rows || []) {
-    appendCvListRow(tbody, row);
+    appendCvListRow(tbody, row, handlers);
   }
   table.append(thead, tbody);
   const tableWrap = document.createElement("div");
@@ -145,22 +145,36 @@ function renderCvListPanel(container, metadata, cvState, handlers) {
   tableWrap.append(table);
 
   const manufacturer = formatManufacturerName(cvState.cvList?.manufacturer_name, cvState.cvList?.manufacturer_id);
+  const totalCount = cvState.cvList?.total_count || cvState.cvList?.read_count || 0;
   const summary = document.createElement("p");
   summary.className = "empty-state";
   summary.textContent = (cvState.cvList?.rows || []).length
-    ? `生产厂家：${manufacturer}，已读取 ${cvState.cvList.ok_count || 0}/${cvState.cvList.read_count || 0}`
+    ? `生产厂家：${manufacturer}，已读取 ${cvState.cvList.read_count || 0}/${totalCount}`
     : "尚未读取CV值";
   container.append(title, toolbar, summary, tableWrap);
 }
 
-function appendCvListRow(tbody, row) {
+function appendCvListRow(tbody, row, handlers) {
   const tr = document.createElement("tr");
   const cvCell = document.createElement("td");
   cvCell.textContent = `CV${row.cv}`;
   const meaningCell = document.createElement("td");
   meaningCell.textContent = row.meaning || "未知/厂家自定义";
   const valueCell = document.createElement("td");
-  valueCell.textContent = row.ok ? String(row.value) : (row.error || "读取失败");
+  if (row.ok) {
+    valueCell.textContent = String(row.value);
+  } else if (row.error_detail) {
+    const detailLink = document.createElement("button");
+    detailLink.type = "button";
+    detailLink.className = "cv-error-detail-link";
+    detailLink.textContent = "详情";
+    detailLink.addEventListener("click", () => {
+      handlers.onShowCvErrorDetail?.(row.error || "读取失败", row.error_detail);
+    });
+    valueCell.append(document.createTextNode(row.error || "读取失败"), " ", detailLink);
+  } else {
+    valueCell.textContent = row.error || "读取失败";
+  }
   if (!row.ok) {
     valueCell.className = "cv-read-error";
   }
@@ -274,13 +288,15 @@ function clampByte(value) {
 function buildChipInfoSummary(metadata, cvState) {
   const results = cvState.results || {};
   const chipInfo = cvState.chipInfo || null;
-  const manufacturerId = numericResult(results[8]);
+  const manufacturerId = numericResult(results[8]) ?? numericResult(chipInfo?.manufacturer_id);
   const software = numericResult(results[7]);
   const registry = metadata?.manufacturer_registry?.known_ids || {};
   const unassigned = metadata?.manufacturer_registry?.unassigned_notes || {};
-  const manufacturerName = chipInfo?.manufacturer_name || (manufacturerId === null ? "--" : (registry[String(manufacturerId)] || unassigned[String(manufacturerId)] || `厂家 ID ${manufacturerId}`));
+  const profileName = manufacturerId === null ? null : metadata?.cv_catalog?.profile_map?.[String(manufacturerId)];
+  const profile = profileName ? metadata?.cv_catalog?.vendor_profiles?.[profileName] : null;
+  const manufacturerName = profile?.manufacturer_name || chipInfo?.manufacturer_name || (manufacturerId === null ? "--" : (registry[String(manufacturerId)] || unassigned[String(manufacturerId)] || `厂家 ID ${manufacturerId}`));
   return {
-    manufacturer: formatManufacturerName(manufacturerName, chipInfo?.manufacturer_id ?? manufacturerId),
+    manufacturer: formatManufacturerName(manufacturerName, manufacturerId),
     model: chipInfo?.model === null || chipInfo?.model === undefined ? "--" : String(chipInfo.model),
     hardware: chipInfo?.hardware_version === null || chipInfo?.hardware_version === undefined ? "--" : String(chipInfo.hardware_version),
     software: chipInfo?.software_version === null || chipInfo?.software_version === undefined

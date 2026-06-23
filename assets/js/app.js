@@ -1,5 +1,4 @@
 import {
-  cancelCvRead,
   createConsist,
   createVehicle,
   deleteVehicle,
@@ -7,7 +6,6 @@ import {
   getCvMetadata,
   getState,
   importConfig,
-  readAllCvValues,
   readAddress,
   readChipInfo as readChipInfoFromController,
   readControllerInfo,
@@ -99,7 +97,8 @@ const cvState = {
     manufacturer_id: null,
     manufacturer_name: "",
     rows: [],
-    readAt: ""
+    readAt: "",
+    total_count: 0
   },
   cvListReading: false,
   cvReadSessionId: "",
@@ -124,6 +123,19 @@ function setGatewayBusy(active) {
   renderControllerHeader(elements, appState.controller, {busy: isGatewayBusy(), controllerInfo: appState.controllerInfo});
 }
 
+function openStatusDetailDialog() {
+  if (typeof elements.statusDetailDialog?.showModal === "function") {
+    elements.statusDetailDialog.showModal();
+  }
+}
+
+function showDetailDialog(summary, detail) {
+  if (elements.statusDetailText) {
+    elements.statusDetailText.textContent = String(detail || summary || "");
+  }
+  openStatusDetailDialog();
+}
+
 function setStatus(message, detail = "") {
   let summary = message;
   let detailText = detail;
@@ -139,14 +151,22 @@ function setStatus(message, detail = "") {
 }
 
 function formatError(error) {
+  if (!error || typeof error !== "object") {
+    return String(error || "操作失败");
+  }
   if (error.payload) {
     return {
       summary: error.payload?.error?.message || error.message,
       detail: JSON.stringify(error.payload, null, 2)
     };
   }
-  const detail = error.cause || "";
-  return detail ? {summary: error.message, detail: String(detail)} : error.message;
+  const genericDetail = [
+    error.name ? `类型：${error.name}` : "",
+    error.message ? `消息：${error.message}` : "",
+    error.cause ? `原因：${String(error.cause)}` : "",
+    error.stack ? `堆栈：\n${error.stack}` : "",
+  ].filter(Boolean).join("\n\n");
+  return {summary: error.message, detail: genericDetail};
 }
 
 function formatErrorSummary(error) {
@@ -974,6 +994,7 @@ function buildCvPanelHandlers(vehicle) {
     onReadKnownCv: readKnownCvList,
     onReadFullCv: readFullCvList,
     onCancelCvRead: cancelCurrentCvRead,
+    onShowCvErrorDetail: showDetailDialog,
     onExportCvMarkdown: () => {
       downloadTextFile(cvExportFileName("md"), buildCvMarkdown(cvState.cvList), "text/markdown;charset=utf-8");
     },
@@ -1401,6 +1422,129 @@ function isValidResetMethod(method) {
     && value <= 255;
 }
 
+function cvNumbersFromSource(source) {
+  const values = Array.isArray(source)
+    ? source
+    : (source && typeof source === "object" ? Object.keys(source) : []);
+  return values
+    .map((value) => Number(value))
+    .filter((value) => Number.isInteger(value) && value >= 1 && value <= 1024);
+}
+
+function sortedUniqueCvNumbers(numbers) {
+  return Array.from(new Set(numbers)).sort((left, right) => left - right);
+}
+
+function cvNumbersForReadMode(readMode, manufacturerId) {
+  if (readMode === "full") {
+    return Array.from({length: 1024}, (_, index) => index + 1);
+  }
+  const catalog = appState.cvMetadata?.cv_catalog || {};
+  const standardNumbers = cvNumbersFromSource(catalog.standard_explicit_numbers || catalog.standard_definitions);
+  const cvNumbers = sortedUniqueCvNumbers(standardNumbers);
+  if (!cvNumbers.includes(8)) {
+    cvNumbers.push(8);
+  }
+  appendVendorCvNumbers(cvNumbers, manufacturerId, new Set());
+  const orderedNumbers = sortedUniqueCvNumbers(cvNumbers);
+  return manufacturerId === null || manufacturerId === undefined
+    ? [8, ...orderedNumbers.filter((cvNumber) => cvNumber !== 8)]
+    : orderedNumbers;
+}
+
+function appendVendorCvNumbers(cvNumbers, manufacturerId, readNumbers) {
+  if (manufacturerId === null || manufacturerId === undefined) {
+    return;
+  }
+  const catalog = appState.cvMetadata?.cv_catalog || {};
+  const profileName = catalog.profile_map?.[String(Number(manufacturerId))];
+  if (!profileName) {
+    return;
+  }
+  const vendorNumbers = cvNumbersFromSource(
+    catalog.vendor_explicit_numbers?.[profileName] || catalog.vendor_profiles?.[profileName]?.cv_definitions
+  );
+  const existingNumbers = new Set([...cvNumbers, ...readNumbers]);
+  for (const cvNumber of sortedUniqueCvNumbers(vendorNumbers)) {
+    if (!existingNumbers.has(cvNumber)) {
+      cvNumbers.push(cvNumber);
+      existingNumbers.add(cvNumber);
+    }
+  }
+}
+
+function manufacturerNameForCvList(manufacturerId) {
+  if (manufacturerId === null || manufacturerId === undefined || manufacturerId === "") {
+    return "未知厂家";
+  }
+  const catalog = appState.cvMetadata?.cv_catalog || {};
+  const registry = appState.cvMetadata?.manufacturer_registry?.known_ids || {};
+  const unassigned = appState.cvMetadata?.manufacturer_registry?.unassigned_notes || {};
+  const key = String(Number(manufacturerId));
+  const profileName = catalog.profile_map?.[key];
+  const profile = profileName ? catalog.vendor_profiles?.[profileName] : null;
+  return profile?.manufacturer_name
+    || registry[key]
+    || unassigned[key]
+    || `厂家 ID ${Number(manufacturerId)}`;
+}
+
+function updateCvListManufacturer(manufacturerId) {
+  const numericManufacturerId = Number(manufacturerId);
+  if (!Number.isInteger(numericManufacturerId)) {
+    return;
+  }
+  cvState.cvList.manufacturer_id = numericManufacturerId;
+  cvState.cvList.manufacturer_name = manufacturerNameForCvList(numericManufacturerId);
+}
+
+function cvMeaningForNumber(cvNumber, manufacturerId) {
+  const catalog = appState.cvMetadata?.cv_catalog || {};
+  const numericCv = Number(cvNumber);
+  const profileName = manufacturerId === null || manufacturerId === undefined
+    ? null
+    : catalog.profile_map?.[String(Number(manufacturerId))];
+  const profile = profileName ? catalog.vendor_profiles?.[profileName] : null;
+  return profile?.cv_definitions?.[String(numericCv)]
+    || catalog.standard_definitions?.[String(numericCv)]
+    || "未知/厂家自定义";
+}
+
+function cvListRowFromResult(cvNumber, result, manufacturerId) {
+  return {
+    cv: cvNumber,
+    meaning: cvMeaningForNumber(cvNumber, manufacturerId),
+    value: Number(result.value),
+    ok: true,
+    error: "",
+    error_detail: ""
+  };
+}
+
+function cvListRowFromError(cvNumber, error, manufacturerId) {
+  const formatted = formatError(error);
+  const summary = typeof formatted === "object" ? formatted.summary : String(formatted);
+  const detail = typeof formatted === "object" ? formatted.detail : String(error?.stack || summary);
+  return {
+    cv: cvNumber,
+    meaning: cvMeaningForNumber(cvNumber, manufacturerId),
+    value: null,
+    ok: false,
+    error: summary,
+    error_detail: detail
+  };
+}
+
+function isCvReadListRowError(error) {
+  const type = String(error?.payload?.error?.type || "");
+  return type.startsWith("cv_read_");
+}
+
+function cvListProgressText() {
+  const totalCount = cvState.cvList?.total_count || cvState.cvList?.read_count || 0;
+  return `${cvState.cvList?.read_count || 0}/${totalCount}`;
+}
+
 async function readKnownCvList() {
   await readCvListWithMode("known");
 }
@@ -1429,11 +1573,6 @@ async function cancelCurrentCvRead() {
   cvState.cvReadCancelling = true;
   setStatus("正在中止 CV 读取");
   renderAll();
-  try {
-    await cancelCvRead(cvState.cvReadSessionId);
-  } catch (error) {
-    setStatus(formatError(error));
-  }
 }
 
 async function readCvListWithMode(readMode) {
@@ -1450,28 +1589,73 @@ async function readCvListWithMode(readMode) {
     cvState.cvListReading = true;
     cvState.cvReadCancelling = false;
     cvState.cvReadSessionId = newCvReadSessionId();
-    renderAll();
-    const result = await runCvRequestWithSafetyRetry(operationName, targetPayload.programming_target, () => readAllCvValues({
-      ...targetPayload,
-      read_mode: readMode,
-      session_id: cvState.cvReadSessionId
-    }));
+    let manufacturerId = currentDecoderManufacturerId();
+    const cvNumbers = cvNumbersForReadMode(readMode, manufacturerId);
+    const readNumbers = new Set();
     cvState.cvList = {
-      ...result,
-      rows: result.rows || [],
-      readAt: new Date().toISOString()
+      manufacturer_id: manufacturerId,
+      manufacturer_name: manufacturerNameForCvList(manufacturerId),
+      rows: [],
+      readAt: new Date().toISOString(),
+      read_mode: readMode,
+      session_id: cvState.cvReadSessionId,
+      ok_count: 0,
+      read_count: 0,
+      total_count: cvNumbers.length,
+      cancelled: false
     };
-    for (const row of cvState.cvList.rows) {
+    renderAll();
+    for (let index = 0; index < cvNumbers.length; index += 1) {
+      if (cvState.cvReadCancelling) {
+        cvState.cvList.cancelled = true;
+        break;
+      }
+      const cvNumber = cvNumbers[index];
+      if (readNumbers.has(cvNumber)) {
+        continue;
+      }
+      readNumbers.add(cvNumber);
+      let row;
+      try {
+        const result = await runCvRequestWithSafetyRetry(
+          operationName,
+          targetPayload.programming_target,
+          () => readCv(cvNumber, targetPayload)
+        );
+        row = cvListRowFromResult(cvNumber, result, manufacturerId);
+      } catch (error) {
+        if (!isCvReadListRowError(error)) {
+          throw error;
+        }
+        row = cvListRowFromError(cvNumber, error, manufacturerId);
+      }
       if (row.ok) {
         cvState.results[Number(row.cv)] = Number(row.value);
+        if (Number(row.cv) === 8) {
+          manufacturerId = Number(row.value);
+          updateCvListManufacturer(manufacturerId);
+          appendVendorCvNumbers(cvNumbers, manufacturerId, readNumbers);
+          cvState.cvList.total_count = cvNumbers.length;
+        }
       }
+      cvState.cvList.rows.push(row);
+      cvState.cvList.read_count = cvState.cvList.rows.length;
+      cvState.cvList.ok_count = cvState.cvList.rows.filter((item) => item.ok).length;
+      cvState.cvList.total_count = cvNumbers.length;
+      const progressText = cvListProgressText();
+      if (row.ok) {
+        setStatus(`${operationName}进行中：${progressText}`);
+      } else {
+        setStatus({summary: `CV${cvNumber}：${row.error}`, detail: row.error_detail});
+      }
+      renderAll();
     }
-    const manufacturer = result.manufacturer_id === null || result.manufacturer_id === undefined
-      ? result.manufacturer_name
-      : `${result.manufacturer_name} (${result.manufacturer_id})`;
-    setStatus(result.cancelled
-      ? `CV 读取已中止：${result.ok_count}/${result.read_count}`
-      : `${operationName}完成：${result.ok_count}/${result.read_count}，${manufacturer}`);
+    const manufacturer = cvState.cvList.manufacturer_id === null || cvState.cvList.manufacturer_id === undefined
+      ? cvState.cvList.manufacturer_name
+      : `${cvState.cvList.manufacturer_name} (${cvState.cvList.manufacturer_id})`;
+    setStatus(cvState.cvList.cancelled
+      ? `CV 读取已中止：${cvListProgressText()}`
+      : `${operationName}完成：${cvListProgressText()}，${manufacturer}`);
   } catch (error) {
     setStatus(formatError(error));
   } finally {
@@ -1786,11 +1970,7 @@ globalThis.addEventListener?.("digsight:gateway-busy", (event) => {
   setGatewayBusy(Boolean(event.detail?.active));
 });
 
-elements.statusDetailButton?.addEventListener("click", () => {
-  if (typeof elements.statusDetailDialog?.showModal === "function") {
-    elements.statusDetailDialog.showModal();
-  }
-});
+elements.statusDetailButton?.addEventListener("click", openStatusDetailDialog);
 
 elements.statusDetailCloseButton?.addEventListener("click", () => {
   elements.statusDetailDialog?.close();
