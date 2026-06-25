@@ -35,6 +35,8 @@ from digsight_dxdcnet.constants import (
   DEVICE_TYPE_THROTTLE,
   PROGRAMMER_ACK_ACK,
   PROGRAMMER_ACK_BUSY,
+  PROGRAMMER_ACK_NOACK,
+  PROGRAMMER_OP_MAIN_LOCO_POM,
 )
 from digsight_dxdcnet.device_commands import (
   build_mac_request_frame,
@@ -75,7 +77,7 @@ from digsight_dxdcnet.programming_track import (
   ProgrammingTrackSafety,
   ProgrammingTrackStatus,
 )
-from digsight_dxdcnet.programmer import parse_programmer_ack, parse_programmer_value
+from digsight_dxdcnet.programmer import build_cv_read_frame, build_cv_write_frame, parse_programmer_ack, parse_programmer_value
 from digsight_dxdcnet.session import DXDCNetSessionManager
 from server.importers.base import ConfigImportRequest
 from server.importers.registry import default_import_registry
@@ -255,13 +257,50 @@ class ApiRouter:
     return self._not_found(route)
 
   def _not_found(self, route: str):
-    return response.failure("not_found", "API 路径不存在", route), 404
+    return self._failure("not_found", "API 路径不存在", route, status=404)
 
   def _resource_id(self, route: str) -> str:
     return route.rsplit("/", 1)[-1]
 
   def _vehicle_store_not_ready(self, *, code: str = "vehicle_store_not_ready", message: str = "车辆库尚未启用", status: int = 409):
-    return response.failure(code, message, ""), status
+    return self._failure(code, message, status=status)
+
+  def _failure(self, error_type: str, message: str, detail: str = "", *, status: int = 400, debug=None):
+    return response.failure(error_type, message, detail, debug), status
+
+  def _frame_debug(self, frame):
+    if hasattr(frame, "to_debug_dict"):
+      return frame.to_debug_dict()
+    return frame
+
+  def _frame_debug_list(self, frames):
+    return [self._frame_debug(frame) for frame in frames]
+
+  def _request_debug(self, frame):
+    if frame is None:
+      return None
+    if hasattr(frame, "to_hex"):
+      return frame.to_hex()
+    if isinstance(frame, (bytes, bytearray, memoryview)):
+      return bytes(frame).hex(" ")
+    if hasattr(frame, "hex"):
+      try:
+        return frame.hex(" ")
+      except TypeError:
+        return frame.hex()
+    return str(frame)
+
+  def _cv_debug(self, *, cv, client_id, request_frame=None, responses=None, pom_address=None, extra=None):
+    debug = {
+      "cv": cv,
+      "client_id": client_id,
+      "pom_address": pom_address,
+      "request_hex": self._request_debug(request_frame),
+      "responses": self._frame_debug_list(responses or []),
+    }
+    if extra:
+      debug.update(extra)
+    return debug
 
   def _handle_controller_connect(self, body: bytes, state: dict):
     request = self._json_body(body)
@@ -714,8 +753,8 @@ class ApiRouter:
   def _build_raw_frame_matcher(self, command: int, device_type: int | None = None):
     return build_raw_frame_matcher(command, device_type)
 
-  def _build_cv_value_matcher(self, client_id: int, cv_number: int):
-    return build_programmer_value_matcher(client_id, cv_number)
+  def _build_cv_value_matcher(self, client_id: int, cv_number: int, pom_address: int | None = None):
+    return build_programmer_value_matcher(client_id, cv_number, pom_address=pom_address)
 
   def _build_cv_ack_matcher(self, client_id: int):
     return build_programmer_ack_matcher(client_id)
@@ -1585,6 +1624,9 @@ class ApiRouter:
         cvs["127"] = self._read_cv_direct(state["controller"], 127, client_id, cv_context=cv_context)
         cvs["128"] = self._read_cv_direct(state["controller"], 128, client_id, cv_context=cv_context)
     except RuntimeError as exc:
+      cv_failure = self._cv_runtime_failure(exc, cvs=cvs, warnings=warnings)
+      if cv_failure is not None:
+        return cv_failure
       return response.failure(
         "chip_info_read_failed",
         "读取芯片信息失败",
@@ -1592,6 +1634,24 @@ class ApiRouter:
         {"cvs": cvs, "warnings": warnings},
       ), 502
     return response.success(self._build_chip_info_payload(cvs, warnings)), 200
+
+  def _cv_runtime_failure(self, exc: RuntimeError, *, cvs: dict, warnings: list):
+    try:
+      payload = json.loads(str(exc))
+    except json.JSONDecodeError:
+      return None
+    error = payload.get("error")
+    if not isinstance(error, dict):
+      return None
+    debug = dict(payload.get("debug") or {})
+    debug["cvs"] = cvs
+    debug["warnings"] = warnings
+    return response.failure(
+      str(error.get("type") or "cv_read_failed"),
+      str(error.get("message") or "CV 读取失败"),
+      str(error.get("detail") or ""),
+      debug,
+    ), 502
 
   def _read_cv_direct(
     self,
@@ -1639,9 +1699,16 @@ class ApiRouter:
     cv_context: dict | None,
     value: int | None = None,
   ) -> bytes:
+    context = cv_context or {}
+    op = context.get("op")
+    pom_address = context.get("pom_address")
     if value is None:
-      return CVReadPlan(cv_number=cv_number).request_frame(client_id=client_id)
-    return CVWritePlan(cv_number=cv_number, value=value).request_frame(client_id=client_id)
+      if op is None:
+        return CVReadPlan(cv_number=cv_number).request_frame(client_id=client_id)
+      return build_cv_read_frame(cv_number, client_id=client_id, op=int(op), pom_address=pom_address)
+    if op is None:
+      return CVWritePlan(cv_number=cv_number, value=value).request_frame(client_id=client_id)
+    return build_cv_write_frame(cv_number, value, client_id=client_id, op=int(op), pom_address=pom_address)
 
   def _build_chip_info_payload(self, cvs: dict, warnings: list) -> dict:
     manufacturer_id = int(cvs["8"]["value"])
@@ -1672,71 +1739,101 @@ class ApiRouter:
     cv_context: dict | None = None,
   ):
     context = cv_context or {}
+    pom_address = context.get("pom_address")
     try:
       frames = self._exchange_dxdcnet(
         controller,
         request_frame,
         timeout_seconds=timeout_seconds,
         max_packets=max_packets,
-        stop_when=self._build_cv_value_matcher(client_id, cv_number),
+        stop_when=self._build_cv_value_matcher(client_id, cv_number, pom_address=pom_address),
       )
     except TimeoutError as exc:
-      return response.failure(
+      return self._failure(
         "cv_read_timeout",
         "读取 CV 超时",
         str(exc),
-        {"cv": cv_number, "request_hex": request_frame.hex(" ")},
-      ), 504
+        status=504,
+        debug=self._cv_debug(cv=cv_number, client_id=client_id, request_frame=request_frame, pom_address=pom_address),
+      )
     except (OSError, ValueError) as exc:
-      return response.failure(
+      return self._failure(
         "cv_read_transport_error",
         "读取 CV 通信失败",
         str(exc),
-        {"cv": cv_number, "request_hex": request_frame.hex(" ")},
-      ), 502
+        status=502,
+        debug=self._cv_debug(cv=cv_number, client_id=client_id, request_frame=request_frame, pom_address=pom_address),
+      )
 
     ack = None
     for frame in frames:
       if frame.command == CMD_PROGRAM_TRACK_VALUE:
         value = parse_programmer_value(frame)
         if value.device_id == client_id and value.cv_number == cv_number:
-          return response.success({
+          if pom_address is not None and value.pom_address != pom_address:
+            continue
+          data = {
             "cv": cv_number,
             "value": value.value,
-            "method": "dxdcnet_programmer_direct_read",
+            "method": "dxdcnet_programmer_main_track_pom_read" if pom_address is not None else "dxdcnet_programmer_direct_read",
             "programming_target": context.get("programming_target", models.PROGRAMMING_TARGET_PROGRAMMING_TRACK),
-            "request_hex": request_frame.hex(" "),
-            "response": frame.to_debug_dict(),
-          }), 200
+            "request_hex": self._request_debug(request_frame),
+            "response": self._frame_debug(frame),
+          }
+          if pom_address is not None:
+            data["vehicle_address"] = pom_address
+            data["pom_address"] = value.pom_address
+            if context.get("vehicle_id"):
+              data["vehicle_id"] = context["vehicle_id"]
+          return response.success(data), 200
       if frame.command == CMD_PROGRAM_TRACK_ACK:
         parsed_ack = parse_programmer_ack(frame)
         if parsed_ack.device_id == client_id:
           ack = parsed_ack
 
     if ack is not None:
-      return response.failure(
+      if pom_address is not None and ack.ack_mode == PROGRAMMER_ACK_NOACK:
+        return self._failure(
+          "main_track_cv_read_no_ack",
+          "主轨 CV 读取未收到车辆确认",
+          f"车辆地址 {pom_address} 未返回 CV{cv_number} 读取值；请确认车号、车辆在主轨且轨道已上电，并确认解码器支持主轨读回或 RailCom。也可以改用编程轨读取。",
+          status=502,
+          debug=self._cv_debug(
+            cv=cv_number,
+            client_id=client_id,
+            request_frame=request_frame,
+            responses=frames,
+            pom_address=pom_address,
+            extra={
+              "ack": ack.ack_name,
+              "ack_mode": ack.ack_mode,
+            },
+          ),
+        )
+      return self._failure(
         "cv_read_ack_without_value",
         "控制器返回编程 ACK，但没有返回 CV 值",
         ack.ack_name,
-        {
-          "cv": cv_number,
-          "ack": ack.ack_name,
-          "ack_mode": ack.ack_mode,
-          "request_hex": request_frame.hex(" "),
-          "responses": [frame.to_debug_dict() for frame in frames],
-        },
-      ), 502
-    return response.failure(
+        status=502,
+        debug=self._cv_debug(
+          cv=cv_number,
+          client_id=client_id,
+          request_frame=request_frame,
+          responses=frames,
+          pom_address=pom_address,
+          extra={
+            "ack": ack.ack_name,
+            "ack_mode": ack.ack_mode,
+          },
+        ),
+      )
+    return self._failure(
       "cv_read_no_value",
       "控制器未返回匹配的 CV 值",
       "No 0x17 programmer value response matched the requested CV and client id",
-        {
-          "cv": cv_number,
-          "client_id": client_id,
-          "request_hex": request_frame.hex(" "),
-          "responses": [frame.to_debug_dict() for frame in frames],
-        },
-      ), 502
+      status=502,
+      debug=self._cv_debug(cv=cv_number, client_id=client_id, request_frame=request_frame, responses=frames, pom_address=pom_address),
+    )
 
   def _execute_cv_write(
     self,
@@ -1748,6 +1845,7 @@ class ApiRouter:
     cv_context: dict | None = None,
   ):
     context = cv_context or {}
+    pom_address = context.get("pom_address")
     retry_count = self._cv_write_busy_retry_count(controller)
     retry_delay = self._cv_write_busy_retry_delay_seconds(controller)
     busy_retries = 0
@@ -1760,19 +1858,33 @@ class ApiRouter:
           stop_when=self._build_cv_ack_matcher(client_id),
         )
       except TimeoutError as exc:
-        return response.failure(
+        return self._failure(
           "cv_write_timeout",
           "写入 CV 超时",
           str(exc),
-          {"cv": cv_number, "value": value, "request_hex": request_frame.hex(" "), "attempt": attempt + 1},
-        ), 504
+          status=504,
+          debug=self._cv_debug(
+            cv=cv_number,
+            client_id=client_id,
+            request_frame=request_frame,
+            pom_address=pom_address,
+            extra={"value": value, "attempt": attempt + 1},
+          ),
+        )
       except (OSError, ValueError) as exc:
-        return response.failure(
+        return self._failure(
           "cv_write_transport_error",
           "写入 CV 通信失败",
           str(exc),
-          {"cv": cv_number, "value": value, "request_hex": request_frame.hex(" "), "attempt": attempt + 1},
-        ), 502
+          status=502,
+          debug=self._cv_debug(
+            cv=cv_number,
+            client_id=client_id,
+            request_frame=request_frame,
+            pom_address=pom_address,
+            extra={"value": value, "attempt": attempt + 1},
+          ),
+        )
 
       matched_ack = None
       for frame in frames:
@@ -1784,15 +1896,19 @@ class ApiRouter:
         matched_ack = ack
         if ack.ack_mode == PROGRAMMER_ACK_BUSY and attempt < retry_count:
           busy_retries += 1
-          last_busy_debug = {
-            "cv": cv_number,
-            "value": value,
-            "ack": ack.ack_name,
-            "ack_mode": ack.ack_mode,
-            "request_hex": request_frame.hex(" "),
-            "attempt": attempt + 1,
-            "responses": [frame.to_debug_dict() for frame in frames],
-          }
+          last_busy_debug = self._cv_debug(
+            cv=cv_number,
+            client_id=client_id,
+            request_frame=request_frame,
+            responses=frames,
+            pom_address=pom_address,
+            extra={
+              "value": value,
+              "ack": ack.ack_name,
+              "ack_mode": ack.ack_mode,
+              "attempt": attempt + 1,
+            },
+          )
           if retry_delay > 0:
             time.sleep(retry_delay)
           break
@@ -1800,61 +1916,130 @@ class ApiRouter:
           data = {
             "cv": cv_number,
             "value": value,
-            "method": "dxdcnet_programmer_direct_write",
+            "method": "dxdcnet_programmer_main_track_pom_write" if pom_address is not None else "dxdcnet_programmer_direct_write",
             "programming_target": context.get("programming_target", models.PROGRAMMING_TARGET_PROGRAMMING_TRACK),
-            "request_hex": request_frame.hex(" "),
-            "response": frame.to_debug_dict(),
+            "request_hex": self._request_debug(request_frame),
+            "response": self._frame_debug(frame),
           }
           if busy_retries:
             data["busy_retries"] = busy_retries
+          if pom_address is not None:
+            data["vehicle_address"] = pom_address
+            data["vehicle_id"] = context.get("vehicle_id")
+          if context.get("readback_after_write"):
+            delay_seconds = float(controller.get("main_track_pom_verify_delay_seconds", 0.2))
+            if delay_seconds > 0:
+              time.sleep(delay_seconds)
+            read_frame = self._build_cv_request_frame(cv_number, client_id, context)
+            read_body, read_status = self._execute_cv_read(
+              controller,
+              cv_number,
+              client_id,
+              read_frame,
+              timeout_seconds=float(controller.get("main_track_pom_readback_timeout_seconds", controller.get("cv_timeout_seconds", 10.0))),
+              max_packets=32,
+              cv_context=context,
+            )
+            read_payload = json.loads(read_body.decode("utf-8"))
+            if read_status != 200:
+              return self._failure(
+                "cv_write_readback_failed",
+                "主轨 CV 写入后读回校验失败",
+                json.dumps(read_payload, ensure_ascii=False),
+                status=502,
+                debug=self._cv_debug(
+                  cv=cv_number,
+                  client_id=client_id,
+                  request_frame=request_frame,
+                  pom_address=pom_address,
+                  extra={
+                    "value": value,
+                    "vehicle_address": pom_address,
+                    "readback_request_hex": self._request_debug(read_frame),
+                  },
+                ),
+              )
+            data["readback"] = read_payload["data"]
+            if int(data["readback"]["value"]) != value:
+              return self._failure(
+                "cv_write_readback_mismatch",
+                "主轨 CV 写入后读回值不一致",
+                f"写入 {value}，读回 {data['readback']['value']}",
+                status=502,
+                debug=self._cv_debug(
+                  cv=cv_number,
+                  client_id=client_id,
+                  request_frame=request_frame,
+                  pom_address=pom_address,
+                  extra={
+                    "value": value,
+                    "readback": data["readback"],
+                    "vehicle_address": pom_address,
+                  },
+                ),
+              )
           return response.success(data), 200
-        return response.failure(
+        return self._failure(
           "cv_write_rejected",
           "控制器拒绝写入 CV",
           ack.ack_name,
-          {
-            "cv": cv_number,
-            "value": value,
-            "ack": ack.ack_name,
-            "ack_mode": ack.ack_mode,
-            "request_hex": request_frame.hex(" "),
-            "attempt": attempt + 1,
-            "busy_retries": busy_retries,
-            "last_busy": last_busy_debug,
-          },
-        ), 502
+          status=502,
+          debug=self._cv_debug(
+            cv=cv_number,
+            client_id=client_id,
+            request_frame=request_frame,
+            responses=frames,
+            pom_address=pom_address,
+            extra={
+              "value": value,
+              "ack": ack.ack_name,
+              "ack_mode": ack.ack_mode,
+              "attempt": attempt + 1,
+              "busy_retries": busy_retries,
+              "last_busy": last_busy_debug,
+            },
+          ),
+        )
       if matched_ack and matched_ack.ack_mode == PROGRAMMER_ACK_BUSY and attempt < retry_count:
         continue
       if matched_ack is not None:
         continue
       break
     if last_busy_debug is not None:
-      return response.failure(
+      return self._failure(
         "cv_write_rejected",
         "控制器拒绝写入 CV",
         "busy",
-        {
-          "cv": cv_number,
-          "value": value,
-          "ack": "busy",
-          "ack_mode": PROGRAMMER_ACK_BUSY,
-          "request_hex": request_frame.hex(" "),
-          "busy_retries": busy_retries,
-          "last_busy": last_busy_debug,
-        },
-      ), 502
-    return response.failure(
+        status=502,
+        debug=self._cv_debug(
+          cv=cv_number,
+          client_id=client_id,
+          request_frame=request_frame,
+          responses=frames,
+          pom_address=pom_address,
+          extra={
+            "value": value,
+            "ack": "busy",
+            "ack_mode": PROGRAMMER_ACK_BUSY,
+            "busy_retries": busy_retries,
+            "last_busy": last_busy_debug,
+          },
+        ),
+      )
+    return self._failure(
       "cv_write_no_ack",
       "控制器未返回匹配的写入 ACK",
       "No 0x15 programmer ACK response matched the requested client id",
-      {
-        "cv": cv_number,
-        "value": value,
-        "client_id": client_id,
-        "request_hex": request_frame.hex(" "),
-        "responses": [frame.to_debug_dict() for frame in frames],
-      },
-    ), 502
+      status=502,
+      debug=self._cv_debug(
+        cv=cv_number,
+        client_id=client_id,
+        request_frame=request_frame,
+        responses=frames,
+        pom_address=pom_address,
+        extra={"value": value},
+      ),
+    )
 
   def _cv_write_busy_retry_count(self, controller: dict) -> int:
     try:
@@ -1898,13 +2083,45 @@ class ApiRouter:
       )
     except (TypeError, ValueError) as exc:
       return response.failure("invalid_programming_target", "CV 编程位置无效", str(exc)), 400, None
-    if programming_target != models.PROGRAMMING_TARGET_PROGRAMMING_TRACK:
-      return response.failure(
-        "main_track_programming_not_supported",
-        "主轨编程尚未启用",
-        f"{operation_name}当前只支持编程轨目标",
-        {"programming_target": programming_target},
-      ), 400, None
+
+    if programming_target == models.PROGRAMMING_TARGET_MAIN_TRACK:
+      vehicle_id = str(request.get("vehicle_id") or "").strip()
+      if not vehicle_id:
+        return response.failure(
+          "vehicle_required_for_main_track_programming",
+          "主轨编程需要选择车辆",
+          f"{operation_name}选择主轨时必须提供 vehicle_id，后端需要车辆地址作为 POM 目标",
+          {"programming_target": programming_target, "warnings": ["main_track_vehicle_required"]},
+        ), 400, None
+      vehicle = self._lookup_vehicle_for_programming(state, vehicle_id)
+      if vehicle is None:
+        return response.failure(
+          "vehicle_not_found",
+          "车辆不存在",
+          f"主轨编程目标车辆不存在：{vehicle_id}",
+          {"programming_target": programming_target, "vehicle_id": vehicle_id},
+        ), 404, None
+      try:
+        vehicle_address = self._validate_vehicle_address(vehicle.get("address"))
+      except (TypeError, ValueError) as exc:
+        return response.failure(
+          "invalid_vehicle_address",
+          "主轨编程目标车辆地址无效",
+          str(exc),
+          {"programming_target": programming_target, "vehicle_id": vehicle_id},
+        ), 400, None
+      blocked = self._main_track_cv_preflight(controller, operation_name)
+      if blocked:
+        return blocked[0], blocked[1], None
+      return None, None, {
+        "programming_target": programming_target,
+        "op": PROGRAMMER_OP_MAIN_LOCO_POM,
+        "pom_address": vehicle_address,
+        "vehicle_id": vehicle_id,
+        "vehicle_address": vehicle_address,
+        "readback_after_write": True,
+      }
+
     blocked = self._cv_protocol_preflight(controller)
     if blocked:
       return blocked[0], blocked[1], None
@@ -1916,6 +2133,48 @@ class ApiRouter:
       "vehicle_address": None,
       "readback_after_write": False,
     }
+
+  def _lookup_vehicle_for_programming(self, state: dict, vehicle_id: str):
+    if self.vehicle_store:
+      vehicle = self.vehicle_store.get_vehicle(vehicle_id)
+      if vehicle is not None:
+        return vehicle
+    return self._find_by_id(state.get("vehicles", []), vehicle_id)
+
+  def _main_track_cv_preflight(self, controller: dict, operation_name: str):
+    blocked = self._digital_operation_mode_failure(controller, operation_name)
+    if blocked:
+      return blocked
+    readiness_warnings = self._controller_readiness_warnings(controller)
+    if readiness_warnings:
+      return response.failure(
+        "protocol_not_ready",
+        "DXDCNet UDP 端口或校验算法尚未确认",
+        f"不能发送真实主轨 POM 命令：{operation_name}",
+        {"warnings": readiness_warnings},
+      ), 409
+    booster_status = controller.get("booster_status")
+    if not isinstance(booster_status, dict) or booster_status.get("source") != "dxdcnet_status_0x23":
+      return response.failure(
+        "protocol_not_ready",
+        "主轨状态尚未确认",
+        "需要先读取控制器或执行通电操作，得到 0x23 Booster 状态后再执行主轨 POM",
+        {"warnings": ["booster_status_unconfirmed"]},
+      ), 409
+    if not booster_status.get("power_on", False):
+      return response.failure(
+        "main_track_power_required",
+        "主轨编程需要先给轨道通电",
+        "官方 App 主轨 POM 路径要求主轨已上电；请先点击“通电”并确认状态灯变绿",
+        {"warnings": ["main_track_power_required"]},
+      ), 409
+    if not booster_status.get("dcc_mode", False):
+      return response.failure(
+        "unsafe_track_mode",
+        "当前主轨不是 DCC 数码输出",
+        f"{operation_name} 只允许在 N、HO 或 G 的 DCC 数码模式下执行",
+        {"warnings": ["main_track_not_dcc"]},
+      ), 409
 
   def _cv_protocol_preflight(self, controller: dict):
     try:
