@@ -4,54 +4,6 @@ function notifyGatewayBusy(active) {
   }
 }
 
-const operationTokenKey = "digsight.operationToken";
-
-function sessionStorageValue(key) {
-  try {
-    return globalThis.sessionStorage?.getItem(key) || "";
-  } catch (_error) {
-    return "";
-  }
-}
-
-export function setOperationToken(token) {
-  const normalized = String(token || "").trim();
-  try {
-    if (normalized) {
-      globalThis.sessionStorage?.setItem(operationTokenKey, normalized);
-    } else {
-      globalThis.sessionStorage?.removeItem(operationTokenKey);
-    }
-  } catch (_error) {
-    // sessionStorage can be disabled by browser privacy settings; API errors remain explicit.
-  }
-}
-
-export function rememberOperationTokenFromState(_state) {
-  // The server intentionally never exposes the real operation token through public state.
-}
-
-function requestOperationToken() {
-  const promptFn = globalThis.prompt;
-  if (typeof promptFn !== "function") {
-    return "";
-  }
-  const token = String(promptFn("请输入操作授权令牌") || "").trim();
-  if (token) {
-    setOperationToken(token);
-  }
-  return token;
-}
-
-function clearOperationToken() {
-  setOperationToken("");
-}
-
-function operationHeaders() {
-  const token = sessionStorageValue(operationTokenKey) || requestOperationToken();
-  return token ? {"X-Digsight-Operation-Token": token} : {};
-}
-
 export async function requestJson(path, options = {}) {
   notifyGatewayBusy(true);
   try {
@@ -64,9 +16,6 @@ export async function requestJson(path, options = {}) {
     });
     const payload = await response.json();
     if (!payload.ok) {
-      if (payload.error?.type === "operation_not_authorized") {
-        clearOperationToken();
-      }
       const error = new Error(payload.error?.message || "请求失败");
       error.payload = payload;
       throw error;
@@ -114,18 +63,22 @@ export function readControllerInfo() {
 }
 
 export function saveControllerSettings(changes) {
-  return patchJson("/api/controller/settings", changes, {headers: operationHeaders()});
+  return patchJson("/api/controller/settings", changes);
+}
+
+export function setControllerTrackMode(trackMode) {
+  return patchJson("/api/controller/track-mode", {track_mode: trackMode});
 }
 
 export function setTrackPower(powered) {
-  return postJson("/api/track-power", {powered}, {headers: operationHeaders()});
+  return postJson("/api/track-power", {powered});
 }
 
 export function setDcControl(voltageV, direction) {
   return postJson("/api/dc-control", {
     voltage_v: voltageV,
     direction
-  }, {headers: operationHeaders()});
+  });
 }
 
 export async function importConfig(format, file) {
@@ -136,16 +89,12 @@ export async function importConfig(format, file) {
       headers: {
         "Content-Type": "application/octet-stream",
         "X-Import-Format": format,
-        "X-File-Name": file.name,
-        ...operationHeaders()
+        "X-File-Name": file.name
       },
       body: await file.arrayBuffer()
     });
     const payload = await response.json();
     if (!payload.ok) {
-      if (payload.error?.type === "operation_not_authorized") {
-        clearOperationToken();
-      }
       const error = new Error(payload.error?.message || "导入失败");
       error.payload = payload;
       throw error;
@@ -178,7 +127,7 @@ export function readChipInfo(options = {}) {
 }
 
 export function writeCv(cvNumber, value, confirmed = false, options = {}) {
-  return postJson("/api/cv/write", {...options, cv: cvNumber, value, confirmed}, {headers: operationHeaders()});
+  return postJson("/api/cv/write", {...options, cv: cvNumber, value, confirmed});
 }
 
 export function readAddress(vehicleId, options = {}) {
@@ -194,19 +143,19 @@ export function writeAddress(vehicleId, address, confirmed = false, options = {}
   if (vehicleId) {
     body.vehicle_id = vehicleId;
   }
-  return postJson("/api/address/write", body, {headers: operationHeaders()});
+  return postJson("/api/address/write", body);
 }
 
 export function updateVehicle(vehicleId, changes) {
-  return patchJson(`/api/vehicles/${encodeURIComponent(vehicleId)}`, changes, {headers: operationHeaders()});
+  return patchJson(`/api/vehicles/${encodeURIComponent(vehicleId)}`, changes);
 }
 
 export function createVehicle(changes) {
-  return postJson("/api/vehicles", changes, {headers: operationHeaders()});
+  return postJson("/api/vehicles", changes);
 }
 
 export function deleteVehicle(vehicleId) {
-  return deleteJson(`/api/vehicles/${encodeURIComponent(vehicleId)}`, {headers: operationHeaders()});
+  return deleteJson(`/api/vehicles/${encodeURIComponent(vehicleId)}`);
 }
 
 export function uploadVehicleImage(file) {
@@ -214,7 +163,7 @@ export function uploadVehicleImage(file) {
     return postJson("/api/vehicle-images", {
       file_name: file.name || "vehicle-image.png",
       content_base64: contentBase64
-    }, {headers: operationHeaders()});
+    });
   });
 }
 
@@ -231,34 +180,33 @@ function fileToBase64(file) {
 }
 
 export function reorderVehicles(vehicleIds) {
-  return patchJson("/api/vehicles/order", {vehicle_ids: vehicleIds}, {headers: operationHeaders()});
+  return patchJson("/api/vehicles/order", {vehicle_ids: vehicleIds});
 }
 
 export function createConsist(payload, members) {
   const body = typeof payload === "object" && payload !== null ? payload : {name: payload, members};
-  return postJson("/api/consists", body, {headers: operationHeaders()});
+  return postJson("/api/consists", body);
 }
 
 export function updateConsist(consistId, changes) {
-  return patchJson(`/api/consists/${encodeURIComponent(consistId)}`, changes, {headers: operationHeaders()});
+  return patchJson(`/api/consists/${encodeURIComponent(consistId)}`, changes);
 }
 
 export function deleteConsist(consistId) {
-  return deleteJson(`/api/consists/${encodeURIComponent(consistId)}`, {headers: operationHeaders()});
+  return deleteJson(`/api/consists/${encodeURIComponent(consistId)}`);
 }
 
 export function setConsistSpeed(consistId, speed, direction) {
-  return postJson(`/api/consists/${encodeURIComponent(consistId)}/speed`, {speed, direction}, {headers: operationHeaders()});
+  return postJson(`/api/consists/${encodeURIComponent(consistId)}/speed`, {speed, direction});
 }
 
 export function setLocoSpeed(vehicleId, speed, direction) {
-  return postJson("/api/loco/speed", {vehicle_id: vehicleId, speed, direction}, {headers: operationHeaders()});
+  return postJson("/api/loco/speed", {vehicle_id: vehicleId, speed, direction});
 }
 
 export function setLocoFunction(vehicleId, functionNumber, enabled, functionStates = {}) {
   return postJson(
     "/api/loco/function",
-    {vehicle_id: vehicleId, function_number: functionNumber, enabled, function_states: functionStates},
-    {headers: operationHeaders()}
+    {vehicle_id: vehicleId, function_number: functionNumber, enabled, function_states: functionStates}
   );
 }
