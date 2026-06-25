@@ -1,0 +1,49 @@
+{
+  "ip": "0.0.0.0",
+  "local_udp_port": 6667,
+  "settings": {},
+  "track_profiles": {
+    "n": {
+      "mode": "n",
+      "name": "N",
+      "output_value": 120,
+      "voltage_v": 12.0,
+      "max_voltage_v": 12.0,
+      "current_param": 129,
+      "current_limit_ma": null,
+      "max_current_limit_ma": 10200
+    },
+    "ho": {
+      "mode": "ho",
+      "name": "HO",
+      "output_value": 160,
+      "voltage_v": 15.2,
+      "max_voltage_v": 15.2,
+      "current_param": 130,
+      "current_limit_ma": null,
+      "max_current_limit_ma": 10200
+    },
+    "g": {
+      "mode": "g",
+      "name": "G",
+      "output_value": 180,
+      "voltage_v": 18.0,
+      "max_voltage_v": 18.0,
+      "current_param": 131,
+      "current_limit_ma": null,
+      "max_current_limit_ma": 10200
+    },
+    "dc": {
+      "mode": "dc",
+      "name": "DC",
+      "output_value": 0,
+      "voltage_v": 12.0,
+      "max_voltage_v": 15.2,
+      "current_param": 132,
+      "current_limit_ma": null,
+      "max_current_limit_ma": 10200
+    }
+  },
+  "udp_checksum_algorithm": "xor",
+  "udp_port": 12000
+}

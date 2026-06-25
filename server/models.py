@@ -1,8 +1,10 @@
 """Shared domain constants and validators."""
 
-CONTROLLER_DEFAULT_IP = "10.10.200.98"
+CONTROLLER_DEFAULT_IP = "0.0.0.0"
 CONTROLLER_KIND_DIGSIGHT = "digsight_controller"
-SUPPORTED_CONTROLLER_KINDS = {CONTROLLER_KIND_DIGSIGHT}
+CONTROLLER_CONFIG_FILES = {
+  CONTROLLER_KIND_DIGSIGHT: "Digsight_D9000.json",
+}
 DXDCNET_DEFAULT_UDP_PORT = 12000
 DXDCNET_DEFAULT_LOCAL_UDP_PORT = 6667
 DXDCNET_DEFAULT_CHECKSUM_ALGORITHM = "xor"
@@ -47,10 +49,15 @@ SCREEN_DIRECTION_LABELS = {
 
 
 def validate_controller_kind(kind: str) -> str:
-  value = str(kind or CONTROLLER_KIND_DIGSIGHT)
-  if value not in SUPPORTED_CONTROLLER_KINDS:
-    raise ValueError(f"unsupported controller kind: {value}")
+  value = str(kind or CONTROLLER_KIND_DIGSIGHT).strip().lower()
+  if not value or not value.endswith("_controller"):
+    raise ValueError(f"controller kind must use xx_controller format: {value}")
   return value
+
+
+def controller_config_file_name(kind: str) -> str:
+  controller_kind = validate_controller_kind(kind)
+  return CONTROLLER_CONFIG_FILES.get(controller_kind, f"{controller_kind}.json")
 
 
 def screen_direction_label(raw_value) -> str:

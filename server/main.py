@@ -3,8 +3,10 @@
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import argparse
+import ipaddress
 import os
 import posixpath
+import socket
 import sys
 import time
 from urllib.parse import unquote, urlparse
@@ -37,6 +39,7 @@ STATIC_PUBLIC_PREFIXES = (
 )
 MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
 MAX_IMPORT_BODY_BYTES = 64 * 1024 * 1024
+TRUSTED_DNS_HOSTS = {"localhost"}
 
 
 def build_health_payload(started_at: float, now: float, python_version: str) -> dict:
@@ -66,11 +69,108 @@ def is_public_static_path(raw_path: str) -> bool:
   return path in STATIC_PUBLIC_FILES or any(path.startswith(prefix) for prefix in STATIC_PUBLIC_PREFIXES)
 
 
+def _split_host_header(value: str) -> tuple[str, str]:
+  parsed = urlparse(f"//{value}")
+  host = parsed.hostname or ""
+  port = str(parsed.port or "")
+  return host.lower(), port
+
+
+def _is_ip_literal(host: str) -> bool:
+  try:
+    ipaddress.ip_address(host)
+    return True
+  except ValueError:
+    return False
+
+
+def _trusted_host_netloc(value: str) -> tuple[str, str] | None:
+  host, port = _split_host_header(value)
+  if not host:
+    return None
+  if _is_ip_literal(host) or host in TRUSTED_DNS_HOSTS:
+    return host, port
+  return None
+
+
+def _trusted_request_netloc(headers) -> tuple[str, str] | None:
+  return _trusted_host_netloc(headers.get("Host", ""))
+
+
+def _trusted_url_netloc(value: str) -> tuple[str, str] | None:
+  parsed = urlparse(value)
+  if parsed.scheme not in {"http", "https"}:
+    return None
+  return _trusted_host_netloc(parsed.netloc)
+
+
+def _origin_matches_host(headers) -> bool:
+  origin = headers.get("Origin", "")
+  request_netloc = _trusted_request_netloc(headers)
+  if request_netloc is None:
+    return False
+  if not origin:
+    return True
+  return _trusted_url_netloc(origin) == request_netloc
+
+
+def _referer_matches_host(headers) -> bool:
+  referer = headers.get("Referer", "")
+  request_netloc = _trusted_request_netloc(headers)
+  if request_netloc is None:
+    return False
+  if not referer:
+    return True
+  return _trusted_url_netloc(referer) == request_netloc
+
+
 def parse_gateway_args(argv=None):
   parser = argparse.ArgumentParser(description="Run Digsight-Center local gateway.")
-  parser.add_argument("--host", default=DEFAULT_HOST, help="HTTP listen host, defaults to all interfaces.")
+  parser.add_argument("--host", default=DEFAULT_HOST, help="HTTP listen host, defaults to all IPv4 interfaces.")
   parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="HTTP listen port.")
+  parser.add_argument(
+    "--trusted-host",
+    action="append",
+    default=[],
+    help="Additional DNS host allowed by Host/Origin checks.",
+  )
   return parser.parse_args(argv)
+
+
+class IPv6ThreadingHTTPServer(ThreadingHTTPServer):
+  address_family = socket.AF_INET6
+
+  def server_bind(self):
+    if hasattr(socket, "IPV6_V6ONLY"):
+      try:
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+      except OSError:
+        pass
+    super().server_bind()
+
+
+def server_class_for_host(host: str):
+  try:
+    address = ipaddress.ip_address(host)
+  except ValueError:
+    return ThreadingHTTPServer
+  return IPv6ThreadingHTTPServer if address.version == 6 else ThreadingHTTPServer
+
+
+def configure_trusted_dns_hosts(hosts: list[str]) -> None:
+  TRUSTED_DNS_HOSTS.clear()
+  TRUSTED_DNS_HOSTS.add("localhost")
+  TRUSTED_DNS_HOSTS.update(host.strip().lower() for host in hosts if host.strip())
+
+
+def format_listen_url(host: str, port: int) -> str:
+  try:
+    address = ipaddress.ip_address(host)
+  except ValueError:
+    return f"http://{host}:{port}/"
+  if address.version == 6:
+    return f"http://[{host}]:{port}/"
+  return f"http://{host}:{port}/"
 
 
 class DigsightHandler(SimpleHTTPRequestHandler):
@@ -217,12 +317,16 @@ class DigsightHandler(SimpleHTTPRequestHandler):
 
 def main():
   args = parse_gateway_args()
+  configure_trusted_dns_hosts(getattr(args, "trusted_host", []))
 
   os.chdir(PROJECT_ROOT)
-  server = ThreadingHTTPServer((args.host, args.port), DigsightHandler)
-  print(f"Digsight-Center gateway listening on http://{args.host}:{args.port}")
+  server_class = server_class_for_host(args.host)
+  server = server_class((args.host, args.port), DigsightHandler)
+  print(f"Digsight-Center gateway listening on {format_listen_url(args.host, args.port)}")
   if args.host == "0.0.0.0":
     print(f"Remote clients should open http://<this-mac-lan-ip>:{args.port}/")
+  elif args.host == "::":
+    print(f"Remote clients should open http://[<this-mac-ipv6>]:{args.port}/")
   server.serve_forever()
 
 
