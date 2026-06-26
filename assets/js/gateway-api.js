@@ -4,12 +4,17 @@ function notifyGatewayBusy(active) {
   }
 }
 
+const digsightClientHeader = {"X-Digsight-Client": "digsight-web"};
+const maxVehicleImageUploadBytes = 1536 * 1024;
+const maxVehicleImageDimension = 1600;
+
 export async function requestJson(path, options = {}) {
   notifyGatewayBusy(true);
   try {
     const response = await fetch(path, {
       ...options,
       headers: {
+        ...digsightClientHeader,
         "Content-Type": "application/json",
         ...(options.headers || {})
       }
@@ -50,6 +55,10 @@ export function getState() {
   return requestJson("/api/state", {method: "GET"});
 }
 
+export function getCapabilities() {
+  return requestJson("/api/capabilities", {method: "GET"});
+}
+
 export function getCvMetadata() {
   return requestJson("/api/cv/metadata", {method: "GET"});
 }
@@ -87,6 +96,7 @@ export async function importConfig(format, file) {
     const response = await fetch("/api/import/config", {
       method: "POST",
       headers: {
+        ...digsightClientHeader,
         "Content-Type": "application/octet-stream",
         "X-Import-Format": format,
         "X-File-Name": file.name
@@ -103,10 +113,6 @@ export async function importConfig(format, file) {
   } finally {
     notifyGatewayBusy(false);
   }
-}
-
-export function importZ21(file) {
-  return importConfig("z21_layout_config", file);
 }
 
 export function readCv(cvNumber, options = {}) {
@@ -159,12 +165,57 @@ export function deleteVehicle(vehicleId) {
 }
 
 export function uploadVehicleImage(file) {
-  return fileToBase64(file).then((contentBase64) => {
-    return postJson("/api/vehicle-images", {
-      file_name: file.name || "vehicle-image.png",
-      content_base64: contentBase64
-    });
+  return uploadVehicleImagePayload(file);
+}
+
+async function uploadVehicleImagePayload(file) {
+  const uploadFile = await compressVehicleImageForUpload(file);
+  const contentBase64 = await fileToBase64(uploadFile);
+  return postJson("/api/vehicle-images", {
+    file_name: uploadFile.name || "vehicle-image.webp",
+    content_base64: contentBase64
   });
+}
+
+async function compressVehicleImageForUpload(file) {
+  if (file.size <= maxVehicleImageUploadBytes) {
+    return file;
+  }
+  if (typeof createImageBitmap !== "function") {
+    throw new Error("图片超过上传限制，请选择更小的图片");
+  }
+  const bitmap = await createImageBitmap(file);
+  try {
+    const scale = Math.min(1, maxVehicleImageDimension / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const context = canvas.getContext("2d");
+    if (!context) {
+      throw new Error("图片压缩失败");
+    }
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((resolve, reject) => {
+      canvas.toBlob((value) => {
+        if (value) {
+          resolve(value);
+          return;
+        }
+        reject(new Error("图片压缩失败"));
+      }, "image/webp", 0.85);
+    });
+    if (blob.size > maxVehicleImageUploadBytes) {
+      throw new Error("图片压缩后仍超过上传限制，请选择更小的图片");
+    }
+    return new File([blob], vehicleImageWebpName(file.name), {type: "image/webp"});
+  } finally {
+    bitmap.close?.();
+  }
+}
+
+function vehicleImageWebpName(name) {
+  const base = String(name || "vehicle-image").replace(/\.[^.]*$/, "") || "vehicle-image";
+  return `${base}.webp`;
 }
 
 function fileToBase64(file) {
