@@ -2,6 +2,7 @@ import {
   createConsist,
   createVehicle,
   deleteVehicle,
+  getCapabilities,
   getControllerInfo,
   getCvMetadata,
   getState,
@@ -22,20 +23,34 @@ import {
   updateVehicle,
   writeAddress,
   writeCv
-} from "./gateway-api.js?v=20260620-cv-api";
-import {appState, replaceState} from "./state-store.js?v=20260620-cv-api";
-import {renderControllerHeader, renderControllerSettings} from "./controller-view.js?v=20260620-cv-api";
-import {renderCvPanel} from "./cv-view.js?v=20260620-cv-api";
+} from "./gateway-api.js";
+import {appState, replaceState} from "./state-store.js";
+import {renderControllerHeader, renderControllerSettings} from "./controller-view.js";
+import {renderCvPanel} from "./cv-view.js";
+import {buildCabWorkspaceHandlers} from "./cab-controller.js";
+import {buildCvPanelHandlers, createCvDomainModel} from "./cv-controller.js";
+import {buildCvRuntimeActions, newCvReadSessionId} from "./cv-runtime-actions.js";
+import {buildVehicleEditorHandlers} from "./vehicle-editor-controller.js";
+import {initializeApp, wireAppEvents} from "./app-bootstrap.js";
+import {renderControllerKindOptions, renderImportFormatOptions} from "./capability-selectors.js";
+import {buildCabWorkspaceActions} from "./cab-workspace-actions.js";
+import {buildLocoRuntimeActions} from "./loco-runtime-actions.js";
 import {
-  DEFAULT_FUNCTION_ICON_CATALOG,
-  loadFunctionIconCatalog,
+  FALLBACK_FUNCTION_ICON_CATALOG,
+  loadFunctionIconCatalog
+} from "./function-icon-catalog.js";
+import {importSelectedConfigFile} from "./import-actions.js";
+import {
+  renderVehicleRegistry
+} from "./vehicle-view.js";
+import {buildVehicleEditorActions} from "./vehicle-editor-actions.js";
+import {
   renderDcControl,
   renderLocoControl,
   renderUnsupportedVehicleControl,
-  renderVehicleControlWorkspace,
-  renderVehicleEditor,
-  renderVehicleRegistry
-} from "./vehicle-view.js?v=20260620-cv-api";
+  renderVehicleControlWorkspace
+} from "./vehicle-cab-view.js";
+import {renderVehicleEditor} from "./vehicle-editor-view.js";
 import {sortedConsistMembers} from "./consist-helpers.js";
 
 const elements = {
@@ -61,9 +76,9 @@ const elements = {
   navVehicleControl: document.getElementById("navVehicleControl"),
   navCvProgramming: document.getElementById("navCvProgramming"),
   navControllerSettings: document.getElementById("navControllerSettings"),
-  z21FileInput: document.getElementById("z21FileInput"),
+  importConfigFileInput: document.getElementById("importConfigFileInput"),
   importFormatSelect: document.getElementById("importFormatSelect"),
-  importZ21Button: document.getElementById("importZ21Button"),
+  importConfigButton: document.getElementById("importConfigButton"),
   importStrip: document.querySelector(".import-strip"),
   selectVehiclesButton: document.getElementById("selectVehiclesButton"),
   addVehicleButton: document.getElementById("addVehicleButton"),
@@ -107,10 +122,60 @@ const cvState = {
   programmingVehicleId: ""
 };
 
+const cvDomain = createCvDomainModel({appState, cvState, formatError, newCvReadSessionId});
+const cvRuntimeActions = buildCvRuntimeActions({
+  appState,
+  cvState,
+  cvDomain,
+  currentProgrammingTarget,
+  normalizeProgrammingTarget,
+  userVisibleWarnings,
+  syncControllerEndpoint,
+  readControllerInfo,
+  refreshState,
+  readChipInfoFromController,
+  cvProgrammingRequest,
+  readAddress,
+  writeAddress,
+  writeCv,
+  readCv,
+  setStatus,
+  formatError,
+  renderAll,
+  showDetailDialog
+});
+const {
+  downloadTextFile,
+  buildCvReadAllHandlers,
+  buildCvChipHandlers,
+  buildCvAddressHandlers,
+  buildSingleCvHandlers
+} = cvRuntimeActions;
+const locoRuntimeActions = buildLocoRuntimeActions({
+  appState,
+  controlledVehicle,
+  cabVehicle,
+  cabFunctionVehicle,
+  functionDefinition,
+  isDigitalOperationMode,
+  syncActiveCabControlState,
+  syncControllerEndpoint,
+  setLocoSpeed,
+  setLocoFunction,
+  setStatus,
+  formatError,
+  renderAll
+});
+const {
+  sendLocoSpeed,
+  sendCabSpeed,
+  sendCabFunction,
+  sendCabFunctionByMode
+} = locoRuntimeActions;
+
 let gatewayBusyCount = 0;
-let functionIconCatalog = DEFAULT_FUNCTION_ICON_CATALOG;
+let functionIconCatalog = FALLBACK_FUNCTION_ICON_CATALOG;
 const pressedFunctionKeys = new Map();
-const cabFunctionTimers = new Map();
 let draggedVehicleId = "";
 const NEW_VEHICLE_ID = "__new_vehicle__";
 
@@ -177,7 +242,10 @@ function formatErrorSummary(error) {
 const controllerWarningMessages = {
   "booster_dc_mode_reported": "控制器回报为 DC 模式",
   "booster_status_missing": "未收到轨道输出状态回包",
+  "booster_status_stale": "请先连接控制器并读取最新状态",
+  "booster_status_unconfirmed": "轨道状态未确认",
   "command_station_status_missing": "未收到命令站状态回包",
+  "controller_not_confirmed": "控制器连接状态未确认",
   "programming_track_current_limit_unconfirmed": "编程轨限流未确认",
   "programming_track_safety_failed": "编程轨安全校验未通过",
   "programming_track_status_stale": "编程轨状态已过期，请重新读取控制器信息",
@@ -476,7 +544,7 @@ function activateCab(cabId, options = {}) {
   }
   appState.activeCabId = cabId;
   appState.selectedVehicleId = appState.cabs[cabId].vehicleId || "";
-  syncLegacyControlFromCab(cabId);
+  syncActiveCabControlState(cabId);
   if (options.render === false) {
     return;
   }
@@ -495,7 +563,7 @@ function selectCabVehicle(cabId, vehicleId) {
   appState.cabs[cabId].vehicleId = vehicleId;
   appState.cabs[cabId].memberIndex = null;
   appState.selectedVehicleId = vehicleId;
-  syncLegacyControlFromCab(cabId);
+  syncActiveCabControlState(cabId);
   renderAll();
 }
 
@@ -533,7 +601,7 @@ function toggleCabExpanded(cabId) {
   cab.expanded = !cab.expanded;
   appState.activeCabId = cabId;
   appState.selectedVehicleId = cab.vehicleId || "";
-  syncLegacyControlFromCab(cabId);
+  syncActiveCabControlState(cabId);
   renderAll();
 }
 
@@ -545,7 +613,7 @@ function toggleCabFunctionNumbers(cabId) {
   cab.showFunctionNumbers = !cab.showFunctionNumbers;
   appState.activeCabId = cabId;
   appState.selectedVehicleId = cab.vehicleId || "";
-  syncLegacyControlFromCab(cabId);
+  syncActiveCabControlState(cabId);
   renderAll();
 }
 
@@ -558,11 +626,11 @@ function toggleCabFunctionLabels(cabId) {
   cab.expanded = false;
   appState.activeCabId = cabId;
   appState.selectedVehicleId = cab.vehicleId || "";
-  syncLegacyControlFromCab(cabId);
+  syncActiveCabControlState(cabId);
   renderAll();
 }
 
-function syncLegacyControlFromCab(cabId = appState.activeCabId) {
+function syncActiveCabControlState(cabId = appState.activeCabId) {
   const cab = appState.cabs[cabId] || activeCab();
   appState.control.vehicleId = cab.vehicleId || "";
   appState.control.speed = cab.speed || 0;
@@ -623,7 +691,7 @@ function sortCabVehicles(vehicles, cab) {
     if (key === "created_at") {
       return vehicle.created_at || "";
     }
-    return Number(vehicle.custom_sort_order ?? vehicle.z21_position ?? 0);
+    return Number(vehicle.custom_sort_order ?? vehicle.source_position ?? 0);
   };
   return [...vehicles].sort((left, right) => {
     const leftValue = value(left);
@@ -670,7 +738,7 @@ function syncCabSelectionForVisibleVehicles(visibleVehicles) {
     appState.activeCabId = "left";
   }
   appState.selectedVehicleId = appState.cabs[appState.activeCabId]?.vehicleId || appState.cabs.left.vehicleId || "";
-  syncLegacyControlFromCab(appState.activeCabId);
+  syncActiveCabControlState(appState.activeCabId);
 }
 
 function updateVehicleHeader(visibleVehicles, operationMode) {
@@ -773,8 +841,12 @@ function currentTrackProfile(trackMode = currentOperationMode()) {
   return stateProfiles[trackMode] || infoProfiles[trackMode] || {};
 }
 
+function controllerDescriptor(kind = appState.controller.kind || appState.capabilities.default_controller_kind) {
+  return (appState.capabilities.controllers || []).find((controller) => controller.kind === kind) || {};
+}
+
 async function syncControllerEndpoint() {
-  const kind = elements.controllerKindSelect.value || "digsight_controller";
+  const kind = elements.controllerKindSelect.value || appState.capabilities.default_controller_kind;
   const ip = elements.controllerIp.value.trim();
   if (!ip) {
     throw new Error("控制器 IP 不能为空");
@@ -783,11 +855,11 @@ async function syncControllerEndpoint() {
     return;
   }
   const result = await saveControllerSettings({kind, ip});
-  appState.controller.kind = result.kind || kind;
-  appState.controller.ip = result.ip || ip;
-  appState.controller.udp_port = result.udp_port || appState.controller.udp_port;
-  appState.controller.local_udp_port = result.local_udp_port || appState.controller.local_udp_port;
-  appState.controller.udp_checksum_algorithm = result.udp_checksum_algorithm || appState.controller.udp_checksum_algorithm;
+  appState.controller.kind = result.kind ?? kind;
+  appState.controller.ip = result.ip ?? ip;
+  appState.controller.udp_port = result.udp_port ?? appState.controller.udp_port;
+  appState.controller.local_udp_port = result.local_udp_port ?? appState.controller.local_udp_port;
+  appState.controller.udp_checksum_algorithm = result.udp_checksum_algorithm ?? appState.controller.udp_checksum_algorithm;
 }
 
 async function setOperationMode(trackMode) {
@@ -825,187 +897,52 @@ async function setProgrammingTarget(target) {
   }
 }
 
-function buildCabWorkspaceHandlers(operationMode, leftVehicles, rightVehicles) {
-  if (isDcOperationMode(operationMode)) {
-    return {
-      emptyText: "DC 模式不显示车辆"
-    };
-  }
-  return {
-    emptyText: `当前 ${operationModeName(operationMode)} 模式暂无车辆，请导入对应的 Z21 配置文件`,
-    onActivateCab: activateCab,
-    onSelectVehicle: selectCabVehicle,
-    selectionMode: appState.vehicleSelectionMode,
-    selectedVehicleIds: appState.selectedVehicleIds,
-    onToggleVehicleSelection: toggleVehicleSelection,
-    onEdit: showVehicleEditor,
-    onToggleCabExpanded: toggleCabExpanded,
-    onToggleCabFunctionNumbers: toggleCabFunctionNumbers,
-    onToggleCabFunctionLabels: toggleCabFunctionLabels,
-    onSwitchConsistMember: switchCabConsistMember,
-    cabVehicles: {left: leftVehicles, right: rightVehicles},
-    vehicles: appState.vehicles || [],
-    consists: appState.consists || [],
-    categories: appState.categories || [],
-    onCabCategoryFilter: (cabId, categoryId) => {
-      const cab = appState.cabs[cabId];
-      cab.categoryId = categoryId;
-      renderAll();
-    },
-    onCabSortChange: (cabId, sortKey, sortDirection) => {
-      const cab = appState.cabs[cabId];
-      cab.sortKey = sortKey;
-      cab.sortDirection = sortDirection;
-      renderAll();
-    },
-    onVehicleDragStart: (_cabId, vehicleId, event) => {
+function cabWorkspaceActions() {
+  return buildCabWorkspaceActions({
+    appState,
+    activateCab,
+    selectCabVehicle,
+    toggleVehicleSelection,
+    showVehicleEditor,
+    toggleCabExpanded,
+    toggleCabFunctionNumbers,
+    toggleCabFunctionLabels,
+    switchCabConsistMember,
+    renderAll,
+    saveCustomVehicleOrder,
+    setStatus,
+    formatError,
+    setDraggedVehicleId: (vehicleId) => {
       draggedVehicleId = vehicleId;
-      event.dataTransfer?.setData("text/plain", vehicleId);
     },
-    onVehicleDragOver: (_cabId, _vehicleId, event) => {
-      event.preventDefault();
-    },
-    onVehicleDrop: async (cabId, vehicleId, event, orderedVehicleIds = []) => {
-      event.preventDefault();
-      try {
-        await saveCustomVehicleOrder(cabId, vehicleId, orderedVehicleIds);
-      } catch (error) {
-        setStatus(formatError(error));
-      } finally {
-        draggedVehicleId = "";
-      }
-    },
-    onDirection: async (cabId, direction) => {
-      const cab = appState.cabs[cabId];
-      cab.direction = direction;
-      await sendCabSpeed(cabId, cab.speed, direction);
-    },
-    onSpeedPreview: (cabId, speed, direction) => {
-      const cab = appState.cabs[cabId];
-      if (!cab) {
-        return;
-      }
-      appState.activeCabId = cabId;
-      cab.speed = clampSpeed(speed);
-      cab.direction = direction;
-      syncLegacyControlFromCab(cabId);
-    },
-    onSpeed: async (cabId, speed, direction) => {
-      const cab = appState.cabs[cabId];
-      cab.speed = clampSpeed(speed);
-      cab.direction = direction;
-      await sendCabSpeed(cabId, cab.speed, direction);
-    },
-    onEmergencyStop: async (cabId) => {
-      const cab = appState.cabs[cabId];
-      cab.speed = 0;
-      await sendCabSpeed(cabId, 0, cab.direction);
-    },
-    onFunction: async (cabId, functionNumber, eventType = "click") => {
-      await sendCabFunctionByMode(cabId, functionNumber, eventType);
-    },
-    functionIconCatalog
-  };
+    sendCabSpeed,
+    clampSpeed,
+    syncActiveCabControlState,
+    sendCabFunctionByMode
+  });
 }
 
-function buildVehicleEditorHandlers(vehicle) {
-  const editorOptions = vehicleEditorOptions(appState.vehicles);
-  return {
-    isNew: vehicle?.id === NEW_VEHICLE_ID,
-    categories: appState.categories || [],
-    vehicles: appState.vehicles || [],
-    consists: appState.consists || [],
-    functionsByVehicle: functionsByVehicle(),
-    railwayOptions: editorOptions.railwayOptions,
-    decoderTypeOptions: editorOptions.decoderTypeOptions,
-    functionIconCatalog,
-    onBack: showVehicleRegistry,
-    onTypeChange: (type) => {
-      appState.editingVehicleDraft = {...vehicle, ...(appState.editingVehicleDraft || {}), type};
-      if (type === 3) {
-        appState.editingVehicleDraft.sync_function_control = Boolean(appState.editingVehicleDraft.sync_function_control);
-        appState.editingVehicleDraft.consist_kind = appState.editingVehicleDraft.consist_kind || "multiple_unit";
-        appState.editingVehicleDraft.energy_type = "";
-        appState.editingVehicleDraft.car_subtype = "";
-      } else {
-        appState.editingVehicleDraft.sync_function_control = false;
-        appState.editingVehicleDraft.consist_kind = "";
-        if (type === 0) {
-          appState.editingVehicleDraft.energy_type = appState.editingVehicleDraft.energy_type || "electric";
-          appState.editingVehicleDraft.car_subtype = "";
-        } else if (type === 1) {
-          appState.editingVehicleDraft.energy_type = "";
-          appState.editingVehicleDraft.car_subtype = appState.editingVehicleDraft.car_subtype || "passenger";
-        } else {
-          appState.editingVehicleDraft.energy_type = "";
-          appState.editingVehicleDraft.car_subtype = "";
-        }
-      }
-      renderAll();
-    },
-    onSave: async (changes) => {
-      try {
-        const existingConsist = consistForVehicle(vehicle.id);
-        let savedVehicle = null;
-        if (vehicle.id === NEW_VEHICLE_ID) {
-          savedVehicle = await createVehicle(changes);
-          setStatus("车辆已添加");
-        } else {
-          savedVehicle = await updateVehicle(vehicle.id, changes);
-          setStatus("车辆已保存");
-        }
-        if (Number(changes.type) === 3) {
-          await saveVehicleConsist(changes, savedVehicle.id || vehicle.id);
-          setStatus(existingConsist ? "重联/编组已保存" : "重联/编组已创建");
-        }
-        appState.editingVehicleId = "";
-        appState.editingVehicleDraft = null;
-        appState.vehicleSubview = "registry";
-        await refreshState();
-      } catch (error) {
-        setStatus(formatError(error));
-      }
-    },
-    onDelete: async () => {
-      if (vehicle.id === NEW_VEHICLE_ID) {
-        showVehicleRegistry();
-        return;
-      }
-      const confirmed = typeof globalThis.confirm === "function"
-        ? globalThis.confirm(`确认删除车辆 ${vehicle.name || vehicle.address}？`)
-        : false;
-      if (!confirmed) {
-        return;
-      }
-      try {
-        await deleteVehicle(vehicle.id);
-        setStatus("车辆已删除");
-        showVehicleRegistry();
-        await refreshState();
-      } catch (error) {
-        setStatus(formatError(error));
-      }
-    },
-    onImageFile: async (file) => {
-      try {
-        const result = await uploadVehicleImage(file);
-        if (vehicle.id === NEW_VEHICLE_ID) {
-          appState.editingVehicleDraft.image_path = result.image_path;
-          setStatus("车辆图片已上传，保存车辆后生效");
-          renderAll();
-        } else {
-          await updateVehicle(vehicle.id, {image_path: result.image_path});
-          setStatus("车辆图片已更新");
-          await refreshState();
-        }
-      } catch (error) {
-        setStatus(formatError(error));
-      }
-    }
-  };
+function vehicleEditorActions(vehicle) {
+  return buildVehicleEditorActions({
+    vehicle,
+    newVehicleId: NEW_VEHICLE_ID,
+    appState,
+    functionsByVehicle,
+    showVehicleRegistry,
+    renderAll,
+    consistForVehicle,
+    createVehicle,
+    updateVehicle,
+    saveVehicleConsist,
+    setStatus,
+    refreshState,
+    formatError,
+    deleteVehicle,
+    uploadVehicleImage
+  });
 }
 
-function buildCvPanelHandlers(vehicle) {
+function buildCvProgrammingVehicleHandlers() {
   return {
     onCvProgrammingVehicleChange: (vehicleId) => {
       cvState.programmingVehicleId = vehicleId || "";
@@ -1014,100 +951,17 @@ function buildCvPanelHandlers(vehicle) {
         cvState.address = targetVehicle.address ?? cvState.address;
       }
       renderAll();
-    },
-    onReadChipInfo: readChipInfo,
-    onResetDecoder: resetDecoder,
-    onReadKnownCv: readKnownCvList,
-    onReadFullCv: readFullCvList,
-    onCancelCvRead: cancelCurrentCvRead,
-    onShowCvErrorDetail: showDetailDialog,
+    }
+  };
+}
+
+function buildCvExportHandlers() {
+  return {
     onExportCvMarkdown: () => {
-      downloadTextFile(cvExportFileName("md"), buildCvMarkdown(cvState.cvList), "text/markdown;charset=utf-8");
+      downloadTextFile(cvDomain.cvExportFileName("md"), cvDomain.buildCvMarkdown(cvState.cvList), "text/markdown;charset=utf-8");
     },
     onExportCvCsv: () => {
-      downloadTextFile(cvExportFileName("csv"), buildCvCsv(cvState.cvList), "text/csv;charset=utf-8");
-    },
-    onReadAddress: async () => {
-      try {
-        const targetPayload = cvProgrammingRequest("地址读取");
-        if (!targetPayload) {
-          return;
-        }
-        const safetyReady = await refreshCvSafety("地址读取", targetPayload.programming_target);
-        if (!safetyReady) {
-          return;
-        }
-        const result = await runCvRequestWithSafetyRetry("地址读取", targetPayload.programming_target, () => readAddress(targetPayload.vehicle_id, targetPayload));
-        cvState.address = result.address;
-        setStatus(`地址：${result.address}`);
-        await refreshState();
-      } catch (error) {
-        setStatus(formatError(error));
-      }
-    },
-    onWriteAddress: async (address) => {
-      try {
-        const targetPayload = cvProgrammingRequest("地址写入");
-        if (!targetPayload) {
-          return;
-        }
-        const confirmed = globalThis.confirm ? globalThis.confirm(`确认写入车辆地址 ${address}？`) : true;
-        if (!confirmed) {
-          return;
-        }
-        const safetyReady = await refreshCvSafety("地址写入", targetPayload.programming_target);
-        if (!safetyReady) {
-          return;
-        }
-        const result = await runCvRequestWithSafetyRetry("地址写入", targetPayload.programming_target, () => writeAddress(targetPayload.vehicle_id, address, true, targetPayload));
-        cvState.address = result.address;
-        setStatus(`地址 ${result.address} 已写入`);
-        await refreshState();
-      } catch (error) {
-        setStatus(formatError(error));
-      }
-    },
-    onReadCv: async (cvNumber) => {
-      cvState.cvNumber = cvNumber;
-      try {
-        const targetPayload = cvProgrammingRequest("CV 读取");
-        if (!targetPayload) {
-          return;
-        }
-        const safetyReady = await refreshCvSafety("CV 读取", targetPayload.programming_target);
-        if (!safetyReady) {
-          return;
-        }
-        const result = await runCvRequestWithSafetyRetry("CV 读取", targetPayload.programming_target, () => readCv(cvNumber, targetPayload));
-        cvState.results[cvNumber] = result.value;
-        cvState.value = Number(result.value);
-        setStatus(`CV${cvNumber}: ${result.value}`);
-        renderAll();
-      } catch (error) {
-        setStatus(formatError(error));
-      }
-    },
-    onWriteCv: async (cvNumber, value) => {
-      cvState.cvNumber = cvNumber;
-      cvState.value = value;
-      try {
-        const targetPayload = cvProgrammingRequest("CV 写入");
-        if (!targetPayload) {
-          return;
-        }
-        const confirmed = globalThis.confirm ? globalThis.confirm(`确认写入 CV${cvNumber}=${value}？`) : true;
-        if (!confirmed) {
-          return;
-        }
-        const safetyReady = await refreshCvSafety("CV 写入", targetPayload.programming_target);
-        if (!safetyReady) {
-          return;
-        }
-        await runCvRequestWithSafetyRetry("CV 写入", targetPayload.programming_target, () => writeCv(cvNumber, value, true, targetPayload));
-        setStatus(`CV${cvNumber} 写入完成`);
-      } catch (error) {
-        setStatus(formatError(error));
-      }
+      downloadTextFile(cvDomain.cvExportFileName("csv"), cvDomain.buildCvCsv(cvState.cvList), "text/csv;charset=utf-8");
     }
   };
 }
@@ -1137,16 +991,36 @@ function buildControllerSettingsHandlers() {
 }
 
 function renderAll() {
+  const context = buildRenderContext();
+  syncVisibleState(context);
+  renderControllerShell(context);
+  if (context.isDcMode) {
+    renderDcModeView(context);
+    return;
+  }
+  renderActiveVehicleView(context);
+  renderActiveCvView(context);
+  renderActiveControllerView();
+  setVehicleSubviewState();
+}
+
+function buildRenderContext() {
   const operationMode = currentOperationMode();
-  const digitalMode = isDigitalOperationMode(operationMode);
-  const isDcMode = isDcOperationMode(operationMode);
   const visibleVehicles = vehiclesForOperationMode(operationMode);
-  const visibleFunctions = functionsForVehicles(visibleVehicles);
-  const leftVehicles = sortCabVehicles(filterCabVehicles(visibleVehicles, appState.cabs.left), appState.cabs.left);
-  const rightVehicles = sortCabVehicles(filterCabVehicles(visibleVehicles, appState.cabs.right), appState.cabs.right);
+  return {
+    operationMode,
+    digitalMode: isDigitalOperationMode(operationMode),
+    isDcMode: isDcOperationMode(operationMode),
+    visibleVehicles,
+    visibleFunctions: functionsForVehicles(visibleVehicles),
+    leftVehicles: sortCabVehicles(filterCabVehicles(visibleVehicles, appState.cabs.left), appState.cabs.left),
+    rightVehicles: sortCabVehicles(filterCabVehicles(visibleVehicles, appState.cabs.right), appState.cabs.right)
+  };
+}
+
+function syncVisibleState({digitalMode, visibleVehicles}) {
   syncCvProgrammingVehicle(visibleVehicles);
   syncCabSelectionForVisibleVehicles(visibleVehicles);
-  updateVehicleHeader(visibleVehicles, operationMode);
   syncVehicleSelectionToolbar(visibleVehicles);
   if (!digitalMode && appState.activeView === "cv") {
     appState.activeView = "vehicle";
@@ -1154,6 +1028,10 @@ function renderAll() {
   if (!digitalMode && appState.vehicleSubview !== "registry") {
     appState.vehicleSubview = "registry";
   }
+}
+
+function renderControllerShell({isDcMode, operationMode, visibleVehicles}) {
+  updateVehicleHeader(visibleVehicles, operationMode);
   renderControllerHeader(elements, appState.controller, {busy: isGatewayBusy(), controllerInfo: appState.controllerInfo});
   setNavState();
   setVehicleSubviewState();
@@ -1161,46 +1039,61 @@ function renderAll() {
   if (elements.importStrip) {
     elements.importStrip.hidden = isDcMode;
   }
+}
 
-  if (isDcMode) {
-    appState.vehicleSubview = "registry";
-    setVehicleSubviewState();
-    elements.vehicleCount.textContent = "DC";
-    elements.vehicleModeHint.textContent = "电压控制";
-    elements.vehicleEditView.hidden = true;
-    elements.vehicleControlDetailView.hidden = true;
-    renderDcControl(elements.vehicleRegistry, {
-      ...appState.dcControl,
-      maxVoltageV: currentTrackProfile("dc").max_voltage_v || 15.2
-    }, {
-      onVoltagePreview: (voltageV) => {
-        appState.dcControl.voltageV = voltageV;
-      },
-      onVoltage: async (voltageV, direction) => {
-        appState.dcControl.voltageV = voltageV;
-        appState.dcControl.direction = direction;
-        await sendDcControl();
-      },
-      onDirection: async (direction) => {
-        appState.dcControl.direction = direction;
-        await sendDcControl();
-      },
-      onEmergencyStop: async () => {
-        appState.dcControl.voltageV = 0;
-        await sendDcControl();
-      }
-    });
-    renderControllerSettings(elements, appState.controllerInfo, buildControllerSettingsHandlers());
-    return;
-  }
+function renderDcModeView() {
+  appState.vehicleSubview = "registry";
+  setVehicleSubviewState();
+  elements.vehicleCount.textContent = "DC";
+  elements.vehicleModeHint.textContent = "电压控制";
+  elements.vehicleEditView.hidden = true;
+  elements.vehicleControlDetailView.hidden = true;
+  renderDcControl(elements.vehicleRegistry, {
+    ...appState.dcControl,
+    maxVoltageV: currentTrackProfile("dc").max_voltage_v || 15.2
+  }, {
+    onVoltagePreview: (voltageV) => {
+      appState.dcControl.voltageV = voltageV;
+    },
+    onVoltage: async (voltageV, direction) => {
+      appState.dcControl.voltageV = voltageV;
+      appState.dcControl.direction = direction;
+      await sendDcControl();
+    },
+    onDirection: async (direction) => {
+      appState.dcControl.direction = direction;
+      await sendDcControl();
+    },
+    onEmergencyStop: async () => {
+      appState.dcControl.voltageV = 0;
+      await sendDcControl();
+    }
+  });
+  renderActiveControllerView();
+}
 
+function renderActiveVehicleView({operationMode, leftVehicles, rightVehicles, visibleFunctions, visibleVehicles}) {
   renderVehicleControlWorkspace(elements.vehicleRegistry, visibleVehicles, visibleFunctions, {
     activeCabId: appState.activeCabId,
     cabs: appState.cabs
-  }, buildCabWorkspaceHandlers(operationMode, leftVehicles, rightVehicles));
+  }, buildCabWorkspaceHandlers({
+    operationMode,
+    operationModeName,
+    leftVehicles,
+    rightVehicles,
+    appState,
+    actions: cabWorkspaceActions(),
+    functionIconCatalog
+  }));
 
   const vehicle = editingVehicle();
-  renderVehicleEditor(elements.vehicleEditView, vehicle, editingFunctions(vehicle), buildVehicleEditorHandlers(vehicle));
+  renderVehicleEditor(elements.vehicleEditView, vehicle, editingFunctions(vehicle), buildVehicleEditorHandlers({
+    vehicle,
+    appState,
+    editorOptions: vehicleEditorOptions(appState.vehicles),
+    actions: vehicleEditorActions(vehicle),
+    functionIconCatalog
+  }));
 
   const controlVehicle = controlledVehicle();
   renderLocoControl(
@@ -1235,520 +1128,27 @@ function renderAll() {
       functionIconCatalog
     }
   );
+}
 
+function renderActiveCvView({visibleVehicles}) {
+  const vehicle = editingVehicle();
   const cvProgrammingTargetVehicle = currentProgrammingTarget() === "main_track" ? selectedCvProgrammingVehicle() : null;
   renderCvPanel(elements, cvProgrammingTargetVehicle, appState.cvMetadata, {
     ...cvState,
     programmingTarget: currentProgrammingTarget(),
     programmingVehicles: visibleVehicles
-  }, buildCvPanelHandlers(vehicle));
+  }, buildCvPanelHandlers({
+    programmingVehicleHandlers: () => buildCvProgrammingVehicleHandlers(vehicle),
+    chipHandlers: buildCvChipHandlers,
+    readAllHandlers: buildCvReadAllHandlers,
+    exportHandlers: buildCvExportHandlers,
+    addressHandlers: buildCvAddressHandlers,
+    singleCvHandlers: buildSingleCvHandlers
+  }));
+}
 
+function renderActiveControllerView() {
   renderControllerSettings(elements, appState.controllerInfo, buildControllerSettingsHandlers());
-  setVehicleSubviewState();
-}
-
-async function refreshCvSafety(operationName, programmingTarget = currentProgrammingTarget(), options = {}) {
-  await syncControllerEndpoint();
-  const target = normalizeProgrammingTarget(programmingTarget);
-  if (target === "main_track") {
-    if (options.force) {
-      setStatus(`主轨${operationName}状态未确认，正在重新读取控制器信息`);
-      await readControllerInfo();
-      await refreshState();
-    }
-    setStatus(`主轨${operationName}已选择车辆，正在等待后端校验 POM 协议状态`);
-    return true;
-  }
-  const warningMessages = userVisibleWarnings(appState.controllerInfo?.cv_safety_warnings || []);
-  if (!appState.controllerInfo?.safe_for_cv || options.force) {
-    setStatus(`控制器安全状态未确认，正在重新读取控制器信息：${warningMessages.join("，") || "等待 0x23 状态"}`);
-    const result = await readControllerInfo();
-    await refreshState();
-    if (!result.safe_for_cv) {
-      const nextWarningMessages = userVisibleWarnings(result.warnings || []);
-      setStatus(`控制器安全状态仍未确认：${nextWarningMessages.join("，") || "CV 安全状态未确认"}`);
-    }
-    return Boolean(result.safe_for_cv);
-  }
-  setStatus(`控制器安全状态已确认，正在执行${operationName}`);
-  return true;
-}
-
-async function runCvRequestWithSafetyRetry(operationName, programmingTarget, requestFn) {
-  try {
-    return await requestFn();
-  } catch (error) {
-    if (!isRetryableCvSafetyError(error)) {
-      throw error;
-    }
-    const safetyReady = await refreshCvSafety(operationName, programmingTarget, {force: true});
-    if (!safetyReady && normalizeProgrammingTarget(programmingTarget) !== "main_track") {
-      throw error;
-    }
-    return await requestFn();
-  }
-}
-
-function isRetryableCvSafetyError(error) {
-  const warningSet = new Set(error.payload?.debug?.warnings || []);
-  return error.payload?.error?.type === "protocol_not_ready"
-    && (
-      warningSet.has("programming_track_status_unconfirmed")
-      || warningSet.has("programming_track_status_stale")
-      || warningSet.has("booster_status_unconfirmed")
-      || warningSet.has("booster_status_stale")
-    );
-}
-
-async function readChipInfo() {
-  cvState.results = {};
-  cvState.chipInfo = null;
-  try {
-    const targetPayload = cvProgrammingRequest("芯片信息读取");
-    if (!targetPayload) {
-      return;
-    }
-    const safetyReady = await refreshCvSafety("芯片信息读取", targetPayload.programming_target);
-    if (!safetyReady) {
-      return;
-    }
-    const chipInfo = await runCvRequestWithSafetyRetry("芯片信息读取", targetPayload.programming_target, () => readChipInfoFromController(targetPayload));
-    for (const [cvNumber, result] of Object.entries(chipInfo.cvs || {})) {
-      cvState.results[Number(cvNumber)] = result.value;
-    }
-    cvState.chipInfo = chipInfo;
-    setStatus("芯片信息已读取");
-  } catch (error) {
-    cvState.chipInfo = null;
-    setStatus(formatError(error));
-  } finally {
-    renderAll();
-  }
-}
-
-async function resetDecoder() {
-  const resetMethod = resolveDecoderResetMethod();
-  const resetCommand = `CV${resetMethod.cv}=${resetMethod.value}`;
-  const sourceText = resetMethod.source ? `来源：${resetMethod.source}` : "来源：通用 DCC 复位约定";
-  const methodText = resetMethod.configured
-    ? `已按 ${resetMethod.profileName} 厂商 CV 表选择复位方法：${resetCommand}。`
-    : `未读取到可匹配的厂商 CV 表，将使用通用复位方法：${resetCommand}。`;
-  const manufacturerText = resetMethod.manufacturerName
-    ? `当前芯片厂商：${resetMethod.manufacturerName}${resetMethod.manufacturerId === null ? "" : ` (${resetMethod.manufacturerId})`}`
-    : "当前尚未读取芯片厂商信息。";
-  const message = [
-    "确认重置编程轨上的当前芯片？",
-    manufacturerText,
-    methodText,
-    sourceText,
-    `地址通常会变为 ${resetMethod.defaultAddress || 3}，当前 CV、功能映射、速度曲线和声音/厂家设置可能被恢复。`,
-    "少数厂家不使用通用复位值，请先确认该芯片手册。"
-  ].join("\n");
-  const confirmed = typeof globalThis.confirm === "function" ? globalThis.confirm(message) : false;
-  if (!confirmed) {
-    return;
-  }
-  try {
-    const targetPayload = cvProgrammingRequest("芯片重置");
-    if (!targetPayload) {
-      return;
-    }
-    const safetyReady = await refreshCvSafety("芯片重置", targetPayload.programming_target);
-    if (!safetyReady) {
-      return;
-    }
-    await runCvRequestWithSafetyRetry("芯片重置", targetPayload.programming_target, () => writeCv(resetMethod.cv, resetMethod.value, true, targetPayload));
-    cvState.chipInfo = null;
-    cvState.results = {};
-    cvState.cvList = {
-      manufacturer_id: null,
-      manufacturer_name: "",
-      rows: [],
-      readAt: ""
-    };
-    cvState.address = null;
-    setStatus(`芯片重置命令已发送：${resetCommand}；请按芯片手册等待或重新上下电后再读取地址/芯片信息`);
-    renderAll();
-  } catch (error) {
-    setStatus(formatError(error));
-    renderAll();
-  }
-}
-
-function resolveDecoderResetMethod() {
-  const manufacturerId = currentDecoderManufacturerId();
-  const catalog = appState.cvMetadata?.cv_catalog || {};
-  const profileName = manufacturerId === null || manufacturerId === undefined
-    ? null
-    : catalog.profile_map?.[String(manufacturerId)];
-  const profile = profileName ? catalog.vendor_profiles?.[profileName] : null;
-  const configuredMethod = profile?.reset_method || null;
-  const registry = appState.cvMetadata?.manufacturer_registry?.known_ids || {};
-  const unassigned = appState.cvMetadata?.manufacturer_registry?.unassigned_notes || {};
-  const manufacturerKey = manufacturerId === null || manufacturerId === undefined ? "" : String(manufacturerId);
-  const manufacturerName = cvState.chipInfo?.manufacturer_name
-    || cvState.cvList?.manufacturer_name
-    || profile?.manufacturer_name
-    || profile?.profile_name
-    || registry[manufacturerKey]
-    || unassigned[manufacturerKey]
-    || null;
-  if (isValidResetMethod(configuredMethod)) {
-    return {
-      cv: Number(configuredMethod.cv),
-      value: Number(configuredMethod.value),
-      label: configuredMethod.label || "恢复出厂设置",
-      source: configuredMethod.source || profile?.source || "",
-      defaultAddress: Number(configuredMethod.default_address || 3),
-      requiresPowerCycle: Boolean(configuredMethod.requires_power_cycle),
-      notes: configuredMethod.notes || [],
-      configured: true,
-      manufacturerId,
-      manufacturerName,
-      profileName
-    };
-  }
-  return {
-    cv: 8,
-    value: 8,
-    label: "恢复出厂设置",
-    source: "",
-    defaultAddress: 3,
-    requiresPowerCycle: true,
-    notes: [],
-    configured: false,
-    manufacturerId,
-    manufacturerName,
-    profileName
-  };
-}
-
-function currentDecoderManufacturerId() {
-  if (cvState.chipInfo?.manufacturer_id !== null && cvState.chipInfo?.manufacturer_id !== undefined) {
-    return Number(cvState.chipInfo.manufacturer_id);
-  }
-  if (cvState.cvList?.manufacturer_id !== null && cvState.cvList?.manufacturer_id !== undefined) {
-    return Number(cvState.cvList.manufacturer_id);
-  }
-  const cv8Value = Number(cvState.results?.[8]);
-  return Number.isInteger(cv8Value) ? cv8Value : null;
-}
-
-function isValidResetMethod(method) {
-  if (!method) {
-    return false;
-  }
-  const cvNumber = Number(method.cv);
-  const value = Number(method.value);
-  return Number.isInteger(cvNumber)
-    && cvNumber >= 1
-    && cvNumber <= 1024
-    && Number.isInteger(value)
-    && value >= 0
-    && value <= 255;
-}
-
-function cvNumbersFromSource(source) {
-  const values = Array.isArray(source)
-    ? source
-    : (source && typeof source === "object" ? Object.keys(source) : []);
-  return values
-    .map((value) => Number(value))
-    .filter((value) => Number.isInteger(value) && value >= 1 && value <= 1024);
-}
-
-function sortedUniqueCvNumbers(numbers) {
-  return Array.from(new Set(numbers)).sort((left, right) => left - right);
-}
-
-function cvNumbersForReadMode(readMode, manufacturerId) {
-  if (readMode === "full") {
-    return Array.from({length: 1024}, (_, index) => index + 1);
-  }
-  const catalog = appState.cvMetadata?.cv_catalog || {};
-  const standardNumbers = cvNumbersFromSource(catalog.standard_explicit_numbers || catalog.standard_definitions);
-  const cvNumbers = sortedUniqueCvNumbers(standardNumbers);
-  if (!cvNumbers.includes(8)) {
-    cvNumbers.push(8);
-  }
-  appendVendorCvNumbers(cvNumbers, manufacturerId, new Set());
-  const orderedNumbers = sortedUniqueCvNumbers(cvNumbers);
-  return manufacturerId === null || manufacturerId === undefined
-    ? [8, ...orderedNumbers.filter((cvNumber) => cvNumber !== 8)]
-    : orderedNumbers;
-}
-
-function appendVendorCvNumbers(cvNumbers, manufacturerId, readNumbers) {
-  if (manufacturerId === null || manufacturerId === undefined) {
-    return;
-  }
-  const catalog = appState.cvMetadata?.cv_catalog || {};
-  const profileName = catalog.profile_map?.[String(Number(manufacturerId))];
-  if (!profileName) {
-    return;
-  }
-  const vendorNumbers = cvNumbersFromSource(
-    catalog.vendor_explicit_numbers?.[profileName] || catalog.vendor_profiles?.[profileName]?.cv_definitions
-  );
-  const existingNumbers = new Set([...cvNumbers, ...readNumbers]);
-  for (const cvNumber of sortedUniqueCvNumbers(vendorNumbers)) {
-    if (!existingNumbers.has(cvNumber)) {
-      cvNumbers.push(cvNumber);
-      existingNumbers.add(cvNumber);
-    }
-  }
-}
-
-function manufacturerNameForCvList(manufacturerId) {
-  if (manufacturerId === null || manufacturerId === undefined || manufacturerId === "") {
-    return "未知厂家";
-  }
-  const catalog = appState.cvMetadata?.cv_catalog || {};
-  const registry = appState.cvMetadata?.manufacturer_registry?.known_ids || {};
-  const unassigned = appState.cvMetadata?.manufacturer_registry?.unassigned_notes || {};
-  const key = String(Number(manufacturerId));
-  const profileName = catalog.profile_map?.[key];
-  const profile = profileName ? catalog.vendor_profiles?.[profileName] : null;
-  return profile?.manufacturer_name
-    || registry[key]
-    || unassigned[key]
-    || `厂家 ID ${Number(manufacturerId)}`;
-}
-
-function updateCvListManufacturer(manufacturerId) {
-  const numericManufacturerId = Number(manufacturerId);
-  if (!Number.isInteger(numericManufacturerId)) {
-    return;
-  }
-  cvState.cvList.manufacturer_id = numericManufacturerId;
-  cvState.cvList.manufacturer_name = manufacturerNameForCvList(numericManufacturerId);
-}
-
-function cvMeaningForNumber(cvNumber, manufacturerId) {
-  const catalog = appState.cvMetadata?.cv_catalog || {};
-  const numericCv = Number(cvNumber);
-  const profileName = manufacturerId === null || manufacturerId === undefined
-    ? null
-    : catalog.profile_map?.[String(Number(manufacturerId))];
-  const profile = profileName ? catalog.vendor_profiles?.[profileName] : null;
-  return profile?.cv_definitions?.[String(numericCv)]
-    || catalog.standard_definitions?.[String(numericCv)]
-    || "未知/厂家自定义";
-}
-
-function cvListRowFromResult(cvNumber, result, manufacturerId) {
-  return {
-    cv: cvNumber,
-    meaning: cvMeaningForNumber(cvNumber, manufacturerId),
-    value: Number(result.value),
-    ok: true,
-    error: "",
-    error_detail: ""
-  };
-}
-
-function cvListRowFromError(cvNumber, error, manufacturerId) {
-  const formatted = formatError(error);
-  const summary = typeof formatted === "object" ? formatted.summary : String(formatted);
-  const detail = typeof formatted === "object" ? formatted.detail : String(error?.stack || summary);
-  return {
-    cv: cvNumber,
-    meaning: cvMeaningForNumber(cvNumber, manufacturerId),
-    value: null,
-    ok: false,
-    error: summary,
-    error_detail: detail
-  };
-}
-
-function isCvReadListRowError(error) {
-  const type = String(error?.payload?.error?.type || "");
-  return type.startsWith("cv_read_");
-}
-
-function cvListProgressText() {
-  const totalCount = cvState.cvList?.total_count || cvState.cvList?.read_count || 0;
-  return `${cvState.cvList?.read_count || 0}/${totalCount}`;
-}
-
-async function readKnownCvList() {
-  await readCvListWithMode("known");
-}
-
-async function readFullCvList() {
-  const confirmed = typeof globalThis.confirm === "function"
-    ? globalThis.confirm("完整扫描会逐个读取 CV1-CV1024，耗时明显更长。确认开始完整扫描？")
-    : false;
-  if (!confirmed) {
-    return;
-  }
-  await readCvListWithMode("full");
-}
-
-function newCvReadSessionId() {
-  if (globalThis.crypto?.randomUUID) {
-    return globalThis.crypto.randomUUID();
-  }
-  return `cv-read-${Date.now()}-${Math.round(Math.random() * 1000000)}`;
-}
-
-async function cancelCurrentCvRead() {
-  if (!cvState.cvReadSessionId || !cvState.cvListReading) {
-    return;
-  }
-  cvState.cvReadCancelling = true;
-  setStatus("正在中止 CV 读取");
-  renderAll();
-}
-
-async function readCvListWithMode(readMode) {
-  try {
-    const operationName = readMode === "full" ? "完整 CV 扫描" : "已知 CV 读取";
-    const targetPayload = cvProgrammingRequest(operationName);
-    if (!targetPayload) {
-      return;
-    }
-    const safetyReady = await refreshCvSafety(operationName, targetPayload.programming_target);
-    if (!safetyReady) {
-      return;
-    }
-    cvState.cvListReading = true;
-    cvState.cvReadCancelling = false;
-    cvState.cvReadSessionId = newCvReadSessionId();
-    let manufacturerId = currentDecoderManufacturerId();
-    const cvNumbers = cvNumbersForReadMode(readMode, manufacturerId);
-    const readNumbers = new Set();
-    cvState.cvList = {
-      manufacturer_id: manufacturerId,
-      manufacturer_name: manufacturerNameForCvList(manufacturerId),
-      rows: [],
-      readAt: new Date().toISOString(),
-      read_mode: readMode,
-      session_id: cvState.cvReadSessionId,
-      ok_count: 0,
-      read_count: 0,
-      total_count: cvNumbers.length,
-      cancelled: false
-    };
-    renderAll();
-    for (let index = 0; index < cvNumbers.length; index += 1) {
-      if (cvState.cvReadCancelling) {
-        cvState.cvList.cancelled = true;
-        break;
-      }
-      const cvNumber = cvNumbers[index];
-      if (readNumbers.has(cvNumber)) {
-        continue;
-      }
-      readNumbers.add(cvNumber);
-      let row;
-      try {
-        const result = await runCvRequestWithSafetyRetry(
-          operationName,
-          targetPayload.programming_target,
-          () => readCv(cvNumber, targetPayload)
-        );
-        row = cvListRowFromResult(cvNumber, result, manufacturerId);
-      } catch (error) {
-        if (!isCvReadListRowError(error)) {
-          throw error;
-        }
-        row = cvListRowFromError(cvNumber, error, manufacturerId);
-      }
-      if (row.ok) {
-        cvState.results[Number(row.cv)] = Number(row.value);
-        if (Number(row.cv) === 8) {
-          manufacturerId = Number(row.value);
-          updateCvListManufacturer(manufacturerId);
-          appendVendorCvNumbers(cvNumbers, manufacturerId, readNumbers);
-          cvState.cvList.total_count = cvNumbers.length;
-        }
-      }
-      cvState.cvList.rows.push(row);
-      cvState.cvList.read_count = cvState.cvList.rows.length;
-      cvState.cvList.ok_count = cvState.cvList.rows.filter((item) => item.ok).length;
-      cvState.cvList.total_count = cvNumbers.length;
-      const progressText = cvListProgressText();
-      if (row.ok) {
-        setStatus(`${operationName}进行中：${progressText}`);
-      } else {
-        setStatus({summary: `CV${cvNumber}：${row.error}`, detail: row.error_detail});
-      }
-      renderAll();
-    }
-    const manufacturer = cvState.cvList.manufacturer_id === null || cvState.cvList.manufacturer_id === undefined
-      ? cvState.cvList.manufacturer_name
-      : `${cvState.cvList.manufacturer_name} (${cvState.cvList.manufacturer_id})`;
-    setStatus(cvState.cvList.cancelled
-      ? `CV 读取已中止：${cvListProgressText()}`
-      : `${operationName}完成：${cvListProgressText()}，${manufacturer}`);
-  } catch (error) {
-    setStatus(formatError(error));
-  } finally {
-    cvState.cvListReading = false;
-    cvState.cvReadSessionId = "";
-    cvState.cvReadCancelling = false;
-    renderAll();
-  }
-}
-
-function cvExportFileName(extension) {
-  const manufacturer = (cvState.cvList.manufacturer_name || "decoder").replace(/[^A-Za-z0-9_-]+/g, "-");
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  return `cv-list-${manufacturer}-${stamp}.${extension}`;
-}
-
-function buildCvMarkdown(cvList) {
-  const rows = cvList.rows || [];
-  const manufacturer = cvList.manufacturer_id === null || cvList.manufacturer_id === undefined
-    ? (cvList.manufacturer_name || "未知厂家")
-    : `${cvList.manufacturer_name} (${cvList.manufacturer_id})`;
-  const lines = [
-    "# CV值列表",
-    "",
-    `- 生产厂家：${manufacturer}`,
-    `- 读取时间：${cvList.readAt || ""}`,
-    "",
-    "| CV地址 | 含义 | 值 |",
-    "| --- | --- | --- |"
-  ];
-  for (const row of rows) {
-    lines.push(`| ${row.cv} | ${escapeMarkdownCell(row.meaning)} | ${row.ok ? row.value : `读取失败：${escapeMarkdownCell(row.error || "")}`} |`);
-  }
-  return `${lines.join("\n")}\n`;
-}
-
-function buildCvCsv(cvList) {
-  const rows = cvList.rows || [];
-  const lines = [["CV地址", "含义", "值"].map(csvEscape).join(",")];
-  for (const row of rows) {
-    lines.push([row.cv, row.meaning, row.ok ? row.value : `读取失败：${row.error || ""}`].map(csvEscape).join(","));
-  }
-  return `${lines.join("\n")}\n`;
-}
-
-function escapeMarkdownCell(value) {
-  return String(value ?? "").replaceAll("|", "\\|").replace(/\r?\n/g, " ");
-}
-
-function csvEscape(value) {
-  const text = String(value ?? "");
-  if (/[",\r\n]/.test(text)) {
-    return `"${text.replaceAll('"', '""')}"`;
-  }
-  return text;
-}
-
-function downloadTextFile(fileName, content, mimeType) {
-  const blob = new Blob([content], {type: mimeType});
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = fileName;
-  document.body.append(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
 }
 
 async function sendDcControl() {
@@ -1762,123 +1162,6 @@ async function sendDcControl() {
   } catch (error) {
     setStatus(formatError(error));
   }
-}
-
-async function sendLocoSpeed(speed, direction) {
-  const vehicle = controlledVehicle();
-  if (!vehicle || !isDigitalOperationMode()) {
-    return;
-  }
-  try {
-    await syncControllerEndpoint();
-    await setLocoSpeed(vehicle.id, speed, direction);
-    setStatus(`速度 ${speed} / ${direction === "reverse" ? "后退" : "前进"}`);
-  } catch (error) {
-    setStatus(formatError(error));
-  } finally {
-    renderAll();
-  }
-}
-
-async function sendCabSpeed(cabId, speed, direction) {
-  const vehicle = cabVehicle(cabId);
-  const cab = appState.cabs[cabId];
-  if (!vehicle || !cab || !isDigitalOperationMode()) {
-    return;
-  }
-  appState.activeCabId = cabId;
-  appState.selectedVehicleId = vehicle.id;
-  syncLegacyControlFromCab(cabId);
-  try {
-    await syncControllerEndpoint();
-    await setLocoSpeed(vehicle.id, speed, direction);
-    setStatus(`${cabId === "left" ? "左控制台" : "右控制台"}：${vehicle.name} 速度 ${speed} / ${direction === "reverse" ? "后退" : "前进"}`);
-  } catch (error) {
-    setStatus(formatError(error));
-  } finally {
-    renderAll();
-  }
-}
-
-async function setCabFunctionState(cabId, functionNumber, enabled) {
-  const vehicle = cabVehicle(cabId);
-  const targetVehicle = cabFunctionVehicle(cabId);
-  const cab = appState.cabs[cabId];
-  if (!vehicle || !targetVehicle || !cab || !isDigitalOperationMode()) {
-    return;
-  }
-  appState.activeCabId = cabId;
-  appState.selectedVehicleId = vehicle.id;
-  const functionKey = String(functionNumber);
-  const previousEnabled = Boolean(cab.functions[functionKey]);
-  cab.functions[functionKey] = Boolean(enabled);
-  syncLegacyControlFromCab(cabId);
-  renderAll();
-  try {
-    await syncControllerEndpoint();
-    await setLocoFunction(targetVehicle.id, functionNumber, Boolean(enabled), cab.functions);
-    setStatus(`${cabId === "left" ? "左控制台" : "右控制台"}：${targetVehicle.name} F${functionNumber} ${enabled ? "开启" : "关闭"}`);
-  } catch (error) {
-    cab.functions[functionKey] = previousEnabled;
-    syncLegacyControlFromCab(cabId);
-    setStatus(formatError(error));
-  } finally {
-    renderAll();
-  }
-}
-
-async function sendCabFunction(cabId, functionNumber) {
-  const cab = appState.cabs[cabId];
-  await setCabFunctionState(cabId, functionNumber, !Boolean(cab?.functions?.[String(functionNumber)]));
-}
-
-function functionTimerKey(cabId, functionNumber) {
-  return `${cabId}:${functionNumber}`;
-}
-
-function clearCabFunctionTimer(cabId, functionNumber) {
-  const key = functionTimerKey(cabId, functionNumber);
-  const timer = cabFunctionTimers.get(key);
-  if (timer) {
-    globalThis.clearTimeout(timer);
-    cabFunctionTimers.delete(key);
-  }
-}
-
-async function sendCabFunctionByMode(cabId, functionNumber, eventType = "click") {
-  const vehicle = cabVehicle(cabId);
-  const targetVehicle = cabFunctionVehicle(cabId);
-  const cab = appState.cabs[cabId];
-  if (!vehicle || !targetVehicle || !cab || !isDigitalOperationMode()) {
-    return;
-  }
-  const definition = functionDefinition(targetVehicle.id, functionNumber);
-  const mode = definition.trigger_mode || "toggle";
-  if (mode === "momentary") {
-    if (eventType === "down") {
-      clearCabFunctionTimer(cabId, functionNumber);
-      await setCabFunctionState(cabId, functionNumber, true);
-    } else if (eventType === "up") {
-      await setCabFunctionState(cabId, functionNumber, false);
-    }
-    return;
-  }
-  if (eventType !== "click") {
-    return;
-  }
-  if (mode === "timed") {
-    clearCabFunctionTimer(cabId, functionNumber);
-    await setCabFunctionState(cabId, functionNumber, true);
-    const delay = Math.min(Math.max(Number(definition.duration_ms || 1000), 250), 60000);
-    const timer = globalThis.setTimeout(() => {
-      cabFunctionTimers.delete(functionTimerKey(cabId, functionNumber));
-      setCabFunctionState(cabId, functionNumber, false);
-    }, delay);
-    cabFunctionTimers.set(functionTimerKey(cabId, functionNumber), timer);
-    return;
-  }
-  clearCabFunctionTimer(cabId, functionNumber);
-  await setCabFunctionState(cabId, functionNumber, !Boolean(cab.functions[String(functionNumber)]));
 }
 
 async function saveCustomVehicleOrder(cabId, vehicleId, orderedVehicleIds) {
@@ -1935,8 +1218,11 @@ async function refreshState() {
   const [state, controllerInfo] = await Promise.all([getState(), getControllerInfo()]);
   replaceState(state);
   appState.controllerInfo = controllerInfo;
-  elements.controllerKindSelect.value = appState.controller.kind || "digsight_controller";
-  elements.controllerIp.value = appState.controller.ip || "0.0.0.0";
+  renderControllerKindOptions(elements, appState.capabilities);
+  renderImportFormatOptions(elements, appState.capabilities);
+  const controllerKind = appState.controller.kind || appState.capabilities.default_controller_kind;
+  elements.controllerKindSelect.value = controllerKind;
+  elements.controllerIp.value = appState.controller.ip || controllerDescriptor(controllerKind).default_ip || "";
   renderAll();
 }
 
@@ -1965,87 +1251,49 @@ function isRetryableTrackPowerStatusError(error) {
 }
 
 async function initialize() {
-  functionIconCatalog = await loadFunctionIconCatalog();
-  appState.cvMetadata = await getCvMetadata();
-  await refreshState();
-  setStatus("正在读取控制器信息");
-  try {
-    const result = await readControllerInfo();
-    setStatus(controllerReadStatusMessage(result), controllerReadStatusDetail(result));
-    await refreshState();
-  } catch (error) {
-    const formatted = formatError(error);
-    setStatus(
-      `本地后端已就绪，控制器信息启动读取失败：${typeof formatted === "object" ? formatted.summary : formatted}`,
-      typeof formatted === "object" ? formatted.detail : ""
-    );
-  }
+  await initializeApp({
+    appState,
+    elements,
+    getCapabilities,
+    renderControllerKindOptions,
+    renderImportFormatOptions,
+    setFunctionIconCatalog: (catalog) => {
+      functionIconCatalog = catalog;
+    },
+    loadFunctionIconCatalog,
+    getCvMetadata,
+    refreshState,
+    readControllerInfo,
+    setStatus,
+    controllerReadStatusMessage,
+    controllerReadStatusDetail,
+    formatError
+  });
 }
 
-elements.navVehicleControl.addEventListener("click", () => setActiveView("vehicle"));
-elements.navCvProgramming.addEventListener("click", () => setActiveView("cv"));
-elements.navControllerSettings.addEventListener("click", () => setActiveView("controller"));
-for (const button of elements.operationModeButtons) {
-  button.addEventListener("click", () => setOperationMode(button.dataset.trackMode));
-}
-for (const button of elements.programmingTargetButtons) {
-  button.addEventListener("click", () => setProgrammingTarget(button.dataset.programmingTarget));
-}
-
-globalThis.addEventListener?.("digsight:gateway-busy", (event) => {
-  setGatewayBusy(Boolean(event.detail?.active));
+wireAppEvents({
+  elements,
+  appState,
+  importConfig,
+  setActiveView,
+  setOperationMode,
+  setProgrammingTarget,
+  setGatewayBusy,
+  openStatusDetailDialog,
+  syncControllerEndpoint,
+  runTrackPowerRequestWithStatusRetry,
+  setTrackPower,
+  setStatus,
+  operationModeName,
+  refreshState,
+  formatError,
+  importSelectedConfigFile,
+  toggleVehicleSelectionMode,
+  createNewVehicle,
+  deleteSelectedVehicles,
+  handleVehicleKeyboard,
+  handleVehicleKeyboardRelease
 });
-
-elements.statusDetailButton?.addEventListener("click", openStatusDetailDialog);
-
-elements.statusDetailCloseButton?.addEventListener("click", () => {
-  elements.statusDetailDialog?.close();
-});
-
-elements.powerOnButton.addEventListener("click", async () => {
-  try {
-    await syncControllerEndpoint();
-    const result = await runTrackPowerRequestWithStatusRetry(true, () => setTrackPower(true));
-    setStatus(`${operationModeName(result.track_mode)} 轨道已通电`);
-    await refreshState();
-  } catch (error) {
-    setStatus(formatError(error));
-  }
-});
-
-elements.powerOffButton.addEventListener("click", async () => {
-  try {
-    await syncControllerEndpoint();
-    const result = await setTrackPower(false);
-    setStatus(`${operationModeName(result.track_mode)} 轨道已断电`);
-    await refreshState();
-  } catch (error) {
-    setStatus(formatError(error));
-  }
-});
-
-elements.importZ21Button.addEventListener("click", async () => {
-  const file = elements.z21FileInput.files[0];
-  if (!file) {
-    setStatus("请选择配置文件");
-    return;
-  }
-  try {
-    const importFormat = elements.importFormatSelect.value || "z21_layout_config";
-    const importResult = await importConfig(importFormat, file);
-    const summary = importResult.summary || importResult;
-    setStatus(`导入完成：${summary.vehicles_imported} 辆车，${summary.functions_imported} 个功能键，${summary.categories_imported || 0} 个分类`);
-    await refreshState();
-  } catch (error) {
-    setStatus(formatError(error));
-  }
-});
-elements.selectVehiclesButton.addEventListener("click", toggleVehicleSelectionMode);
-elements.addVehicleButton.addEventListener("click", createNewVehicle);
-elements.deleteVehiclesButton.addEventListener("click", deleteSelectedVehicles);
-
-document.addEventListener("keydown", handleVehicleKeyboard);
-document.addEventListener("keyup", handleVehicleKeyboardRelease);
 
 const digitShortcutMap = {
   Digit0: 0,

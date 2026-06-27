@@ -1,15 +1,3 @@
-export function setText(element, text) {
-  element.textContent = text;
-}
-
-export function createButton(label, onClick) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.textContent = label;
-  button.addEventListener("click", onClick);
-  return button;
-}
-
 export function labeledInput(text, type, value, attrs = {}) {
   const label = document.createElement("label");
   label.textContent = text;

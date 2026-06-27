@@ -15,6 +15,12 @@ function createCabState() {
 }
 
 export const appState = {
+  capabilities: {
+    default_controller_kind: "",
+    default_import_format: "",
+    controllers: [],
+    import_formats: []
+  },
   controller: {},
   controllerInfo: {},
   cvMetadata: null,
