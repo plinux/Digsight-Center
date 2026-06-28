@@ -927,22 +927,6 @@ function renderFunctionSlotButton(fn, icon, onPress, state = {}) {
   return button;
 }
 
-function appendFunctionButtonContent(button, fn, icon) {
-  button.replaceChildren();
-  if (icon?.path) {
-    const image = document.createElement("img");
-    image.className = "function-icon";
-    image.src = icon.path.startsWith("/") ? icon.path : `/${icon.path}`;
-    image.alt = "";
-    image.loading = "lazy";
-    button.append(image);
-  }
-  const label = document.createElement("span");
-  label.textContent = `F${fn.function_number} ${fn.label || fn.shortcut || ""}`.trim();
-  button.append(label);
-}
-
-
 function segmentButton(text, active, onClick) {
   const button = document.createElement("button");
   button.type = "button";

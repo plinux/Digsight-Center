@@ -17,7 +17,6 @@ from digsight_dxdcnet.constants import (
 )
 from digsight_dxdcnet.frames import build_udp_frame
 from digsight_dxdcnet.loco_control import build_loco_control_request_frame, build_loco_function_frame, build_loco_speed_frame
-from server.vehicle_store import VehicleStore
 from tests.server_tests.controller_test_env import controller_ip_payload, controller_test_ip, temporary_vehicle_router
 from tests.server_tests.fake_udp import FakeRequestMappedUdpTransport, FakeUdpTransport
 

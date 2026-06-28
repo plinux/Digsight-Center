@@ -6,7 +6,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tests.server_tests import controller_test_env
-from server import models
+from server.controllers.registry import default_controller_registry
+
+
+def digsight_config_file_name() -> str:
+  return default_controller_registry().config_file_name("digsight_controller")
 
 
 class ControllerTestEnvTest(unittest.TestCase):
@@ -24,7 +28,7 @@ class ControllerTestEnvTest(unittest.TestCase):
           "kind": "digsight_controller",
         },
       }), encoding="utf-8")
-      (controller_config_dir / models.CONTROLLER_CONFIG_FILES["digsight_controller"]).write_text(json.dumps({
+      (controller_config_dir / digsight_config_file_name()).write_text(json.dumps({
         "ip": "192.0.2.44",
       }), encoding="utf-8")
 
@@ -45,7 +49,7 @@ class ControllerTestEnvTest(unittest.TestCase):
           "kind": "digsight_controller",
         },
       }), encoding="utf-8")
-      (controller_config_dir / models.CONTROLLER_CONFIG_FILES["digsight_controller"]).write_text(json.dumps({
+      (controller_config_dir / digsight_config_file_name()).write_text(json.dumps({
         "ip": "0.0.0.0",
       }), encoding="utf-8")
 
