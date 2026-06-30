@@ -6,6 +6,10 @@ from pathlib import Path
 from server import models
 from server.api import ApiRouter
 from server.app_state import AppStateStore, default_state
+from server.controllers.example import ExampleControllerAdapter
+from server.controllers.registry import ControllerRegistry
+from server.importers.example import ExampleConfigImporter
+from server.importers.registry import ImportRegistry
 
 
 class CapabilitiesApiTest(unittest.TestCase):
@@ -26,6 +30,8 @@ class CapabilitiesApiTest(unittest.TestCase):
     self.assertEqual(data["default_import_format"], "z21_layout_config")
     self.assertEqual([item["kind"] for item in data["controllers"]], ["digsight_controller"])
     self.assertEqual([item["format"] for item in data["import_formats"]], ["z21_layout_config"])
+    self.assertNotIn("example_controller", [item["kind"] for item in data["controllers"]])
+    self.assertNotIn("example_layout_config", [item["format"] for item in data["import_formats"]])
     self.assertEqual(data["controllers"][0]["kind"], "digsight_controller")
     self.assertEqual(data["controllers"][0]["label"], "动芯 拾Pro")
     self.assertEqual(data["controllers"][0]["display_name"], "动芯 拾Pro")
@@ -87,6 +93,38 @@ class CapabilitiesApiTest(unittest.TestCase):
       self.assertEqual(data["controllers"][0]["label"], "展厅控制器")
       self.assertEqual(data["controllers"][0]["display_name"], "展厅控制器")
       self.assertEqual(data["controllers"][0]["protocol"], "DXDCNet")
+
+  def test_capabilities_default_import_format_comes_from_registry(self):
+    registry = ImportRegistry()
+    registry.register(ExampleConfigImporter(), default=True)
+    router = ApiRouter(None, import_registry=registry)
+    body, status = router.handle_json(
+      "GET",
+      "/api/capabilities",
+      b"",
+      default_state(),
+    )
+
+    self.assertEqual(status, 200)
+    payload = json.loads(body)
+    self.assertEqual(payload["data"]["default_import_format"], "example_layout_config")
+    self.assertEqual(payload["data"]["import_formats"][0]["format"], "example_layout_config")
+
+  def test_capabilities_default_controller_kind_comes_from_registry(self):
+    registry = ControllerRegistry()
+    registry.register(ExampleControllerAdapter(), default=True)
+    router = ApiRouter(None, controller_registry=registry)
+    body, status = router.handle_json(
+      "GET",
+      "/api/capabilities",
+      b"",
+      default_state(),
+    )
+
+    self.assertEqual(status, 200)
+    payload = json.loads(body)
+    self.assertEqual(payload["data"]["default_controller_kind"], "example_controller")
+    self.assertEqual(payload["data"]["controllers"][0]["kind"], "example_controller")
 
 
 if __name__ == "__main__":

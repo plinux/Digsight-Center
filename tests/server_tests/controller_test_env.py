@@ -10,7 +10,8 @@ import tempfile
 from server import models
 from server.api import ApiRouter
 from server.app_state import default_state
-from server.controllers.base import ControllerCapabilities, ControllerTransportDescriptor
+from server.controllers.base import ControllerTransportDescriptor
+from server.controllers.example import ExampleControllerAdapter
 from server.controllers.registry import default_controller_registry
 from server.vehicle_store import VehicleStore
 
@@ -21,22 +22,13 @@ DEFAULT_RUNTIME_CONFIG_PATH = Path("data/app-state.json")
 DEFAULT_CONTROLLER_CONFIG_DIR = Path("config/controllers")
 
 
-class CustomDefaultsControllerAdapter:
+class CustomDefaultsControllerAdapter(ExampleControllerAdapter):
   kind = "custom_defaults_controller"
   label = "Custom Defaults Controller"
   default_display_name = "Custom Defaults Controller"
   protocol = "CustomProtocol"
-  supported_protocols = ("CustomProtocol",)
   default_ip = "192.0.2.44"
   config_file_name = "custom-controller-settings.json"
-  capabilities = ControllerCapabilities(
-    track_power=False,
-    dc_control=False,
-    read_info=False,
-    cv_programming=False,
-    loco_control=False,
-    controller_settings=False,
-  )
   runtime_transport_fields = ("udp_port", "local_udp_port", "udp_checksum_algorithm")
   transport_descriptor = ControllerTransportDescriptor(
     kind="udp",

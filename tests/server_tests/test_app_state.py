@@ -8,6 +8,7 @@ from pathlib import Path
 
 from server import models
 from server.app_state import AppStateStore, default_state
+from server.controllers.example import ExampleControllerAdapter
 from server.udp_transport_config import normalize_transport_config
 from server.controllers.registry import ControllerRegistry, default_controller_registry
 from server.vehicle_store import VehicleStore
@@ -59,6 +60,30 @@ class AppStateStoreTest(unittest.TestCase):
       self.assertGreater(len(descriptions[path]), 0)
     self.assertIn("目标", descriptions["track_profiles.<mode>.target_voltage_v"])
     self.assertIn("不是实时电流", descriptions["track_profiles.<mode>.target_current_limit_ma"])
+
+  def test_example_controller_default_config_uses_example_field_descriptions(self):
+    registry = ControllerRegistry()
+    registry.register(ExampleControllerAdapter(), default=True)
+
+    config = AppStateStore.default_controller_config(registry, "example_controller")
+    descriptions = config["field_descriptions"]
+    description_text = "\n".join(descriptions.values())
+
+    self.assertIn("transport.endpoint", descriptions)
+    self.assertIn("端点", description_text)
+    for controller_specific_text in ("DXDCNet", "动芯", "D9000", "12000", "6667", "0x81"):
+      self.assertNotIn(controller_specific_text, description_text)
+
+  def test_default_state_uses_selected_controller_field_descriptions(self):
+    registry = ControllerRegistry()
+    registry.register(ExampleControllerAdapter(), default=True)
+
+    state = default_state(registry)
+    description_text = "\n".join(state["controller"]["field_descriptions"].values())
+
+    self.assertEqual(state["controller"]["kind"], "example_controller")
+    self.assertIn("端点", description_text)
+    self.assertNotIn("DXDCNet", description_text)
 
   def test_unregistered_controller_default_config_uses_protocol_neutral_transport(self):
     config = AppStateStore.default_controller_config(default_controller_registry(), "future_controller")

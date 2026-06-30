@@ -13,6 +13,7 @@ from server.controllers.base import (
   ControllerTransportDescriptor,
 )
 from server.controllers.digsight import DigsightDXDCNetControllerAdapter
+from server.controllers.example import ExampleControllerAdapter
 from server.controllers.registry import ControllerRegistry
 from server.controllers.registry import default_controller_registry
 import server.api_support.controller as controller_api_support
@@ -192,10 +193,11 @@ class ControllerRegistryTest(unittest.TestCase):
     self.assertNotIn("adapter.descriptor", registry_source)
     self.assertNotIn("callable(getattr(adapter, \"descriptor\"", registry_source)
     self.assertFalse(hasattr(DigsightDXDCNetControllerAdapter, "descriptor"))
+    self.assertFalse(hasattr(ExampleControllerAdapter, "descriptor"))
 
   def test_default_kind_is_explicit_not_registration_order(self):
     registry = ControllerRegistry(default_kind="fake_controller")
-    registry.register(LaterFakeControllerAdapter())
+    registry.register(ExampleControllerAdapter())
     registry.register(FakeControllerAdapter())
 
     self.assertEqual(registry.default_kind, "fake_controller")
@@ -266,6 +268,7 @@ class DigsightControllerAdapterTest(unittest.TestCase):
 
   def test_controller_adapters_declare_config_file_names(self):
     self.assertEqual(DigsightDXDCNetControllerAdapter.config_file_name, "Digsight_D9000.json")
+    self.assertEqual(ExampleControllerAdapter.config_file_name, "example_controller.json")
 
   def test_digsight_adapter_declares_capabilities(self):
     adapter = DigsightDXDCNetControllerAdapter()
@@ -306,7 +309,50 @@ class DigsightControllerAdapterTest(unittest.TestCase):
     self.assertIn('name = spec["name"]', source)
 
 
-class ControllerAdapterContractTest(unittest.TestCase):
+class ExampleControllerAdapterTest(unittest.TestCase):
+  def test_example_adapter_documents_future_controller_contract(self):
+    adapter = ExampleControllerAdapter()
+    self.assertEqual(adapter.kind, "example_controller")
+    self.assertEqual(adapter.label, "样例控制器")
+    self.assertEqual(adapter.default_display_name, "样例控制器")
+    self.assertEqual(adapter.protocol, "ExampleProtocol")
+    self.assertEqual(adapter.transport_descriptor.kind, "example_transport")
+    self.assertEqual(adapter.transport_descriptor.endpoint_required_paths, ("transport.endpoint",))
+    self.assertEqual(adapter.transport_descriptor.metadata, {})
+    self.assertNotIn("checksum_algorithms", adapter.transport_descriptor.to_dict())
+    self.assertNotIn("allow_zero_local_udp_port", adapter.transport_descriptor.to_dict())
+    self.assertFalse(adapter.capabilities.track_power)
+    self.assertFalse(adapter.capabilities.read_info)
+
+  def test_example_adapter_does_not_stub_optional_capabilities(self):
+    source = inspect.getsource(ExampleControllerAdapter)
+    optional_methods = [
+      "exchange",
+      "read_info_frames",
+      "read_controller_info",
+      "parse_controller_info",
+      "validate_programming_track_safety",
+      "send_track_output",
+      "send_track_output_request",
+      "read_cv",
+      "write_cv",
+      "read_cv_request",
+      "write_cv_request",
+      "classify_cv_responses",
+      "cv_ack_category",
+      "should_retry_cv_write_ack",
+      "is_main_track_cv_read_no_ack",
+      "cv_ack_debug",
+      "request_loco_control_grant",
+      "send_loco_speed_request",
+      "send_loco_function_request",
+      "apply_track_profile_parameters",
+    ]
+
+    for method_name in optional_methods:
+      with self.subTest(method_name=method_name):
+        self.assertNotIn(f"def {method_name}(", source)
+
   def test_controller_adapter_contract_is_split_by_capability(self):
     protocol_classes = [
       ControllerAdapter,
@@ -324,6 +370,40 @@ class ControllerAdapterContractTest(unittest.TestCase):
     self.assertNotIn("read_cv_request", adapter_source)
     self.assertNotIn("send_loco_speed_request", adapter_source)
     self.assertNotIn("apply_track_profile_parameters", adapter_source)
+
+  def test_example_adapter_readiness_contract_is_explicitly_non_operational(self):
+    adapter = ExampleControllerAdapter()
+    controller = {"kind": adapter.kind}
+
+    self.assertEqual(adapter.runtime_readiness_warnings(controller), ["controller_runtime_not_implemented"])
+    self.assertEqual(adapter.loco_control_readiness_warnings(controller), ["controller_runtime_not_implemented"])
+    self.assertEqual(adapter.status_not_ready_message(), "样例控制器未实现通信运行时")
+    self.assertFalse(adapter.is_booster_status_confirmed(controller))
+    self.assertIsNone(adapter.programming_track_status(controller))
+
+  def test_example_adapter_client_id_policy_is_explicitly_non_operational(self):
+    adapter = ExampleControllerAdapter()
+
+    with self.assertRaises(NotImplementedError) as caught:
+      adapter.controller_client_id({"kind": adapter.kind})
+    self.assertEqual(str(caught.exception), "样例控制器未实现 client id 策略")
+
+  def test_example_adapter_can_be_registered_manually_but_is_not_default(self):
+    registry = ControllerRegistry()
+    registry.register(ExampleControllerAdapter())
+    descriptor_kinds = [descriptor["kind"] for descriptor in registry.descriptors()]
+    self.assertEqual(descriptor_kinds, ["example_controller"])
+    self.assertIsInstance(registry.get("example_controller"), ExampleControllerAdapter)
+    default_kinds = [descriptor["kind"] for descriptor in default_controller_registry().descriptors()]
+    self.assertEqual(default_kinds, ["digsight_controller"])
+    self.assertNotIn("example_controller", default_kinds)
+
+  def test_example_adapter_is_kept_as_code_sample_but_not_default(self):
+    default_kinds = [descriptor["kind"] for descriptor in default_controller_registry().descriptors()]
+    self.assertEqual(default_kinds, ["digsight_controller"])
+    self.assertNotIn("example_controller", default_kinds)
+    self.assertEqual(ExampleControllerAdapter().kind, "example_controller")
+
 
 if __name__ == "__main__":
   unittest.main()

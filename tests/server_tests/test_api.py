@@ -9,6 +9,7 @@ from server.app_state import AppStateStore, default_state
 from server.api_support.controller import controller_settings_apply_to_device
 from server.api_support.routes import LOCK_MODE_HARDWARE, handler_for, mutation_route_spec
 from server.controllers.digsight import DigsightDXDCNetControllerAdapter
+from server.controllers.example import ExampleControllerAdapter
 from server.controllers.registry import ControllerRegistry
 from digsight_dxdcnet.constants import (
   CMD_DEVICE_STATUS,
@@ -22,7 +23,6 @@ from digsight_dxdcnet.constants import (
 from digsight_dxdcnet.frames import build_udp_frame
 from digsight_dxdcnet.loco_control import build_loco_control_request_frame, build_loco_function_frame, build_loco_speed_frame
 from tests.server_tests.controller_test_env import (
-  CustomDefaultsControllerAdapter,
   controller_ip_payload,
   controller_test_ip,
   ready_loco_control_state,
@@ -363,7 +363,7 @@ class ApiRouterTest(unittest.TestCase):
   def test_controller_kind_change_does_not_copy_previous_runtime_sections(self):
     registry = ControllerRegistry()
     registry.register(DigsightDXDCNetControllerAdapter(), default=True)
-    registry.register(CustomDefaultsControllerAdapter())
+    registry.register(ExampleControllerAdapter())
     state = ready_loco_control_state()
     state["controller"]["telemetry"] = {"track_voltage_v": 99}
     state["controller"]["device_info"] = {"device_name": "旧控制器", "source": "dxdcnet"}
@@ -373,13 +373,13 @@ class ApiRouterTest(unittest.TestCase):
     body, status = ApiRouter(None, controller_registry=registry).handle_json(
       "PATCH",
       "/api/controller/settings",
-      b'{"kind":"custom_defaults_controller","ip":"0.0.0.0"}',
+      b'{"kind":"example_controller","ip":"0.0.0.0"}',
       state,
     )
 
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 200)
-    self.assertEqual(payload["data"]["kind"], "custom_defaults_controller")
+    self.assertEqual(payload["data"]["kind"], "example_controller")
     self.assertNotIn("booster_status", state["controller"])
     self.assertNotIn("programming_track_status", state["controller"])
     self.assertNotIn("dc_control", state["controller"])

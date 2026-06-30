@@ -576,7 +576,7 @@ class ControllerApiSupport:
       return [], (response.failure(
         "protocol_not_ready",
         adapter.status_not_ready_message(),
-        "控制器轨道输出参数需要先确认通信端口和校验算法",
+        controller_readiness_detail(adapter, readiness_warnings),
         {"warnings": readiness_warnings},
       ), 409)
     try:

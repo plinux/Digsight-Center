@@ -9,6 +9,8 @@ from server import models
 from server.api import ApiRouter
 from server.api_support.controller import ControllerApiSupport
 from server.app_state import AppStateStore, default_state
+from server.controllers.base import ControllerCapabilities
+from server.controllers.example import ExampleControllerAdapter
 from server.controllers.registry import ControllerRegistry, default_controller_registry
 from digsight_dxdcnet.constants import (
   CMD_DEVICE_STATUS,
@@ -22,6 +24,17 @@ from digsight_dxdcnet.constants import (
 from digsight_dxdcnet.frames import build_udp_frame
 from tests.server_tests.controller_test_env import CustomDefaultsControllerAdapter, controller_ip_payload, controller_test_ip
 from tests.server_tests.fake_udp import FakeRequestMappedUdpTransport
+
+
+class SettingsReadyExampleControllerAdapter(ExampleControllerAdapter):
+  capabilities = ControllerCapabilities(
+    track_power=False,
+    dc_control=False,
+    read_info=False,
+    cv_programming=False,
+    loco_control=False,
+    controller_settings=True,
+  )
 
 
 class ControllerSettingsTest(unittest.TestCase):
@@ -421,18 +434,18 @@ class ControllerSettingsTest(unittest.TestCase):
 
   def test_controller_settings_accepts_kind_registered_in_router_registry(self):
     registry = ControllerRegistry()
-    registry.register(CustomDefaultsControllerAdapter())
+    registry.register(ExampleControllerAdapter())
     state = default_state()
     body, status = ApiRouter(None, controller_registry=registry).handle_json(
       "PATCH",
       "/api/controller/settings",
-      b'{"kind":"custom_defaults_controller"}',
+      b'{"kind":"example_controller"}',
       state,
     )
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 200)
-    self.assertEqual(payload["data"]["kind"], "custom_defaults_controller")
-    self.assertEqual(state["controller"]["kind"], "custom_defaults_controller")
+    self.assertEqual(payload["data"]["kind"], "example_controller")
+    self.assertEqual(state["controller"]["kind"], "example_controller")
 
   def test_controller_settings_uses_adapter_transport_descriptor_when_kind_changes(self):
     registry = ControllerRegistry()
@@ -758,7 +771,7 @@ class ControllerSettingsTest(unittest.TestCase):
     body, status = ApiRouter(None).handle_json(
       "PATCH",
       "/api/controller/settings",
-      b'{"kind":"unregistered_controller"}',
+      b'{"kind":"example_controller"}',
       state,
     )
     payload = json.loads(body.decode("utf-8"))
@@ -767,9 +780,12 @@ class ControllerSettingsTest(unittest.TestCase):
 
   def test_controller_settings_apply_to_device_requires_adapter_support(self):
     registry = ControllerRegistry()
-    registry.register(CustomDefaultsControllerAdapter())
+    registry.register(ExampleControllerAdapter())
     state = default_state()
-    state["controller"]["kind"] = "custom_defaults_controller"
+    state["controller"]["kind"] = "example_controller"
+    state["controller"]["protocol"] = "ExampleProtocol"
+    state["controller"]["transport"] = ExampleControllerAdapter.transport_descriptor.default_config()
+    state["controller"]["udp_checksum_algorithm"] = "unconfirmed"
     request = {
       "apply_to_device": True,
       "track_profiles": {
@@ -790,7 +806,36 @@ class ControllerSettingsTest(unittest.TestCase):
     self.assertEqual(status, 409)
     self.assertEqual(payload["error"]["type"], "controller_operation_not_supported")
     self.assertEqual(payload["error"]["message"], "当前控制器不支持该操作")
-    self.assertEqual(payload["error"]["detail"], "custom_defaults_controller does not support controller_settings")
+    self.assertEqual(payload["error"]["detail"], "example_controller does not support controller_settings")
+
+  def test_controller_settings_apply_to_device_uses_adapter_readiness_detail(self):
+    registry = ControllerRegistry()
+    registry.register(SettingsReadyExampleControllerAdapter(), default=True)
+    state = default_state(registry)
+    request = {
+      "apply_to_device": True,
+      "track_profiles": {
+        "ho": {"target_voltage_v": 15.2, "target_current_limit_ma": 4000},
+      },
+    }
+
+    body, status = ApiRouter(
+      None,
+      controller_registry=registry,
+      controller_transport=FakeRequestMappedUdpTransport({}),
+    ).handle_json(
+      "PATCH",
+      "/api/controller/settings",
+      json.dumps(request).encode("utf-8"),
+      state,
+    )
+
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 409)
+    self.assertEqual(payload["error"]["type"], "protocol_not_ready")
+    self.assertEqual(payload["error"]["detail"], "样例控制器未实现通信运行时")
+    self.assertNotIn("通信端口", payload["error"]["detail"])
+    self.assertNotIn("校验算法", payload["error"]["detail"])
 
   def test_controller_settings_rejects_unknown_operation_mode(self):
     state = default_state()

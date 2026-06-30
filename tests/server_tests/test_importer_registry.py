@@ -4,7 +4,8 @@ import tempfile
 from pathlib import Path
 
 from server.importers.base import ConfigImportRequest, ConfigImportResult, ImportFormatDescriptor, ImportSource
-from server.importers.registry import ImportRegistry
+from server.importers.example import ExampleConfigImporter
+from server.importers.registry import ImportRegistry, default_import_registry
 from server.importers.z21 import Z21ConfigImporter
 from server.importers.z21_parser import Z21Importer
 from tests.server_tests.z21_fixture_builder import write_minimal_z21_archive
@@ -170,16 +171,43 @@ class Z21ConfigImporterTest(unittest.TestCase):
     )
 
 
-class ImportRegistryTest(unittest.TestCase):
+class ExampleConfigImporterTest(unittest.TestCase):
+  def test_example_importer_documents_future_format_contract(self):
+    importer = ExampleConfigImporter()
+    source = Path("server/importers/example.py").read_text(encoding="utf-8")
+    self.assertEqual(importer.descriptor.format, "example_layout_config")
+    self.assertEqual(importer.descriptor.label, "样例配置格式")
+    self.assertEqual(importer.descriptor.extensions, [".example"])
+    self.assertNotIn("categories, consists, images", source)
+    self.assertIn("image_path", source)
+    request = ConfigImportRequest(
+      format="example_layout_config",
+      file_name="layout.example",
+      content=b"example",
+    )
+    with self.assertRaises(NotImplementedError):
+      importer.import_bytes(request)
+
+  def test_example_importer_can_be_registered_manually_but_is_not_default(self):
+    registry = ImportRegistry()
+    registry.register(ExampleConfigImporter())
+    descriptor_formats = [descriptor["format"] for descriptor in registry.descriptors()]
+    self.assertEqual(descriptor_formats, ["example_layout_config"])
+    self.assertIsInstance(registry.get("example_layout_config"), ExampleConfigImporter)
+    default_formats = [descriptor["format"] for descriptor in default_import_registry("/tmp/digsight-images").descriptors()]
+    self.assertEqual(default_formats, ["z21_layout_config"])
+    self.assertNotIn("example_layout_config", default_formats)
+
   def test_default_format_is_explicit_not_registration_order(self):
     registry = ImportRegistry(default_format="z21_layout_config")
-    registry.register(AlphaConfigImporter())
+    registry.register(ExampleConfigImporter())
     registry.register(Z21ConfigImporter(image_dir="/tmp/digsight-images"))
 
     self.assertEqual(registry.default_format, "z21_layout_config")
 
   def test_registry_descriptors_keep_default_first_then_stable_label_order(self):
     registry = ImportRegistry(default_format="z21_layout_config")
+    registry.register(ExampleConfigImporter())
     registry.register(Z21ConfigImporter(image_dir="/tmp/digsight-images"))
     registry.register(AlphaConfigImporter())
 
@@ -187,6 +215,7 @@ class ImportRegistryTest(unittest.TestCase):
     self.assertEqual(formats, [
       "z21_layout_config",
       "alpha_layout_config",
+      "example_layout_config",
     ])
 
     descriptors = registry.descriptors()
@@ -200,6 +229,11 @@ class ImportRegistryTest(unittest.TestCase):
     with self.assertRaises(ValueError) as caught:
       _ = registry.default_format
     self.assertEqual(str(caught.exception), "Default import format is not configured")
+
+  def test_default_registry_does_not_register_example_importers(self):
+    default_formats = [descriptor["format"] for descriptor in default_import_registry("/tmp/digsight-images").descriptors()]
+    self.assertEqual(default_formats, ["z21_layout_config"])
+    self.assertNotIn("example_layout_config", default_formats)
 
   def test_registry_rejects_importer_public_file_outside_allowed_prefixes(self):
     registry = ImportRegistry()
@@ -229,6 +263,7 @@ class ImportRegistryTest(unittest.TestCase):
 
     with self.assertRaises(ValueError):
       registry.descriptors()
+
 
 if __name__ == "__main__":
   unittest.main()
