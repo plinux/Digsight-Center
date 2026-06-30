@@ -9,28 +9,8 @@ from digsight_dxdcnet.constants import CMD_LOCO_CONTROL_ACK, CMD_LOCO_SPEED, DEV
 from digsight_dxdcnet.frames import build_udp_frame
 from digsight_dxdcnet.loco_control import build_loco_control_request_frame, build_loco_speed_frame
 from server.vehicle_store import VehicleStore
-
-
-class FakeRequestMappedUdpTransport:
-  def __init__(self, responses_by_request):
-    self.responses_by_request = responses_by_request
-    self.requests = []
-
-  def exchange(self, host, port, payload, local_port=0, max_packets=32, stop_when=None):
-    self.requests.append({
-      "host": host,
-      "port": port,
-      "payload": payload,
-      "local_port": local_port,
-      "max_packets": max_packets,
-      "stop_when": bool(stop_when),
-    })
-    responses = []
-    for response in self.responses_by_request.get(payload, [])[:max_packets]:
-      responses.append(response)
-      if stop_when and stop_when(response):
-        break
-    return responses
+from tests.server_tests.controller_test_env import temporary_vehicle_router
+from tests.server_tests.fake_udp import FakeRequestMappedUdpTransport
 
 
 class ConsistApiTest(unittest.TestCase):
@@ -85,42 +65,53 @@ class ConsistApiTest(unittest.TestCase):
       for index in range(count)
     ]
 
+  def _seed_member_vehicles(self, vehicle_store, count: int) -> None:
+    for index in range(count):
+      vehicle_store.create_vehicle({
+        "id": f"v{index}",
+        "name": f"测试车 {index}",
+        "address": index + 1,
+        "track_mode": "ho",
+      })
+
   def test_create_consist_requires_members(self):
-    state = default_state()
-    request = json.dumps({"name": "空编组", "members": []}).encode("utf-8")
-    body, status = ApiRouter(None).handle_json("POST", "/api/consists", request, state)
-    payload = json.loads(body.decode("utf-8"))
-    self.assertEqual(status, 400)
-    self.assertEqual(payload["error"]["type"], "invalid_consist")
+    with temporary_vehicle_router() as (router, _vehicle_store, state):
+      request = json.dumps({"name": "空编组", "members": []}).encode("utf-8")
+      body, status = router.handle_json("POST", "/api/consists", request, state)
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 400)
+      self.assertEqual(payload["error"]["type"], "invalid_consist")
 
   def test_create_consist_saves_members(self):
-    state = default_state()
-    request = {
-      "name": "测试编组",
-      "members": [{"vehicle_id": "v1", "address": 3, "direction": "forward", "order": 1}]
-    }
-    body, status = ApiRouter(None).handle_json("POST", "/api/consists", json.dumps(request).encode("utf-8"), state)
-    payload = json.loads(body.decode("utf-8"))
-    self.assertEqual(status, 200)
-    self.assertEqual(payload["data"]["members"][0]["address"], 3)
-    self.assertEqual(state["consists"][0]["name"], "测试编组")
+    with temporary_vehicle_router() as (router, vehicle_store, state):
+      self._seed_member_vehicles(vehicle_store, 2)
+      request = {
+        "name": "测试编组",
+        "members": [{"vehicle_id": "v1", "address": 3, "direction": "forward", "order": 1}]
+      }
+      body, status = router.handle_json("POST", "/api/consists", json.dumps(request).encode("utf-8"), state)
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 200)
+      self.assertEqual(payload["data"]["members"][0]["address"], 3)
+      self.assertEqual(vehicle_store.list_consists()[0]["name"], "测试编组")
 
   def test_create_consist_allows_up_to_eight_members(self):
-    state = default_state()
-    request = {"name": "八车编组", "members": self._members(8)}
-    body, status = ApiRouter(None).handle_json("POST", "/api/consists", json.dumps(request).encode("utf-8"), state)
-    payload = json.loads(body.decode("utf-8"))
-    self.assertEqual(status, 200)
-    self.assertEqual(len(payload["data"]["members"]), 8)
+    with temporary_vehicle_router() as (router, vehicle_store, state):
+      self._seed_member_vehicles(vehicle_store, 8)
+      request = {"name": "八车编组", "members": self._members(8)}
+      body, status = router.handle_json("POST", "/api/consists", json.dumps(request).encode("utf-8"), state)
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 200)
+      self.assertEqual(len(payload["data"]["members"]), 8)
 
   def test_create_consist_rejects_more_than_eight_members(self):
-    state = default_state()
-    request = {"name": "九车编组", "members": self._members(9)}
-    body, status = ApiRouter(None).handle_json("POST", "/api/consists", json.dumps(request).encode("utf-8"), state)
-    payload = json.loads(body.decode("utf-8"))
-    self.assertEqual(status, 400)
-    self.assertEqual(payload["error"]["type"], "invalid_consist")
-    self.assertIn("最多 8 辆", payload["error"]["message"])
+    with temporary_vehicle_router() as (router, _vehicle_store, state):
+      request = {"name": "九车编组", "members": self._members(9)}
+      body, status = router.handle_json("POST", "/api/consists", json.dumps(request).encode("utf-8"), state)
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 400)
+      self.assertEqual(payload["error"]["type"], "invalid_consist")
+      self.assertIn("最多 8 辆", payload["error"]["message"])
 
   def test_consist_speed_requires_protocol_ready(self):
     state = default_state()
@@ -206,67 +197,67 @@ class ConsistApiTest(unittest.TestCase):
     self.assertEqual([request["payload"] for request in transport.requests], [control_a, request_a, control_b, request_b])
 
   def test_patch_consist_updates_name_and_members(self):
-    state = default_state()
-    state["consists"].append({
-      "id": "local-consist-1",
-      "name": "旧编组",
-      "members": [{"vehicle_id": "v1", "address": 3, "direction": "forward", "order": 1}],
-    })
-    request = {
-      "name": "新编组",
-      "members": [{"vehicle_id": "v2", "address": 4, "direction": "reverse", "order": 1}],
-    }
-    body, status = ApiRouter(None).handle_json(
-      "PATCH",
-      "/api/consists/local-consist-1",
-      json.dumps(request).encode("utf-8"),
-      state,
-    )
-    payload = json.loads(body.decode("utf-8"))
-    self.assertEqual(status, 200)
-    self.assertEqual(payload["data"]["name"], "新编组")
-    self.assertEqual(payload["data"]["members"][0]["address"], 4)
+    with temporary_vehicle_router() as (router, vehicle_store, state):
+      self._seed_member_vehicles(vehicle_store, 3)
+      vehicle_store.create_consist({
+        "id": "local-consist-1",
+        "name": "旧编组",
+        "members": [{"vehicle_id": "v1", "address": 3, "direction": "forward", "order": 1}],
+      })
+      request = {
+        "name": "新编组",
+        "members": [{"vehicle_id": "v2", "address": 4, "direction": "reverse", "order": 1}],
+      }
+      body, status = router.handle_json(
+        "PATCH",
+        "/api/consists/local-consist-1",
+        json.dumps(request).encode("utf-8"),
+        state,
+      )
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 200)
+      self.assertEqual(payload["data"]["name"], "新编组")
+      self.assertEqual(payload["data"]["members"][0]["address"], 4)
 
   def test_patch_consist_rejects_more_than_eight_members(self):
-    state = default_state()
-    state["consists"].append({
-      "id": "local-consist-1",
-      "name": "旧编组",
-      "members": [{"vehicle_id": "v1", "address": 3, "direction": "forward", "order": 1}],
-    })
-    request = {"members": self._members(9)}
-    body, status = ApiRouter(None).handle_json(
-      "PATCH",
-      "/api/consists/local-consist-1",
-      json.dumps(request).encode("utf-8"),
-      state,
-    )
-    payload = json.loads(body.decode("utf-8"))
-    self.assertEqual(status, 400)
-    self.assertEqual(payload["error"]["type"], "invalid_consist")
-    self.assertIn("最多 8 辆", payload["error"]["message"])
+    with temporary_vehicle_router() as (router, vehicle_store, state):
+      self._seed_member_vehicles(vehicle_store, 1)
+      vehicle_store.create_consist({
+        "id": "local-consist-1",
+        "name": "旧编组",
+        "members": [{"vehicle_id": "v0", "address": 1, "direction": "forward", "order": 1}],
+      })
+      request = {"members": self._members(9)}
+      body, status = router.handle_json(
+        "PATCH",
+        "/api/consists/local-consist-1",
+        json.dumps(request).encode("utf-8"),
+        state,
+      )
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 400)
+      self.assertEqual(payload["error"]["type"], "invalid_consist")
+      self.assertIn("最多 8 辆", payload["error"]["message"])
 
   def test_delete_consist_removes_record(self):
-    state = default_state()
-    state["consists"].append({
-      "id": "local-consist-1",
-      "name": "测试编组",
-      "members": [{"vehicle_id": "v1", "address": 3, "direction": "forward", "order": 1}],
-    })
-    body, status = ApiRouter(None).handle_json("DELETE", "/api/consists/local-consist-1", b"", state)
-    payload = json.loads(body.decode("utf-8"))
-    self.assertEqual(status, 200)
-    self.assertTrue(payload["data"]["deleted"])
-    self.assertEqual(state["consists"], [])
+    with temporary_vehicle_router() as (router, vehicle_store, state):
+      self._seed_member_vehicles(vehicle_store, 2)
+      vehicle_store.create_consist({
+        "id": "local-consist-1",
+        "name": "测试编组",
+        "members": [{"vehicle_id": "v1", "address": 3, "direction": "forward", "order": 1}],
+      })
+      body, status = router.handle_json("DELETE", "/api/consists/local-consist-1", b"", state)
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 200)
+      self.assertTrue(payload["data"]["deleted"])
+      self.assertEqual(vehicle_store.list_consists(), [])
 
   def test_sqlite_consist_api_persists_create_patch_delete(self):
-    with tempfile.TemporaryDirectory() as temp_dir:
-      vehicle_store = VehicleStore(Path(temp_dir) / "vehicles.sqlite3")
+    with temporary_vehicle_router() as (router, vehicle_store, state):
       first = vehicle_store.create_vehicle({"name": "A", "address": 3, "track_mode": "ho"})
       second = vehicle_store.create_vehicle({"name": "B", "address": 4, "track_mode": "ho"})
-      state = default_state()
       state["controller"]["track_mode"] = "ho"
-      router = ApiRouter(None, vehicle_store=vehicle_store)
       create_body, create_status = router.handle_json(
         "POST",
         "/api/consists",
@@ -330,15 +321,14 @@ class ConsistApiTest(unittest.TestCase):
       self.assertEqual(vehicle_store.list_consists()[0]["name"], "持久编组")
 
   def test_sqlite_consist_list_does_not_fallback_to_app_state(self):
-    with tempfile.TemporaryDirectory() as temp_dir:
-      vehicle_store = VehicleStore(Path(temp_dir) / "vehicles.sqlite3")
+    with temporary_vehicle_router() as (router, _vehicle_store, state):
       state = default_state()
       state["consists"].append({
-        "id": "legacy-json-consist",
+        "id": "runtime-json-consist",
         "name": "旧 JSON 编组",
         "members": [{"vehicle_id": "v1", "address": 3, "direction": "forward", "order": 1}],
       })
-      body, status = ApiRouter(None, vehicle_store=vehicle_store).handle_json("GET", "/api/consists", b"", state)
+      body, status = router.handle_json("GET", "/api/consists", b"", state)
       payload = json.loads(body.decode("utf-8"))
       self.assertEqual(status, 200)
       self.assertEqual(payload["data"], [])

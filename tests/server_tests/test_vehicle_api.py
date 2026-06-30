@@ -8,7 +8,7 @@ import zipfile
 
 from server.api import ApiRouter
 from server.app_state import AppStateStore, default_state
-from digsight_dxdcnet.constants import CMD_LOCO_CONTROL_ACK, DEVICE_TYPE_THROTTLE
+from digsight_dxdcnet.constants import CMD_LOCO_CONTROL_ACK, CMD_LOCO_FUNCTION, CMD_LOCO_SPEED, DEVICE_TYPE_THROTTLE
 from digsight_dxdcnet.frames import build_udp_frame
 from digsight_dxdcnet.loco_control import (
   build_loco_control_request_frame,
@@ -16,28 +16,8 @@ from digsight_dxdcnet.loco_control import (
   build_loco_speed_frame,
 )
 from server.vehicle_store import VehicleStore
-
-
-class FakeRequestMappedUdpTransport:
-  def __init__(self, responses_by_request):
-    self.responses_by_request = responses_by_request
-    self.requests = []
-
-  def exchange(self, host, port, payload, local_port=0, max_packets=32, stop_when=None):
-    self.requests.append({
-      "host": host,
-      "port": port,
-      "payload": payload,
-      "local_port": local_port,
-      "max_packets": max_packets,
-      "stop_when": bool(stop_when),
-    })
-    responses = []
-    for response in self.responses_by_request.get(payload, [])[:max_packets]:
-      responses.append(response)
-      if stop_when and stop_when(response):
-        break
-    return responses
+from tests.server_tests.controller_test_env import temporary_vehicle_router
+from tests.server_tests.fake_udp import FakeRequestMappedUdpTransport
 
 
 class VehicleApiTest(unittest.TestCase):
@@ -51,6 +31,24 @@ class VehicleApiTest(unittest.TestCase):
       source_id=1,
       command=CMD_LOCO_CONTROL_ACK,
       payload=bytes([address & 0xFF, high, DEVICE_TYPE_THROTTLE, granted_id]),
+    )
+
+  def _loco_speed_feedback(self, address: int, speed: int = 10):
+    high = ((address >> 8) & 0x3F) | (0x80 if address > 0x7F else 0)
+    return build_udp_frame(
+      device_type=DEVICE_TYPE_THROTTLE,
+      source_id=1,
+      command=CMD_LOCO_SPEED + 0x08,
+      payload=bytes([address & 0xFF, high, 0x80 | speed, 0x02]),
+    )
+
+  def _loco_function_feedback(self, address: int):
+    high = ((address >> 8) & 0x3F) | (0x80 if address > 0x7F else 0)
+    return build_udp_frame(
+      device_type=DEVICE_TYPE_THROTTLE,
+      source_id=1,
+      command=CMD_LOCO_FUNCTION + 0x08,
+      payload=bytes([address & 0xFF, high, 0x1A, 0x01]),
     )
 
   def _create_minimal_z21_bytes(self, temp_dir: Path) -> bytes:
@@ -79,11 +77,8 @@ class VehicleApiTest(unittest.TestCase):
     return archive_path.read_bytes()
 
   def test_sqlite_vehicle_api_creates_categories_and_vehicle(self):
-    with tempfile.TemporaryDirectory() as temp_dir:
-      vehicle_store = VehicleStore(Path(temp_dir) / "vehicles.sqlite3")
-      state = default_state()
+    with temporary_vehicle_router() as (router, vehicle_store, state):
       state["controller"]["track_mode"] = "ho"
-      router = ApiRouter(None, vehicle_store=vehicle_store)
       category_body, category_status = router.handle_json(
         "POST",
         "/api/categories",
@@ -112,9 +107,7 @@ class VehicleApiTest(unittest.TestCase):
       self.assertEqual(vehicle_payload["data"]["functions"][0]["label"], "行车灯")
 
   def test_sqlite_vehicle_api_preserves_function_trigger_mode(self):
-    with tempfile.TemporaryDirectory() as temp_dir:
-      vehicle_store = VehicleStore(Path(temp_dir) / "vehicles.sqlite3")
-      router = ApiRouter(None, vehicle_store=vehicle_store)
+    with temporary_vehicle_router() as (router, _vehicle_store, _state):
       request = json.dumps({
         "name": "BR 218",
         "address": 218,
@@ -127,9 +120,28 @@ class VehicleApiTest(unittest.TestCase):
       self.assertEqual(status, 200)
       self.assertEqual(payload["data"]["functions"][0]["trigger_mode"], "momentary")
 
+  def test_sqlite_vehicle_list_returns_batched_details(self):
+    with temporary_vehicle_router() as (router, vehicle_store, _state):
+      category = vehicle_store.create_category({"name": "电力机车"})
+      vehicle_store.create_vehicle_with_functions(
+        {
+          "name": "HXD1",
+          "address": 1937,
+          "track_mode": "ho",
+          "category_ids": [category["id"]],
+        },
+        [{"function_number": 4, "label": "机舱灯"}],
+      )
+
+      body, status = router.handle_json("GET", "/api/vehicles", b"", default_state())
+      payload = json.loads(body.decode("utf-8"))
+
+      self.assertEqual(status, 200)
+      self.assertEqual(payload["data"][0]["categories"][0]["name"], "电力机车")
+      self.assertEqual(payload["data"][0]["functions"][0]["label"], "机舱灯")
+
   def test_sqlite_vehicle_patch_replaces_categories_functions_and_address_together(self):
-    with tempfile.TemporaryDirectory() as temp_dir:
-      vehicle_store = VehicleStore(Path(temp_dir) / "vehicles.sqlite3")
+    with temporary_vehicle_router() as (router, vehicle_store, _state):
       old_category = vehicle_store.create_category({"name": "旧分类"})
       new_category = vehicle_store.create_category({"name": "新分类"})
       vehicle = vehicle_store.create_vehicle_with_functions(
@@ -141,7 +153,6 @@ class VehicleApiTest(unittest.TestCase):
         },
         [{"function_number": 0, "label": "旧灯"}],
       )
-      router = ApiRouter(None, vehicle_store=vehicle_store)
       request = json.dumps({
         "address": 7141,
         "category_ids": [new_category["id"]],
@@ -164,21 +175,18 @@ class VehicleApiTest(unittest.TestCase):
       self.assertEqual([function["function_number"] for function in stored_functions], [0, 5])
 
   def test_sqlite_state_includes_vehicle_categories(self):
-    with tempfile.TemporaryDirectory() as temp_dir:
-      vehicle_store = VehicleStore(Path(temp_dir) / "vehicles.sqlite3")
+    with temporary_vehicle_router() as (router, vehicle_store, _state):
       category = vehicle_store.create_category({"name": "客运"})
       state = default_state()
-      body, status = ApiRouter(None, vehicle_store=vehicle_store).handle_json("GET", "/api/state", b"", state)
+      body, status = router.handle_json("GET", "/api/state", b"", state)
       payload = json.loads(body.decode("utf-8"))
       self.assertEqual(status, 200)
       self.assertEqual(payload["data"]["categories"][0]["id"], category["id"])
 
   def test_sqlite_vehicle_api_reorders_custom_vehicle_order(self):
-    with tempfile.TemporaryDirectory() as temp_dir:
-      vehicle_store = VehicleStore(Path(temp_dir) / "vehicles.sqlite3")
+    with temporary_vehicle_router() as (router, vehicle_store, _state):
       first = vehicle_store.create_vehicle({"name": "B", "address": 2, "track_mode": "ho"})
       second = vehicle_store.create_vehicle({"name": "A", "address": 1, "track_mode": "ho"})
-      router = ApiRouter(None, vehicle_store=vehicle_store)
       request = json.dumps({"vehicle_ids": [second["id"], first["id"]]}).encode("utf-8")
       body, status = router.handle_json("PATCH", "/api/vehicles/order", request, {"controller": {}})
       payload = json.loads(body.decode("utf-8"))
@@ -186,10 +194,8 @@ class VehicleApiTest(unittest.TestCase):
       self.assertEqual([vehicle["id"] for vehicle in payload["data"]["vehicles"][:2]], [second["id"], first["id"]])
 
   def test_sqlite_category_api_updates_and_deletes_category(self):
-    with tempfile.TemporaryDirectory() as temp_dir:
-      vehicle_store = VehicleStore(Path(temp_dir) / "vehicles.sqlite3")
+    with temporary_vehicle_router() as (router, vehicle_store, _state):
       category = vehicle_store.create_category({"name": "旧分类", "description": "旧说明", "sort_order": 3})
-      router = ApiRouter(None, vehicle_store=vehicle_store)
 
       update_body, update_status = router.handle_json(
         "PATCH",
@@ -211,8 +217,7 @@ class VehicleApiTest(unittest.TestCase):
       self.assertIsNone(vehicle_store.get_category(category["id"]))
 
   def test_sqlite_category_api_reports_missing_category(self):
-    with tempfile.TemporaryDirectory() as temp_dir:
-      router = ApiRouter(None, vehicle_store=VehicleStore(Path(temp_dir) / "vehicles.sqlite3"))
+    with temporary_vehicle_router() as (router, _vehicle_store, _state):
       update_body, update_status = router.handle_json(
         "PATCH",
         "/api/categories/missing",
@@ -229,9 +234,7 @@ class VehicleApiTest(unittest.TestCase):
       self.assertEqual(delete_payload["error"]["type"], "category_not_found")
 
   def test_create_vehicle_with_invalid_function_rolls_back_vehicle_insert(self):
-    with tempfile.TemporaryDirectory() as temp_dir:
-      vehicle_store = VehicleStore(Path(temp_dir) / "vehicles.sqlite3")
-      router = ApiRouter(None, vehicle_store=vehicle_store)
+    with temporary_vehicle_router() as (router, vehicle_store, _state):
       request = json.dumps({
         "name": "DF11",
         "address": 1160,
@@ -243,6 +246,46 @@ class VehicleApiTest(unittest.TestCase):
       self.assertEqual(status, 400)
       self.assertEqual(payload["error"]["type"], "invalid_vehicle")
       self.assertEqual(vehicle_store.list_vehicles(), [])
+
+  def test_create_vehicle_rejects_missing_category_with_structured_error(self):
+    with temporary_vehicle_router() as (router, vehicle_store, state):
+      request = json.dumps({
+        "name": "DF11",
+        "address": 1160,
+        "track_mode": "ho",
+        "category_ids": ["missing-category"],
+      }).encode("utf-8")
+
+      try:
+        body, status = router.handle_json("POST", "/api/vehicles", request, state)
+      except Exception as exc:  # pragma: no cover - exercised only before the regression fix
+        self.fail(f"expected structured invalid_vehicle response, got {type(exc).__name__}: {exc}")
+
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 400)
+      self.assertEqual(payload["error"]["type"], "invalid_vehicle")
+      self.assertEqual(vehicle_store.list_vehicles(), [])
+
+  def test_patch_vehicle_rejects_duplicate_function_ids_with_structured_error(self):
+    with temporary_vehicle_router() as (router, vehicle_store, state):
+      vehicle_store.create_vehicle({"id": "v1", "name": "车", "address": 3, "track_mode": "ho"})
+      vehicle_store.replace_vehicle_functions("v1", [{"function_number": 0, "label": "灯"}])
+      request = json.dumps({
+        "functions": [
+          {"id": "same-function", "function_number": 0, "label": "前灯"},
+          {"id": "same-function", "function_number": 1, "label": "喇叭"},
+        ]
+      }).encode("utf-8")
+
+      try:
+        body, status = router.handle_json("PATCH", "/api/vehicles/v1", request, state)
+      except Exception as exc:  # pragma: no cover - exercised only before the regression fix
+        self.fail(f"expected structured invalid_vehicle response, got {type(exc).__name__}: {exc}")
+
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 400)
+      self.assertEqual(payload["error"]["type"], "invalid_vehicle")
+      self.assertEqual([function["label"] for function in vehicle_store.list_functions("v1")], ["灯"])
 
   def test_sqlite_vehicle_data_is_not_mirrored_to_app_state_file(self):
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -269,11 +312,11 @@ class VehicleApiTest(unittest.TestCase):
       vehicle_store = VehicleStore(temp_dir / "vehicles.sqlite3")
       router = ApiRouter(state_store, image_dir=temp_dir / "vehicle-images", vehicle_store=vehicle_store)
       state = state_store.load()
-      body, status = router.import_z21_bytes("HO.z21", self._create_minimal_z21_bytes(temp_dir), state)
+      body, status = router.import_config_bytes("z21_layout_config", "HO.z21", self._create_minimal_z21_bytes(temp_dir), state)
       payload = json.loads(body.decode("utf-8"))
       self.assertEqual(status, 200)
-      self.assertEqual(payload["data"]["track_mode"], "ho")
-      self.assertEqual(payload["data"]["vehicles_imported"], 1)
+      self.assertEqual(payload["data"]["summary"]["track_mode"], "ho")
+      self.assertEqual(payload["data"]["summary"]["vehicles_imported"], 1)
       self.assertEqual(vehicle_store.list_vehicles()[0]["track_mode"], "ho")
       saved_state = state_store.load()
       self.assertEqual(saved_state["imports"], [])
@@ -338,46 +381,46 @@ class VehicleApiTest(unittest.TestCase):
       self.assertEqual(vehicle_store.list_consists()[0]["members"], [])
 
   def test_patch_vehicle_updates_address_and_consist_member(self):
-    state = default_state()
-    state["vehicles"].append({"id": "v1", "name": "旧名称", "address": 3, "description": ""})
-    state["consists"].append({
-      "id": "c1",
-      "name": "编组",
-      "members": [{"vehicle_id": "v1", "address": 3, "direction": "forward", "order": 1}],
-    })
-    request = json.dumps({"name": "新名称", "address": 12, "description": "已更新"}).encode("utf-8")
-    body, status = ApiRouter(None).handle_json("PATCH", "/api/vehicles/v1", request, state)
-    payload = json.loads(body.decode("utf-8"))
-    self.assertEqual(status, 200)
-    self.assertEqual(payload["data"]["name"], "新名称")
-    self.assertEqual(state["vehicles"][0]["address"], 12)
-    self.assertEqual(state["consists"][0]["members"][0]["address"], 12)
+    with temporary_vehicle_router() as (router, vehicle_store, state):
+      vehicle_store.create_vehicle({"id": "v1", "name": "旧名称", "address": 3, "description": "", "track_mode": "ho"})
+      vehicle_store.create_consist({
+        "id": "c1",
+        "name": "编组",
+        "members": [{"vehicle_id": "v1", "address": 3, "direction": "forward", "order": 1}],
+      })
+      request = json.dumps({"name": "新名称", "address": 12, "description": "已更新"}).encode("utf-8")
+      body, status = router.handle_json("PATCH", "/api/vehicles/v1", request, state)
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 200)
+      self.assertEqual(payload["data"]["name"], "新名称")
+      self.assertEqual(vehicle_store.get_vehicle("v1")["address"], 12)
+      self.assertEqual(vehicle_store.list_consists()[0]["members"][0]["address"], 12)
 
   def test_patch_vehicle_rejects_invalid_address(self):
-    state = default_state()
-    state["vehicles"].append({"id": "v1", "name": "车", "address": 3})
-    for address in [0, 10000]:
-      request = json.dumps({"address": address}).encode("utf-8")
-      body, status = ApiRouter(None).handle_json("PATCH", "/api/vehicles/v1", request, state)
-      payload = json.loads(body.decode("utf-8"))
-      self.assertEqual(status, 400)
-      self.assertEqual(payload["error"]["type"], "invalid_vehicle")
+    with temporary_vehicle_router() as (router, vehicle_store, state):
+      vehicle_store.create_vehicle({"id": "v1", "name": "车", "address": 3, "track_mode": "ho"})
+      for address in [0, 10000]:
+        request = json.dumps({"address": address}).encode("utf-8")
+        body, status = router.handle_json("PATCH", "/api/vehicles/v1", request, state)
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["type"], "invalid_vehicle")
 
   def test_patch_vehicle_updates_function_table(self):
-    state = default_state()
-    state["vehicles"].append({"id": "v1", "name": "车", "address": 3})
-    state["functions"].append({"id": "old", "vehicle_id": "v1", "function_number": 0, "label": "灯"})
-    request = json.dumps({
-      "functions": [
-        {"function_number": 0, "label": "前灯", "icon_name": "light", "button_type": 1, "position": 0, "show_function_number": True, "is_configured": True},
-        {"function_number": 1, "label": "喇叭", "icon_name": "horn", "button_type": 2, "position": 1, "show_function_number": True, "is_configured": True},
-      ]
-    }).encode("utf-8")
-    body, status = ApiRouter(None).handle_json("PATCH", "/api/vehicles/v1", request, state)
-    payload = json.loads(body.decode("utf-8"))
-    self.assertEqual(status, 200)
-    self.assertEqual(len(payload["data"]["functions"]), 2)
-    self.assertEqual(state["functions"][0]["label"], "前灯")
+    with temporary_vehicle_router() as (router, vehicle_store, state):
+      vehicle_store.create_vehicle({"id": "v1", "name": "车", "address": 3, "track_mode": "ho"})
+      vehicle_store.replace_vehicle_functions("v1", [{"function_number": 0, "label": "灯"}])
+      request = json.dumps({
+        "functions": [
+          {"function_number": 0, "label": "前灯", "icon_name": "light", "button_type": 1, "position": 0, "show_function_number": True, "is_configured": True},
+          {"function_number": 1, "label": "喇叭", "icon_name": "horn", "button_type": 2, "position": 1, "show_function_number": True, "is_configured": True},
+        ]
+      }).encode("utf-8")
+      body, status = router.handle_json("PATCH", "/api/vehicles/v1", request, state)
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 200)
+      self.assertEqual(len(payload["data"]["functions"]), 2)
+      self.assertEqual(vehicle_store.list_functions("v1")[0]["label"], "前灯")
 
   def test_loco_speed_requires_protocol_ready(self):
     state = default_state()
@@ -439,6 +482,31 @@ class VehicleApiTest(unittest.TestCase):
     self.assertEqual([item["payload"] for item in transport.requests], [expected_control, expected_frame])
     self.assertEqual(payload["data"]["request_hex"], expected_frame.hex(" "))
 
+  def test_loco_speed_feedback_ignores_wrong_address_before_target_feedback(self):
+    state = default_state()
+    state["controller"]["track_mode"] = "n"
+    state["controller"]["udp_port"] = 12000
+    state["controller"]["udp_checksum_algorithm"] = "xor"
+    state["controller"]["last_probe_ok"] = True
+    state["controller"]["controller_reachable"] = True
+    state["controller"]["booster_status"] = {"source": "dxdcnet_status_0x23", "power_on": True, "dcc_mode": True}
+    self._mark_booster_status_fresh(state)
+    state["vehicles"].append({"id": "v1", "name": "车", "address": 3})
+    request = json.dumps({"vehicle_id": "v1", "speed": 10, "direction": "forward"}).encode("utf-8")
+    expected_control = build_loco_control_request_frame(3)
+    expected_frame = build_loco_speed_frame(3, 10, "forward")
+    transport = FakeRequestMappedUdpTransport({
+      expected_control: [self._loco_control_ack(3)],
+      expected_frame: [self._loco_speed_feedback(4, 20), self._loco_speed_feedback(3, 10)],
+    })
+
+    body, status = ApiRouter(None, udp_transport=transport).handle_json("POST", "/api/loco/speed", request, state)
+    payload = json.loads(body.decode("utf-8"))
+
+    self.assertEqual(status, 200)
+    self.assertEqual(payload["data"]["feedback"]["address"], 3)
+    self.assertEqual(payload["data"]["feedback"]["speed"], 10)
+
   def test_loco_speed_requests_control_for_long_dcc_address(self):
     state = default_state()
     state["controller"]["track_mode"] = "ho"
@@ -490,6 +558,54 @@ class VehicleApiTest(unittest.TestCase):
     self.assertTrue(payload["ok"])
     self.assertEqual([item["payload"] for item in transport.requests], [expected_control, expected_frame])
     self.assertEqual(payload["data"]["function_number"], 5)
+
+  def test_loco_function_rejects_non_boolean_enabled_and_function_states(self):
+    state = self._state_with_ready_loco_control()
+    requests = (
+      {"vehicle_id": "v1", "function_number": 5, "enabled": "false", "function_states": {"5": False}},
+      {"vehicle_id": "v1", "function_number": 5, "enabled": False, "function_states": {"5": "false"}},
+    )
+    for request in requests:
+      with self.subTest(request=request):
+        body, status = ApiRouter(None).handle_json(
+          "POST",
+          "/api/loco/function",
+          json.dumps(request).encode("utf-8"),
+          state,
+        )
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["type"], "invalid_loco_control")
+
+  def test_loco_function_feedback_ignores_wrong_address_before_target_feedback(self):
+    state = default_state()
+    state["controller"]["track_mode"] = "ho"
+    state["controller"]["udp_port"] = 12000
+    state["controller"]["udp_checksum_algorithm"] = "xor"
+    state["controller"]["last_probe_ok"] = True
+    state["controller"]["controller_reachable"] = True
+    state["controller"]["booster_status"] = {"source": "dxdcnet_status_0x23", "power_on": True, "dcc_mode": True}
+    self._mark_booster_status_fresh(state)
+    state["vehicles"].append({"id": "v1", "name": "车", "address": 3})
+    request = json.dumps({
+      "vehicle_id": "v1",
+      "function_number": 5,
+      "enabled": True,
+      "function_states": {"0": True, "2": True, "4": True, "5": True},
+    }).encode("utf-8")
+    expected_control = build_loco_control_request_frame(3)
+    expected_frame = build_loco_function_frame(3, {0: True, 2: True, 4: True, 5: True})
+    transport = FakeRequestMappedUdpTransport({
+      expected_control: [self._loco_control_ack(3)],
+      expected_frame: [self._loco_function_feedback(4), self._loco_function_feedback(3)],
+    })
+
+    body, status = ApiRouter(None, udp_transport=transport).handle_json("POST", "/api/loco/function", request, state)
+    payload = json.loads(body.decode("utf-8"))
+
+    self.assertEqual(status, 200)
+    self.assertEqual(payload["data"]["feedback"]["address"], 3)
+    self.assertTrue(payload["data"]["feedback"]["function_states"]["5"])
 
   def test_loco_function_sends_f13_group_after_protocol_ready(self):
     state = default_state()
