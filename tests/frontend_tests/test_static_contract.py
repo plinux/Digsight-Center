@@ -226,10 +226,34 @@ class StaticContractTest(SourceAssertionsMixin, unittest.TestCase):
   def test_coverage_gate_is_documented_and_scripted(self):
     script = self.read_text("scripts/check_coverage.py")
     coverage_config = self.read_text(".coveragerc")
+    readme = self.read_text("README.md")
+    manual = self.read_text("manual/MANUAL.html")
     self.assertIn("FUNCTION_COVERAGE_MINIMUM = 100.0", script)
     self.assertIn("LINE_COVERAGE_MINIMUM = 90.0", script)
     self.assertIn("BRANCH_COVERAGE_MINIMUM = 80.0", script)
+    self.assertIn("使用 Python 3.10+ 解释器执行测试", readme)
+    self.assertIn("使用 Python 3.10+ 解释器执行测试", manual)
     self.assertIn("branch = True", coverage_config)
+
+  def test_public_docs_test_commands_use_local_package_paths(self):
+    readme = self.read_text("README.md")
+    manual = self.read_text("manual/MANUAL.html")
+
+    for public_doc in (readme, manual):
+      self.assertIn("直接使用仓库内的本地协议 package", public_doc)
+      self.assertIn("$PWD/packages/train-dcc/src", public_doc)
+      self.assertIn("$PWD/packages/digsight-dxdcnet/src", public_doc)
+      self.assertIn("${PYTHONPATH:+:$PYTHONPATH}", public_doc)
+
+  def test_public_docs_describe_code_only_extension_examples(self):
+    readme = self.read_text("README.md")
+    manual = self.read_text("manual/MANUAL.html")
+
+    for public_doc in (readme, manual):
+      self.assertIn("server/controllers/example.py", public_doc)
+      self.assertIn("server/importers/example.py", public_doc)
+      self.assertIn("不会出现在前端", public_doc)
+      self.assertIn("registry", public_doc)
 
 
 if __name__ == "__main__":
