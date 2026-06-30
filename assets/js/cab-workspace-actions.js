@@ -15,7 +15,6 @@ export function buildCabWorkspaceActions({
   setDraggedVehicleId,
   sendCabSpeed,
   clampSpeed,
-  syncActiveCabControlState,
   sendCabFunctionByMode
 }) {
   return {
@@ -70,7 +69,6 @@ export function buildCabWorkspaceActions({
       appState.activeCabId = cabId;
       cab.speed = clampSpeed(speed);
       cab.direction = direction;
-      syncActiveCabControlState(cabId);
     },
     onSpeed: async (cabId, speed, direction) => {
       const cab = appState.cabs[cabId];

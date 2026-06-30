@@ -54,7 +54,9 @@ class FrontendCoreContractTest(SourceAssertionsMixin, unittest.TestCase):
     self.assertIn('from "./function-icon-catalog.js"', vehicle_source + app_source)
     self.assertIn("export const FALLBACK_FUNCTION_ICON_CATALOG", catalog_source)
     self.assertIn('fetchImpl("/config/function-icons.json"', catalog_source)
-    self.assertIn('fetchImpl("/config/function-icon-mappings/z21.json"', catalog_source)
+    self.assertIn("function_icon_mapping_files", catalog_source)
+    self.assertIn("capabilities?.import_formats", catalog_source)
+    self.assertNotIn('fetchImpl("/config/function-icon-mappings/z21.json"', catalog_source)
     self.assertNotIn('"version": 1,', vehicle_source[:5000])
     self.assertNotIn('"mappings": {', vehicle_source)
 
@@ -75,7 +77,6 @@ class FrontendCoreContractTest(SourceAssertionsMixin, unittest.TestCase):
     cab_source = self.read_text("assets/js/vehicle-cab-view.js")
     editor_source = self.read_text("assets/js/vehicle-editor-view.js")
     self.assert_source_contains_all(cab_source, [
-      "export function renderLocoControl",
       "export function renderDcControl",
       "export function renderVehicleControlWorkspace",
     ])
@@ -106,6 +107,7 @@ class FrontendCoreContractTest(SourceAssertionsMixin, unittest.TestCase):
       "getCvMetadata",
       "getControllerInfo",
       "readControllerInfo",
+      "resetControllerConfig",
       "saveControllerSettings",
       "setControllerTrackMode",
       "setDcControl",
@@ -166,6 +168,7 @@ class FrontendCoreContractTest(SourceAssertionsMixin, unittest.TestCase):
       "setTrackPower",
       "setDcControl",
       "saveControllerSettings",
+      "resetControllerConfig",
       "importConfig",
       "writeCv",
       "writeAddress",
@@ -177,7 +180,6 @@ class FrontendCoreContractTest(SourceAssertionsMixin, unittest.TestCase):
       "createConsist",
       "updateConsist",
       "deleteConsist",
-      "setConsistSpeed",
       "setLocoSpeed",
       "setLocoFunction",
     ]:
@@ -198,6 +200,33 @@ class FrontendCoreContractTest(SourceAssertionsMixin, unittest.TestCase):
     self.assertNotIn(TOKEN_PROMPT_TEXT, power_on_source)
     self.assertNotIn(TOKEN_PROMPT_TEXT, power_off_source)
 
+  def test_controller_config_reset_confirms_files_before_api_call(self):
+    html = self.read_text("index.html")
+    gateway_source = self.read_text("assets/js/gateway-api.js")
+    app_source = self.read_text("assets/js/app.js")
+    bootstrap_source = self.read_text("assets/js/app-bootstrap.js")
+    controller_workflow_source = self.read_text("assets/js/controller-workflow.js")
+
+    self.assertIn('id="resetControllerConfigButton"', html)
+    self.assertIn('export function resetControllerConfig(kind)', gateway_source)
+    self.assertIn('postJson("/api/controller/reset-config"', gateway_source)
+    self.assertIn("export async function resetSelectedControllerConfig(", controller_workflow_source)
+    self.assertIn("function confirmControllerConfigReset(files)", controller_workflow_source)
+    self.assertIn("globalThis.confirm(message)", controller_workflow_source)
+    self.assertIn("本次会重置以下文件", controller_workflow_source)
+    self.assertIn("reset_files", controller_workflow_source)
+    self.assertIn("shouldIncludeGlobalStateInReset", controller_workflow_source)
+    self.assertIn("app_state_corrupt_recovered", controller_workflow_source)
+    self.assertIn("data/app-state.json", controller_workflow_source)
+    self.assertNotIn("async function resetSelectedControllerConfig()", app_source)
+    self.assertNotIn("function confirmControllerConfigReset(files)", app_source)
+    reset_source = controller_workflow_source[
+      controller_workflow_source.index("export async function resetSelectedControllerConfig("):
+      controller_workflow_source.index("function confirmControllerConfigReset")
+    ]
+    self.assertLess(reset_source.index("confirmControllerConfigReset"), reset_source.index("resetControllerConfig("))
+    self.assertIn("elements.resetControllerConfigButton.addEventListener", bootstrap_source)
+
   def test_header_brand_is_right_aligned_outside_primary_controls(self):
     html = self.read_text("index.html")
     css = self.read_text("assets/css/app.css")
@@ -208,27 +237,41 @@ class FrontendCoreContractTest(SourceAssertionsMixin, unittest.TestCase):
     self.assertIn('grid-template-areas: "controls status runtime brand";', css)
     self.assertIn(".header-brand", css)
     self.assertIn("grid-area: brand;", css)
+
+  def test_controller_config_error_status_suggests_manual_repair_or_reset(self):
+    app_source = self.read_text("assets/js/app.js")
+    source = self.read_text("assets/js/controller-workflow.js")
+    self.assertIn("export function persistentConfigurationStatus(", source)
+    self.assertIn("当前控制器配置文件无效", source)
+    self.assertIn("请手工修复该 JSON 文件，或点击重置恢复默认配置。", source)
+    self.assertIn("重置只会影响当前选择控制器的配置文件。", source)
+    self.assertIn("persistentConfigurationStatus", source)
+    self.assertNotIn("function persistentConfigurationStatus()", app_source)
+
   def test_track_power_not_ready_message_is_user_actionable(self):
-    source = self.read_text("assets/js/app.js")
-    self.assertIn("请先连接控制器并读取最新状态", source)
+    source = self.read_text("assets/js/controller-workflow.js")
+    self.assertIn("轨道状态未确认，正在重新读取控制器信息", source)
 
   def test_track_power_on_retries_after_stale_booster_status(self):
     source = self.read_text("assets/js/app.js")
+    workflow_source = self.read_text("assets/js/controller-workflow.js")
     bootstrap_source = self.read_text("assets/js/app-bootstrap.js")
-    self.assertIn("async function runTrackPowerRequestWithStatusRetry", source)
-    self.assertIn("function isRetryableTrackPowerStatusError", source)
-    retry_source = source[
-      source.index("async function runTrackPowerRequestWithStatusRetry"):
-      source.index("function isRetryableTrackPowerStatusError")
+    self.assertIn("export async function runControllerStatusRetry", workflow_source)
+    self.assertIn("function isRetryableControllerStatusError", workflow_source)
+    self.assertNotIn("async function runTrackPowerRequestWithStatusRetry", source)
+    self.assertNotIn("function isRetryableTrackPowerStatusError", source)
+    retry_source = workflow_source[
+      workflow_source.index("export async function runControllerStatusRetry"):
+      workflow_source.index("function isRetryableControllerStatusError")
     ]
-    classifier_source = source[
-      source.index("function isRetryableTrackPowerStatusError"):
-      source.index("async function initialize()")
+    classifier_source = workflow_source[
+      workflow_source.index("function isRetryableControllerStatusError"):
+      workflow_source.index("export function syncControllerDescriptorControls")
     ]
     power_on_source = bootstrap_source[bootstrap_source.index("elements.powerOnButton.addEventListener"):]
     power_on_source = power_on_source[:power_on_source.index("elements.powerOffButton.addEventListener")]
     self.assertIn("return await requestFn();", retry_source)
-    self.assertIn("if (!powered || !isRetryableTrackPowerStatusError(error))", retry_source)
+    self.assertIn("if (!requiresFreshStatus || !isRetryableControllerStatusError(error))", retry_source)
     self.assertIn("await readControllerInfo();", retry_source)
     self.assertIn("await refreshState();", retry_source)
     self.assertIn("return await requestFn();", retry_source)
@@ -239,7 +282,9 @@ class FrontendCoreContractTest(SourceAssertionsMixin, unittest.TestCase):
       "controller_not_confirmed",
     ]:
       self.assertIn(warning, classifier_source)
-    self.assertIn("runTrackPowerRequestWithStatusRetry(true, () => setTrackPower(true))", power_on_source)
+    self.assertIn("runControllerStatusRetry({", power_on_source)
+    self.assertIn("requiresFreshStatus: true", power_on_source)
+    self.assertIn("requestFn: () => setTrackPower(true)", power_on_source)
 
   def test_app_wires_required_panels(self):
     source = self.read_text("assets/js/app.js") + self.read_text("assets/js/app-bootstrap.js")
@@ -273,10 +318,8 @@ class FrontendCoreContractTest(SourceAssertionsMixin, unittest.TestCase):
       "readChipInfoFromController",
       "data-track-mode",
       "navCvProgramming.disabled",
-      "renderVehicleRegistry",
       "renderVehicleEditor",
-      "renderLocoControl",
-      "renderUnsupportedVehicleControl",
+      "renderVehicleControlWorkspace",
       "renderControllerSettings",
       "keydown",
       "ArrowUp",
@@ -307,23 +350,34 @@ class FrontendCoreContractTest(SourceAssertionsMixin, unittest.TestCase):
       "onDcVoltage",
     ])
 
-  def test_sync_controller_endpoint_preserves_zero_transport_values(self):
+  def test_sync_controller_endpoint_uses_transport_readiness_helper(self):
     source = self.read_text("assets/js/app.js")
+    controller_workflow_source = self.read_text("assets/js/controller-workflow.js")
     function_source = source[
       source.index("async function syncControllerEndpoint()"):
       source.index("async function setOperationMode")
     ]
 
-    self.assertIn("appState.controller.udp_port = result.udp_port ?? appState.controller.udp_port;", function_source)
-    self.assertIn(
-      "appState.controller.local_udp_port = result.local_udp_port ?? appState.controller.local_udp_port;",
-      function_source,
-    )
-    self.assertIn(
-      "appState.controller.udp_checksum_algorithm = result.udp_checksum_algorithm ?? appState.controller.udp_checksum_algorithm;",
-      function_source,
-    )
-    self.assertNotIn("result.local_udp_port ||", function_source)
+    self.assertIn("const descriptor = controllerDescriptor(appState.capabilities, kind);", function_source)
+    self.assertIn("controllerEndpointReady(descriptor, appState.controller)", function_source)
+    self.assertIn("controllerEndpointReady", source)
+    self.assertNotIn("function controllerEndpointReady(descriptor", source)
+    self.assertIn("export function controllerEndpointReady(descriptor", controller_workflow_source)
+    self.assertNotIn("Number(controllerTransport.udp_port || 0) > 0", function_source)
+    self.assertIn("appState.controller.transport = result.transport ?? appState.controller.transport;", function_source)
+    self.assertNotIn("result.transport ||", function_source)
+
+  def test_controller_endpoint_ready_uses_descriptor_readiness_contract(self):
+    source = self.read_text("assets/js/controller-workflow.js")
+    function_source = self.source_function(source, "controllerEndpointReady")
+
+    self.assertIn("endpoint_readiness", function_source)
+    self.assertIn("required_paths", function_source)
+    self.assertIn("controllerEndpointValue", function_source)
+    self.assertIn("every((path)", function_source)
+    self.assertNotIn("transport_fields", function_source)
+    self.assertNotIn("udp_port", function_source)
+    self.assertIn("controllerDescriptor", source)
 
   def test_app_splits_render_all_handler_builders(self):
     source = self.read_text("assets/js/app.js")
@@ -428,7 +482,8 @@ class FrontendCoreContractTest(SourceAssertionsMixin, unittest.TestCase):
       "elements.statusDetailButton.hidden",
       "elements.statusDetailText.textContent",
       "JSON.stringify(error.payload, null, 2)",
-      "summary: error.payload?.error?.message || error.message",
+      "const apiError = error.payload?.error;",
+      "summary: apiError?.message || error.message",
       "detail:",
       "elements.statusDetailButton?.addEventListener(\"click\", openStatusDetailDialog)",
       "elements.statusDetailDialog.showModal()",
@@ -470,6 +525,16 @@ class FrontendCoreContractTest(SourceAssertionsMixin, unittest.TestCase):
       "error.name",
       "return {summary: error.message, detail: genericDetail};",
     ])
+
+  def test_header_status_explicitly_reports_unsupported_controller_protocol(self):
+    source = self.read_text("assets/js/app.js")
+    self.assert_source_contains_all(source, [
+      "if (apiError?.type === \"controller_protocol_not_supported\") {",
+      "当前控制器配置了不支持的协议",
+      "请检查当前控制器配置文件中的 protocol",
+      "JSON.stringify(error.payload, null, 2)",
+    ])
+
 
 if __name__ == "__main__":
   unittest.main()

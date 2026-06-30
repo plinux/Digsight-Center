@@ -15,6 +15,7 @@ class ControllerFrameList(list):
 @dataclass(frozen=True)
 class ControllerCapabilities:
   track_power: bool
+  dc_control: bool
   read_info: bool
   cv_programming: bool
   loco_control: bool
@@ -23,6 +24,7 @@ class ControllerCapabilities:
   def to_dict(self) -> dict:
     return {
       "track_power": self.track_power,
+      "dc_control": self.dc_control,
       "read_info": self.read_info,
       "cv_programming": self.cv_programming,
       "loco_control": self.loco_control,
@@ -31,25 +33,77 @@ class ControllerCapabilities:
 
 
 @dataclass(frozen=True)
-class ControllerTransportDefaults:
-  udp_port: int
-  local_udp_port: int
-  checksum_algorithm: str
-  checksum_algorithms: tuple[str, ...] = ()
-  allow_zero_local_udp_port: bool = True
+class ControllerTransportDescriptor:
+  kind: str
+  defaults: dict
+  endpoint_required_paths: tuple[str, ...] = ()
+  metadata: dict = field(default_factory=dict)
 
-  def __post_init__(self):
-    if not self.checksum_algorithms:
-      object.__setattr__(self, "checksum_algorithms", (self.checksum_algorithm,))
+  def default_config(self) -> dict:
+    return {"kind": self.kind, **self.defaults}
 
   def to_dict(self) -> dict:
     return {
-      "udp_port": self.udp_port,
-      "local_udp_port": self.local_udp_port,
-      "checksum_algorithm": self.checksum_algorithm,
-      "checksum_algorithms": list(self.checksum_algorithms),
-      "allow_zero_local_udp_port": self.allow_zero_local_udp_port,
+      "kind": self.kind,
+      "defaults": dict(self.defaults),
+      "metadata": {
+        key: list(value) if isinstance(value, tuple) else value
+        for key, value in self.metadata.items()
+      },
+      "endpoint_readiness": {
+        "required_paths": list(self.endpoint_required_paths),
+      },
     }
+
+
+def configured_controller_text(config: dict | None, key: str, fallback: str) -> str:
+  if isinstance(config, dict):
+    value = str(config.get(key) or "").strip()
+    if value:
+      return value
+  return fallback
+
+
+def controller_display_name(adapter, config: dict | None = None) -> str:
+  return configured_controller_text(config, "display_name", getattr(adapter, "default_display_name", adapter.label))
+
+
+def controller_protocol(adapter, config: dict | None = None) -> str:
+  return configured_controller_text(config, "protocol", getattr(adapter, "protocol", ""))
+
+
+def controller_supported_protocols(adapter) -> tuple[str, ...]:
+  protocols = getattr(adapter, "supported_protocols", None)
+  if protocols is None:
+    protocol = str(getattr(adapter, "protocol", "") or "").strip()
+    return (protocol,) if protocol else ()
+  return tuple(str(protocol).strip() for protocol in protocols if str(protocol).strip())
+
+
+def apply_controller_transport_runtime(adapter, controller: dict) -> None:
+  apply_runtime = getattr(adapter, "apply_transport_runtime", None)
+  if callable(apply_runtime):
+    apply_runtime(controller)
+
+
+def normalize_controller_transport_config(adapter, transport, *, strict: bool) -> dict:
+  normalize = getattr(adapter, "normalize_transport_config", None)
+  if callable(normalize):
+    return normalize(transport, strict=strict)
+  descriptor = adapter.transport_descriptor
+  source = transport if isinstance(transport, dict) else {}
+  return {
+    **descriptor.default_config(),
+    **source,
+    "kind": str(source.get("kind") or descriptor.kind),
+  }
+
+
+def controller_readiness_detail(adapter, warnings: list[str]) -> str:
+  detail_provider = getattr(adapter, "readiness_warning_detail", None)
+  if callable(detail_provider):
+    return detail_provider(warnings)
+  return adapter.status_not_ready_message()
 
 
 @dataclass(frozen=True)
@@ -148,6 +202,22 @@ class ControllerOperationNotSupported(RuntimeError):
     self.controller_kind = controller_kind
 
 
+class ControllerProtocolNotSupported(RuntimeError):
+  """Raised when a controller config requests a protocol the selected adapter cannot use."""
+
+  def __init__(self, controller_kind: str, protocol: str, supported_protocols, reason: str = ""):
+    supported = tuple(supported_protocols or ())
+    supported_text = ", ".join(supported) if supported else "none"
+    detail = f"{controller_kind} configured protocol {protocol!r}, supported protocols: {supported_text}"
+    if reason:
+      detail = f"{detail}; {reason}"
+    super().__init__(detail)
+    self.controller_kind = controller_kind
+    self.protocol = protocol
+    self.supported_protocols = supported
+    self.reason = reason
+
+
 class ControllerParameterWriteError(RuntimeError):
   def __init__(self, message: str, debug: dict | None = None):
     super().__init__(message)
@@ -157,10 +227,12 @@ class ControllerParameterWriteError(RuntimeError):
 class ControllerAdapter(Protocol):
   kind: str
   label: str
+  default_display_name: str
+  protocol: str
   default_ip: str
   config_file_name: str
   capabilities: ControllerCapabilities
-  transport_defaults: ControllerTransportDefaults
+  transport_descriptor: ControllerTransportDescriptor
 
   def runtime_readiness_warnings(self, controller: dict) -> list[str]:
     ...
@@ -171,12 +243,19 @@ class ControllerAdapter(Protocol):
   def status_not_ready_message(self) -> str:
     ...
 
-
-class ControllerStatusCapability(Protocol):
-  def is_booster_status_confirmed(self, controller: dict) -> bool:
+  def controller_client_id(self, controller: dict) -> int:
     ...
 
-  def programming_track_status(self, controller: dict):
+  def create_session_manager(self, *, transport=None, context=None):
+    ...
+
+  def session_identity(self, controller: dict) -> tuple:
+    ...
+
+  def endpoint_identity(self, controller: dict) -> tuple:
+    ...
+
+  def apply_transport_runtime(self, controller: dict) -> None:
     ...
 
 

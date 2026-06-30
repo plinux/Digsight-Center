@@ -1,6 +1,4 @@
 import unittest
-import re
-from pathlib import Path
 
 from tests.frontend_tests.source_assertions import SourceAssertionsMixin
 
@@ -44,8 +42,9 @@ class FrontendCvContractTest(SourceAssertionsMixin, unittest.TestCase):
     self.assertIn("地址通常会变为 ${resetMethod.defaultAddress || 3}", source)
     self.assertIn('typeof globalScope.confirm === "function" ? globalScope.confirm(message) : false', source)
     self.assertIn('const targetPayload = cvProgrammingRequest("芯片重置");', source)
-    self.assertIn('const safetyReady = await refreshCvSafety("芯片重置", targetPayload.programming_target);', source)
-    self.assertIn('runCvRequestWithSafetyRetry("芯片重置", targetPayload.programming_target, () => writeCv(resetMethod.cv, resetMethod.value, true, targetPayload))', source)
+    self.assertIn('const actionResult = await runPreparedCvAction(', source)
+    self.assertIn('"芯片重置",', source)
+    self.assertIn('(targetPayload) => writeCv(resetMethod.cv, resetMethod.value, true, targetPayload)', source)
 
   def test_cv_programming_layout_uses_list_and_editor_stack(self):
     html = self.read_text("index.html")
@@ -134,10 +133,9 @@ class FrontendCvContractTest(SourceAssertionsMixin, unittest.TestCase):
       source.index("async function readChipInfo()")
     ]
     initialize_source = self.read_text("assets/js/app-bootstrap.js")
-    self.assertIn('const targetPayload = cvProgrammingRequest("芯片信息读取");', chip_info_source)
-    self.assertIn('const safetyReady = await refreshCvSafety("芯片信息读取", targetPayload.programming_target);', chip_info_source)
+    self.assertIn('const actionResult = await runTargetedCvAction("芯片信息读取"', chip_info_source)
     self.assertIn("readChipInfoFromController(targetPayload)", chip_info_source)
-    self.assertIn("if (!safetyReady) {", chip_info_source)
+    self.assertIn("if (!actionResult.completed) {", chip_info_source)
     self.assertNotIn("readControllerInfo()", chip_info_source)
     self.assertIn("appState.controllerInfo?.safe_for_cv", safety_source)
     self.assertIn("const target = normalizeProgrammingTarget(programmingTarget);", safety_source)
@@ -170,12 +168,33 @@ class FrontendCvContractTest(SourceAssertionsMixin, unittest.TestCase):
     ]:
       self.assertIn(warning, classifier_source)
     for token in [
-      "runCvRequestWithSafetyRetry(\"地址读取\"",
-      "runCvRequestWithSafetyRetry(\"地址写入\"",
-      "runCvRequestWithSafetyRetry(\"CV 读取\"",
-      "runCvRequestWithSafetyRetry(\"CV 写入\"",
+      "async function runPreparedCvAction",
+      "async function runTargetedCvAction",
+      "runTargetedCvAction(\n            \"地址读取\"",
+      "runPreparedCvAction(\n            \"地址写入\"",
+      "runTargetedCvAction(\n            \"CV 读取\"",
+      "runPreparedCvAction(\n            \"CV 写入\"",
     ]:
       self.assertIn(token, source)
+
+  def test_cv_and_address_writes_fail_closed_without_confirm_dialog(self):
+    source = self.read_text("assets/js/cv-runtime-actions.js")
+    self.assertIn(
+      'typeof globalScope.confirm === "function" ? globalScope.confirm(`确认写入车辆地址 ${address}？`) : false',
+      source,
+    )
+    self.assertIn(
+      'typeof globalScope.confirm === "function" ? globalScope.confirm(`确认写入 CV${cvNumber}=${value}？`) : false',
+      source,
+    )
+    self.assertNotIn(
+      'typeof globalScope.confirm === "function" ? globalScope.confirm(`确认写入车辆地址 ${address}？`) : true',
+      source,
+    )
+    self.assertNotIn(
+      'typeof globalScope.confirm === "function" ? globalScope.confirm(`确认写入 CV${cvNumber}=${value}？`) : true',
+      source,
+    )
 
   def test_main_track_cv_operations_use_page_vehicle_selector(self):
     html = self.read_text("index.html")
@@ -218,10 +237,9 @@ class FrontendCvContractTest(SourceAssertionsMixin, unittest.TestCase):
     self.assertNotIn("read.disabled = !selectedVehicle;", address_panel_source)
     self.assertNotIn("write.disabled = !selectedVehicle;", address_panel_source)
     self.assertIn("cvState.address = result.address;", runtime_source)
-    self.assertIn('const targetPayload = cvProgrammingRequest("地址读取");', runtime_source)
+    self.assertIn('runTargetedCvAction(\n            "地址读取"', runtime_source)
     self.assertIn('const targetPayload = cvProgrammingRequest("地址写入");', runtime_source)
-    self.assertIn('const safetyReady = await refreshCvSafety("地址读取", targetPayload.programming_target);', runtime_source)
-    self.assertIn('const safetyReady = await refreshCvSafety("地址写入", targetPayload.programming_target);', runtime_source)
+    self.assertIn('runPreparedCvAction(\n            "地址写入"', runtime_source)
     self.assertIn("readAddress(targetPayload.vehicle_id, targetPayload)", runtime_source)
     self.assertIn("writeAddress(targetPayload.vehicle_id, address, true, targetPayload)", runtime_source)
     self.assertIn(".address-actions", css)
@@ -234,12 +252,11 @@ class FrontendCvContractTest(SourceAssertionsMixin, unittest.TestCase):
     cv_editor_source = source[source.index("function renderCvEditorPanel"):]
     self.assertNotIn("read.disabled = !selectedVehicle;", cv_editor_source)
     self.assertNotIn("write.disabled = !selectedVehicle;", cv_editor_source)
-    self.assertIn('const targetPayload = cvProgrammingRequest("CV 读取");', runtime_source)
+    self.assertIn('runTargetedCvAction(\n            "CV 读取"', runtime_source)
     self.assertIn('const targetPayload = cvProgrammingRequest("CV 写入");', runtime_source)
-    self.assertIn('const safetyReady = await refreshCvSafety("CV 读取", targetPayload.programming_target);', runtime_source)
-    self.assertIn('const safetyReady = await refreshCvSafety("CV 写入", targetPayload.programming_target);', runtime_source)
-    self.assertIn('runCvRequestWithSafetyRetry("CV 读取", targetPayload.programming_target, () => readCv(cvNumber, targetPayload))', runtime_source)
-    self.assertIn('runCvRequestWithSafetyRetry("CV 写入", targetPayload.programming_target, () => writeCv(cvNumber, value, true, targetPayload))', runtime_source)
+    self.assertIn('runPreparedCvAction(\n            "CV 写入"', runtime_source)
+    self.assertIn("(targetPayload) => readCv(cvNumber, targetPayload)", runtime_source)
+    self.assertIn("(targetPayload) => writeCv(cvNumber, value, true, targetPayload)", runtime_source)
     self.assertIn("grid-template-columns: repeat(8, minmax(54px, 1fr));", css)
     self.assertIn("overflow-x: auto;", css)
 

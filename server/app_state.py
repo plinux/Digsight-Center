@@ -8,25 +8,43 @@ import threading
 from typing import Any, Dict
 
 from server import models
-from server.controllers.base import ControllerTransportDefaults
+from server.controller_config_defaults import (
+  CONTROLLER_CONFIG_FIELDS,
+  controller_default_config,
+  controller_field_descriptions,
+)
+from server.controller_safety import invalidate_controller_safety
+from server.controllers.base import (
+  apply_controller_transport_runtime,
+  controller_display_name,
+  controller_protocol,
+  normalize_controller_transport_config,
+)
 from server.controllers.registry import default_controller_registry
 
 
-UNREGISTERED_CONTROLLER_TRANSPORT_DEFAULTS = ControllerTransportDefaults(
-  udp_port=0,
-  local_udp_port=0,
-  checksum_algorithm="unconfirmed",
-  checksum_algorithms=("unconfirmed",),
-  allow_zero_local_udp_port=True,
-)
-CONTROLLER_CONFIG_FIELDS = {
-  "ip",
-  "settings",
-  "udp_port",
-  "local_udp_port",
-  "udp_checksum_algorithm",
-  "track_profiles",
-}
+APP_STATE_CORRUPT_RECOVERED_ERROR = "app_state_corrupt_recovered"
+CONTROLLER_CONFIG_INVALID_ERROR = "controller_config_invalid"
+CONTROLLER_RUNTIME_INVALID_ERROR = "controller_runtime_invalid"
+
+def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
+  path.parent.mkdir(parents=True, exist_ok=True)
+  with tempfile.NamedTemporaryFile(
+    "w",
+    encoding="utf-8",
+    dir=path.parent,
+    prefix=f"{path.name}.",
+    suffix=".tmp",
+    delete=False,
+  ) as handle:
+    temp_path = Path(handle.name)
+    json.dump(payload, handle, ensure_ascii=False, indent=2)
+    handle.write("\n")
+  try:
+    temp_path.replace(path)
+  except Exception:
+    temp_path.unlink(missing_ok=True)
+    raise
 
 
 def _default_controller_descriptor(controller_registry=None):
@@ -37,67 +55,70 @@ def _default_controller_descriptor(controller_registry=None):
 
 def default_state(controller_registry=None) -> Dict[str, Any]:
   default_adapter = _default_controller_descriptor(controller_registry)
-  transport_defaults = default_adapter.transport_defaults
+  transport_descriptor = default_adapter.transport_descriptor
+  controller = {
+    "kind": default_adapter.kind,
+    "ip": default_adapter.default_ip,
+    "settings": {},
+    "transport": transport_descriptor.default_config(),
+    "safety_snapshot": {
+      "controller_endpoint_version": 0,
+      "last_read_info_at": "",
+      "booster_status_fresh": False,
+      "programming_track_status_fresh": False,
+    },
+    "runtime_revision": 0,
+    "last_probe_at": "",
+    "last_probe_ok": False,
+    "controller_reachable": False,
+    "controller_unreachable_reason": "not_read",
+    "display_name": controller_display_name(default_adapter),
+    "field_descriptions": controller_field_descriptions(default_adapter),
+    "protocol": controller_protocol(default_adapter),
+    "last_controller_seen_at": "",
+    "controller_info_status_timeout_seconds": models.CONTROLLER_INFO_STATUS_TIMEOUT_SECONDS,
+    "controller_info_poll_timeout_seconds": models.CONTROLLER_INFO_POLL_TIMEOUT_SECONDS,
+    "track_mode": models.TRACK_MODE_N,
+    "programming_target": models.PROGRAMMING_TARGET_PROGRAMMING_TRACK,
+    "dcc_mode_bit": models.DCC_MODE_BIT,
+    "n_output_value": models.N_OUTPUT_VALUE,
+    "ho_output_value": models.HO_OUTPUT_VALUE,
+    "g_output_value": models.G_OUTPUT_VALUE,
+    "n_current_param": models.N_CURRENT_PARAM,
+    "ho_current_param": models.HO_CURRENT_PARAM,
+    "g_current_param": models.G_CURRENT_PARAM,
+    "dc_current_param": models.DC_CURRENT_PARAM,
+    "current_step_ma": models.CURRENT_STEP_MA,
+    "service_mode_limit_ma": models.SERVICE_MODE_LIMIT_MA,
+    "telemetry": {
+      "temperature_c": None,
+      "track_voltage_v": None,
+      "track_current_a": None,
+      "track_power_w": None,
+    },
+    "device_info": {
+      "device_name": "",
+      "factory_number": "",
+      "mac_address": "",
+      "model": "",
+      "hardware_version": "",
+      "software_version": "",
+      "firmware_version": "",
+      "core_version": "",
+      "wireless_version": "",
+      "railcom_enabled": None,
+      "screen_brightness": None,
+      "screen_brightness_raw": None,
+      "screen_direction_raw": None,
+      "screen_direction_label": "",
+      "source": "not_read",
+    },
+    "track_profiles": models.default_track_profiles(),
+  }
+  apply_controller_transport_runtime(default_adapter, controller)
   return {
     "schema_version": 1,
-    "controller": {
-      "kind": default_adapter.kind,
-      "ip": default_adapter.default_ip,
-      "settings": {},
-      "udp_port": transport_defaults.udp_port,
-      "local_udp_port": transport_defaults.local_udp_port,
-      "udp_checksum_algorithm": transport_defaults.checksum_algorithm,
-      "safety_snapshot": {
-        "controller_endpoint_version": 0,
-        "last_read_info_at": "",
-        "booster_status_fresh": False,
-        "programming_track_status_fresh": False,
-      },
-      "runtime_revision": 0,
-      "last_probe_at": "",
-      "last_probe_ok": False,
-      "controller_reachable": False,
-      "controller_unreachable_reason": "not_read",
-      "last_controller_seen_at": "",
-      "controller_info_status_timeout_seconds": models.CONTROLLER_INFO_STATUS_TIMEOUT_SECONDS,
-      "controller_info_poll_timeout_seconds": models.CONTROLLER_INFO_POLL_TIMEOUT_SECONDS,
-      "track_mode": models.TRACK_MODE_N,
-      "programming_target": models.PROGRAMMING_TARGET_PROGRAMMING_TRACK,
-      "dcc_mode_bit": models.DCC_MODE_BIT,
-      "n_output_value": models.N_OUTPUT_VALUE,
-      "ho_output_value": models.HO_OUTPUT_VALUE,
-      "g_output_value": models.G_OUTPUT_VALUE,
-      "n_current_param": models.N_CURRENT_PARAM,
-      "ho_current_param": models.HO_CURRENT_PARAM,
-      "g_current_param": models.G_CURRENT_PARAM,
-      "dc_current_param": models.DC_CURRENT_PARAM,
-      "current_step_ma": models.CURRENT_STEP_MA,
-      "service_mode_limit_ma": models.SERVICE_MODE_LIMIT_MA,
-      "telemetry": {
-        "temperature_c": None,
-        "track_voltage_v": None,
-        "track_current_a": None,
-        "track_power_w": None,
-      },
-      "device_info": {
-        "device_name": "",
-        "factory_number": "",
-        "mac_address": "",
-        "model": "",
-        "hardware_version": "",
-        "software_version": "",
-        "firmware_version": "",
-        "core_version": "",
-        "wireless_version": "",
-        "railcom_enabled": None,
-        "screen_brightness": None,
-        "screen_brightness_raw": None,
-        "screen_direction_raw": None,
-        "screen_direction_label": "",
-        "source": "not_read",
-      },
-      "track_profiles": models.default_track_profiles(),
-    },
+    "controller": controller,
     "vehicles": [],
     "functions": [],
     "consists": [],
@@ -107,11 +128,20 @@ def default_state(controller_registry=None) -> Dict[str, Any]:
 
 
 class AppStateStore:
-  def __init__(self, path: Path, *, controller_registry=None, controller_config_dir: Path | None = None):
+  def __init__(
+    self,
+    path: Path,
+    *,
+    controller_registry=None,
+    controller_config_dir: Path | None = None,
+    vehicle_store=None,
+  ):
     self.path = Path(path)
     project_root = self.path.parent.parent if self.path.parent.name == "data" else self.path.parent
+    self.project_root = project_root
     self.controller_config_dir = Path(controller_config_dir) if controller_config_dir else project_root / "config" / "controllers"
     self.controller_registry = controller_registry or default_controller_registry()
+    self.vehicle_store = vehicle_store
     self._save_lock = threading.RLock()
 
   def load(self) -> Dict[str, Any]:
@@ -149,25 +179,10 @@ class AppStateStore:
 
   def _save_unlocked(self, state: Dict[str, Any]) -> None:
     normalized_state = self._with_defaults(state, allow_state_controller_config=True)
-    self._save_controller_config_unlocked(normalized_state["controller"])
+    if not self._has_active_controller_config_error(normalized_state):
+      self._save_controller_config_unlocked(normalized_state["controller"])
     disk_state = self._app_state_for_disk(normalized_state)
-    self.path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-      "w",
-      encoding="utf-8",
-      dir=self.path.parent,
-      prefix=f"{self.path.name}.",
-      suffix=".tmp",
-      delete=False,
-    ) as handle:
-      temp_path = Path(handle.name)
-      json.dump(disk_state, handle, ensure_ascii=False, indent=2)
-      handle.write("\n")
-    try:
-      temp_path.replace(self.path)
-    except Exception:
-      temp_path.unlink(missing_ok=True)
-      raise
+    _write_json_atomic(self.path, disk_state)
 
   def update(self, mutator, persist=None):
     with self._save_lock:
@@ -182,7 +197,7 @@ class AppStateStore:
     self.path.replace(backup_path)
     state = default_state(self.controller_registry)
     state["last_error"] = {
-      "type": "app_state_corrupt_recovered",
+      "type": APP_STATE_CORRUPT_RECOVERED_ERROR,
       "detail": str(original_error),
       "backup_file": backup_path.name,
     }
@@ -190,31 +205,11 @@ class AppStateStore:
     return state
 
   @staticmethod
-  def _validated_or_default(value, default, validator):
+  def _validated_or_default_with_error(value, default, validator):
     try:
-      return validator(value)
+      return validator(value), False
     except (TypeError, ValueError):
-      return default
-
-  @staticmethod
-  def _positive_int_or_default(value, default: int) -> int:
-    try:
-      normalized = int(value)
-    except (TypeError, ValueError):
-      return default
-    return normalized if normalized > 0 else default
-
-  @classmethod
-  def _local_udp_port_or_default(cls, value, transport_defaults: ControllerTransportDefaults) -> int:
-    try:
-      normalized = int(value)
-    except (TypeError, ValueError):
-      return transport_defaults.local_udp_port
-    if normalized < 0:
-      return transport_defaults.local_udp_port
-    if normalized == 0 and not transport_defaults.allow_zero_local_udp_port:
-      return transport_defaults.local_udp_port
-    return normalized
+      return default, True
 
   def _registered_controller_kind_or_default(self, value) -> str:
     try:
@@ -224,143 +219,292 @@ class AppStateStore:
     except (TypeError, ValueError):
       return self.controller_registry.default_kind
 
-  def _controller_transport_defaults(self, controller_kind: str) -> ControllerTransportDefaults:
-    try:
-      return self.controller_registry.get(controller_kind).transport_defaults
-    except ValueError:
-      return UNREGISTERED_CONTROLLER_TRANSPORT_DEFAULTS
-
   def _controller_default_config(self, controller_kind: str) -> Dict[str, Any]:
-    try:
-      adapter = self.controller_registry.get(controller_kind)
-      transport_defaults = adapter.transport_defaults
-      default_ip = adapter.default_ip
-    except ValueError:
-      transport_defaults = UNREGISTERED_CONTROLLER_TRANSPORT_DEFAULTS
-      default_ip = models.CONTROLLER_DEFAULT_IP
-    return {
-      "ip": default_ip,
-      "settings": {},
-      "udp_port": transport_defaults.udp_port,
-      "local_udp_port": transport_defaults.local_udp_port,
-      "udp_checksum_algorithm": transport_defaults.checksum_algorithm,
-      "track_profiles": models.default_track_profiles(),
-    }
+    if self.vehicle_store is not None:
+      config = self.vehicle_store.controller_default_config_for_kind(controller_kind)
+      if config is not None:
+        return config
+    return self.default_controller_config(self.controller_registry, controller_kind)
+
+  @staticmethod
+  def default_controller_config(controller_registry, controller_kind: str) -> Dict[str, Any]:
+    return controller_default_config(controller_registry, controller_kind)
 
   def _controller_config_path(self, controller_kind: str) -> Path:
     return self.controller_config_dir / self.controller_registry.config_file_name(controller_kind)
 
-  def _load_controller_config_unlocked(self, controller_kind: str) -> Dict[str, Any]:
+  def _relative_path(self, path: Path) -> str:
+    try:
+      return path.relative_to(self.project_root).as_posix()
+    except ValueError:
+      return path.as_posix()
+
+  def app_state_relative_path(self) -> str:
+    return self._relative_path(self.path)
+
+  def controller_config_relative_path(self, controller_kind: str) -> str:
+    return self._relative_path(self._controller_config_path(controller_kind))
+
+  @staticmethod
+  def is_app_state_corrupt_recovered_error(error: dict | None) -> bool:
+    return isinstance(error, dict) and error.get("type") == APP_STATE_CORRUPT_RECOVERED_ERROR
+
+  def _controller_config_error(self, controller_kind: str, error: Exception, global_config_error: dict | None = None) -> Dict[str, Any]:
+    config_file = self.controller_config_relative_path(controller_kind)
+    payload = {
+      "type": CONTROLLER_CONFIG_INVALID_ERROR,
+      "message": "当前控制器配置文件无效",
+      "detail": str(error),
+      "controller_kind": controller_kind,
+      "config_file": config_file,
+      "resettable_files": self._controller_config_resettable_files(controller_kind, global_config_error),
+      "manual_action": "请手工修复该 JSON 文件，或点击重置恢复默认配置。",
+    }
+    if global_config_error:
+      payload["global_config_error"] = global_config_error
+    return payload
+
+  @staticmethod
+  def _controller_runtime_invalid_error(invalid_fields: list[str]) -> Dict[str, Any]:
+    return {
+      "type": CONTROLLER_RUNTIME_INVALID_ERROR,
+      "message": "控制器运行态配置无效",
+      "detail": "控制器运行态字段已恢复默认值，旧控制器状态已失效。",
+      "invalid_fields": invalid_fields,
+      "manual_action": "请重新读取控制器状态后再执行轨道上电、CV 或车辆控制操作。",
+    }
+
+  def _load_controller_config_unlocked(self, controller_kind: str, *, global_config_error: dict | None = None) -> tuple[Dict[str, Any], Dict[str, Any] | None]:
     config = self._controller_default_config(controller_kind)
     path = self._controller_config_path(controller_kind)
     if path.exists():
-      data = json.loads(path.read_text(encoding="utf-8"))
-      if not isinstance(data, dict):
-        raise ValueError(f"controller config must be a JSON object: {path}")
+      try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+          raise ValueError(f"controller config must be a JSON object: {path}")
+      except (OSError, json.JSONDecodeError, ValueError) as error:
+        return config, self._controller_config_error(controller_kind, error, global_config_error)
       config.update({key: value for key, value in data.items() if key in CONTROLLER_CONFIG_FIELDS})
+    else:
+      self._save_controller_config_payload_unlocked(controller_kind, config)
+    config["field_descriptions"] = self._normalized_field_descriptions(controller_kind, config.get("field_descriptions"))
+    self._normalize_controller_config_transport(controller_kind, config)
+    return config, None
+
+  def _normalized_field_descriptions(self, controller_kind: str, value) -> Dict[str, str]:
+    try:
+      adapter = self.controller_registry.get(controller_kind)
+    except ValueError:
+      adapter = None
+    descriptions = controller_field_descriptions(adapter)
+    if isinstance(value, dict):
+      for key, description in value.items():
+        if isinstance(key, str) and isinstance(description, str) and description:
+          descriptions[key] = description
+    return descriptions
+
+  def _normalize_controller_config_transport(self, controller_kind: str, config: Dict[str, Any]) -> None:
+    adapter = self.controller_registry.get(controller_kind)
+    config["transport"] = normalize_controller_transport_config(
+      adapter,
+      config.get("transport"),
+      strict=False,
+    )
+
+  def controller_descriptor_configs(self) -> Dict[str, Dict[str, Any]]:
+    with self._save_lock:
+      configs = {}
+      for controller_kind in self.controller_registry.kinds():
+        config, _error = self._load_controller_config_unlocked(controller_kind)
+        configs[controller_kind] = config
+      return configs
+
+  def controller_config_for_kind(self, controller_kind: str) -> Dict[str, Any]:
+    config, _error = self.controller_config_for_kind_with_error(controller_kind)
     return config
+
+  def controller_config_for_kind_with_error(self, controller_kind: str) -> tuple[Dict[str, Any], Dict[str, Any] | None]:
+    with self._save_lock:
+      kind = self._registered_controller_kind_or_default(controller_kind)
+      return self._load_controller_config_unlocked(kind)
+
+  def reset_controller_config(self, controller_kind: str) -> Dict[str, Any]:
+    with self._save_lock:
+      kind = self._registered_controller_kind_or_default(controller_kind)
+      controller_config = self._controller_default_config(kind)
+      self._save_controller_config_payload_unlocked(kind, controller_config)
+      adapter = self.controller_registry.get(kind)
+      config_file = self.controller_config_relative_path(kind)
+      return {
+        "controller_kind": kind,
+        "controller_label": controller_display_name(adapter, controller_config),
+        "config_file": config_file,
+        "reset_files": self._controller_config_resettable_files(kind),
+        "controller": controller_config,
+      }
+
+  def _controller_config_resettable_files(self, controller_kind: str, global_config_error: dict | None = None) -> list[str]:
+    files = [self.controller_config_relative_path(controller_kind)]
+    if self.is_app_state_corrupt_recovered_error(global_config_error):
+      files.append(self.app_state_relative_path())
+    return files
 
   def _save_controller_config_unlocked(self, controller: Dict[str, Any]) -> None:
     controller_kind = self._registered_controller_kind_or_default(controller.get("kind"))
-    path = self._controller_config_path(controller_kind)
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {key: controller[key] for key in sorted(CONTROLLER_CONFIG_FIELDS) if key in controller}
-    with tempfile.NamedTemporaryFile(
-      "w",
-      encoding="utf-8",
-      dir=path.parent,
-      prefix=f"{path.name}.",
-      suffix=".tmp",
-      delete=False,
-    ) as handle:
-      temp_path = Path(handle.name)
-      json.dump(payload, handle, ensure_ascii=False, indent=2)
-      handle.write("\n")
-    try:
-      temp_path.replace(path)
-    except Exception:
-      temp_path.unlink(missing_ok=True)
-      raise
+    self._save_controller_config_payload_unlocked(controller_kind, payload)
+
+  def _save_controller_config_payload_unlocked(self, controller_kind: str, payload: Dict[str, Any]) -> None:
+    path = self._controller_config_path(controller_kind)
+    _write_json_atomic(path, payload)
+
+  @staticmethod
+  def _has_active_controller_config_error(state: Dict[str, Any]) -> bool:
+    last_error = state.get("last_error")
+    return isinstance(last_error, dict) and last_error.get("type") == CONTROLLER_CONFIG_INVALID_ERROR
+
+  @staticmethod
+  def clear_controller_config_error_for_kind_change(state: Dict[str, Any], previous_kind: str, next_kind: str) -> None:
+    if previous_kind == next_kind:
+      return
+    last_error = state.get("last_error")
+    if not isinstance(last_error, dict) or last_error.get("type") != CONTROLLER_CONFIG_INVALID_ERROR:
+      return
+    if last_error.get("controller_kind") == next_kind:
+      return
+    global_config_error = last_error.get("global_config_error")
+    state["last_error"] = global_config_error if AppStateStore.is_app_state_corrupt_recovered_error(global_config_error) else None
 
   def _controller_kind_for_config(self, state_controller: Dict[str, Any], controller_defaults: Dict[str, Any]) -> str:
     return self._registered_controller_kind_or_default(state_controller.get("kind", controller_defaults["kind"]))
 
-  @staticmethod
-  def _app_state_for_disk(state: Dict[str, Any]) -> Dict[str, Any]:
+  def _controller_runtime_derived_config_fields(self) -> set[str]:
+    fields = set()
+    for adapter in self.controller_registry.adapters():
+      fields.update(getattr(adapter, "runtime_transport_fields", ()))
+    return fields
+
+  def _app_state_for_disk(self, state: Dict[str, Any]) -> Dict[str, Any]:
     disk_state = dict(state)
     controller = dict(disk_state.get("controller", {}))
-    for key in CONTROLLER_CONFIG_FIELDS:
+    for key in CONTROLLER_CONFIG_FIELDS | self._controller_runtime_derived_config_fields():
       controller.pop(key, None)
     disk_state["controller"] = controller
     return disk_state
 
-  def _with_defaults(self, state: Dict[str, Any], *, allow_state_controller_config: bool = False) -> Dict[str, Any]:
-    defaults = default_state(self.controller_registry)
-    controller_defaults = defaults["controller"]
-    telemetry_defaults = controller_defaults["telemetry"]
-    device_info_defaults = controller_defaults["device_info"]
-    safety_snapshot_defaults = controller_defaults["safety_snapshot"]
-    track_profile_defaults = controller_defaults["track_profiles"]
-    merged = dict(defaults)
-    merged.update(state)
+  @staticmethod
+  def _state_controller_dict(state: Dict[str, Any]) -> Dict[str, Any]:
     state_controller = state.get("controller", {})
-    if not isinstance(state_controller, dict):
-      state_controller = {}
+    return state_controller if isinstance(state_controller, dict) else {}
+
+  def _controller_with_config(
+    self,
+    controller_kind: str,
+    controller_defaults: Dict[str, Any],
+    state_controller: Dict[str, Any],
+    merged: Dict[str, Any],
+    allow_state_controller_config: bool,
+  ) -> tuple[Dict[str, Any], Dict[str, Any] | None]:
     controller = dict(controller_defaults)
-    controller_kind = self._controller_kind_for_config(state_controller, controller_defaults)
-    controller.update(self._load_controller_config_unlocked(controller_kind))
+    global_config_error = merged.get("last_error") if isinstance(merged.get("last_error"), dict) else None
+    controller_config, controller_config_error = self._load_controller_config_unlocked(
+      controller_kind,
+      global_config_error=global_config_error if self.is_app_state_corrupt_recovered_error(global_config_error) else None,
+    )
+    controller.update(controller_config)
     state_controller_overrides = dict(state_controller)
     if not allow_state_controller_config:
       for key in CONTROLLER_CONFIG_FIELDS:
         state_controller_overrides.pop(key, None)
     controller.update(state_controller_overrides)
-    merged["controller"] = controller
+    return controller, controller_config_error
+
+  @staticmethod
+  def _merge_runtime_controller_sections(
+    controller: Dict[str, Any],
+    state_controller: Dict[str, Any],
+    controller_defaults: Dict[str, Any],
+  ) -> None:
     controller["telemetry"] = {
-      **telemetry_defaults,
+      **controller_defaults["telemetry"],
       **state_controller.get("telemetry", {}),
     }
     controller["device_info"] = {
-      **device_info_defaults,
+      **controller_defaults["device_info"],
       **state_controller.get("device_info", {}),
     }
     controller["safety_snapshot"] = {
-      **safety_snapshot_defaults,
+      **controller_defaults["safety_snapshot"],
       **state_controller.get("safety_snapshot", {}),
     }
     screen_direction_label = models.screen_direction_label(controller["device_info"].get("screen_direction_raw"))
     if screen_direction_label:
       controller["device_info"]["screen_direction_label"] = screen_direction_label
+
+  @staticmethod
+  def _normalized_track_profiles(controller: Dict[str, Any], track_profile_defaults: Dict[str, Any]) -> Dict[str, Any]:
     track_profiles = {mode: dict(profile) for mode, profile in track_profile_defaults.items()}
     for mode, profile in controller.get("track_profiles", {}).items():
       if mode in track_profiles:
-        defaults = track_profile_defaults[mode]
-        track_profiles[mode].update(profile)
-        track_profiles[mode]["output_value"] = defaults["output_value"]
-        track_profiles[mode]["current_param"] = defaults["current_param"]
-        track_profiles[mode]["max_voltage_v"] = defaults["max_voltage_v"]
-        track_profiles[mode]["max_current_limit_ma"] = defaults["max_current_limit_ma"]
-    controller["track_profiles"] = track_profiles
+        profile_defaults = track_profile_defaults[mode]
+        track_profiles[mode] = models.validate_track_profile(mode, profile)
+        track_profiles[mode]["output_value"] = profile_defaults["output_value"]
+        track_profiles[mode]["current_param"] = profile_defaults["current_param"]
+        track_profiles[mode]["max_target_voltage_v"] = profile_defaults["max_target_voltage_v"]
+        track_profiles[mode]["max_target_current_limit_ma"] = profile_defaults["max_target_current_limit_ma"]
+    return track_profiles
+
+  def _normalize_controller_transport(self, controller: Dict[str, Any]) -> list[str]:
     controller["kind"] = self._registered_controller_kind_or_default(controller.get("kind"))
-    if not isinstance(controller.get("settings"), dict):
-      controller["settings"] = {}
-    controller["track_mode"] = self._validated_or_default(
+    adapter = self.controller_registry.get(controller["kind"])
+    self._normalize_controller_config_transport(controller["kind"], controller)
+    controller["display_name"] = controller_display_name(adapter, controller)
+    controller["protocol"] = controller_protocol(adapter, controller)
+    invalid_runtime_fields = []
+    track_mode, track_mode_invalid = self._validated_or_default_with_error(
       controller.get("track_mode", models.TRACK_MODE_N),
       models.TRACK_MODE_N,
       models.validate_profile_mode,
     )
-    controller["programming_target"] = self._validated_or_default(
+    programming_target, programming_target_invalid = self._validated_or_default_with_error(
       controller.get("programming_target", models.PROGRAMMING_TARGET_PROGRAMMING_TRACK),
       models.PROGRAMMING_TARGET_PROGRAMMING_TRACK,
       models.validate_programming_target,
     )
-    controller["udp_port"] = self._positive_int_or_default(
-      controller.get("udp_port"),
-      self._controller_transport_defaults(controller["kind"]).udp_port,
+    controller["track_mode"] = track_mode
+    controller["programming_target"] = programming_target
+    if track_mode_invalid:
+      invalid_runtime_fields.append("track_mode")
+    if programming_target_invalid:
+      invalid_runtime_fields.append("programming_target")
+    apply_controller_transport_runtime(adapter, controller)
+    return invalid_runtime_fields
+
+  def _with_defaults(self, state: Dict[str, Any], *, allow_state_controller_config: bool = False) -> Dict[str, Any]:
+    defaults = default_state(self.controller_registry)
+    controller_defaults = defaults["controller"]
+    track_profile_defaults = controller_defaults["track_profiles"]
+    merged = dict(defaults)
+    merged.update(state)
+    state_controller = self._state_controller_dict(state)
+    controller_kind = self._controller_kind_for_config(state_controller, controller_defaults)
+    controller, controller_config_error = self._controller_with_config(
+      controller_kind,
+      controller_defaults,
+      state_controller,
+      merged,
+      allow_state_controller_config,
     )
-    controller["local_udp_port"] = self._local_udp_port_or_default(
-      controller.get("local_udp_port"),
-      self._controller_transport_defaults(controller["kind"]),
-    )
-    if (controller.get("udp_checksum_algorithm") or "unconfirmed") == "unconfirmed":
-      controller["udp_checksum_algorithm"] = self._controller_transport_defaults(controller["kind"]).checksum_algorithm
+    merged["controller"] = controller
+    self._merge_runtime_controller_sections(controller, state_controller, controller_defaults)
+    controller["track_profiles"] = self._normalized_track_profiles(controller, track_profile_defaults)
+    if controller_config_error:
+      merged["last_error"] = controller_config_error
+    if not isinstance(controller.get("settings"), dict):
+      controller["settings"] = {}
+    invalid_runtime_fields = self._normalize_controller_transport(controller)
+    if invalid_runtime_fields:
+      invalidate_controller_safety(controller, reason="invalid_runtime_controller_settings")
+      if not controller_config_error:
+        merged["last_error"] = self._controller_runtime_invalid_error(invalid_runtime_fields)
     return merged

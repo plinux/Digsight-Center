@@ -1,6 +1,4 @@
 import unittest
-import re
-from pathlib import Path
 
 from tests.frontend_tests.source_assertions import SourceAssertionsMixin
 
@@ -19,6 +17,7 @@ class FrontendVehicleEditorContractTest(SourceAssertionsMixin, unittest.TestCase
   def test_vehicle_edit_button_opens_editor_and_saves_function_modes(self):
     source = (
       self.read_text("assets/js/vehicle-view.js")
+      + self.read_text("assets/js/vehicle-cab-view.js")
       + self.read_text("assets/js/vehicle-editor-view.js")
       + self.read_text("assets/js/vehicle-editor-controller.js")
     )
@@ -26,7 +25,8 @@ class FrontendVehicleEditorContractTest(SourceAssertionsMixin, unittest.TestCase
     for token in [
       "showVehicleEditor",
       "renderVehicleEditor",
-      'edit.addEventListener("click", () => handlers.onEdit?.(vehicle.id));',
+      'edit.addEventListener("click", (event) => {',
+      "handlers.onEdit?.(vehicle.id);",
       'subviewToolbar("车辆编辑", handlers.onBack)',
       'const articleNumber = inputField("货号", "text", vehicle.article_number || "");',
       "article_number: articleNumber.input.value.trim()",
@@ -429,7 +429,7 @@ class FrontendVehicleEditorContractTest(SourceAssertionsMixin, unittest.TestCase
       "FALLBACK_FUNCTION_ICON_CATALOG",
       "loadFunctionIconCatalog",
       "/config/function-icons.json",
-      "/config/function-icon-mappings/z21.json",
+      "function_icon_mapping_files",
       "resolveFunctionIcon",
       "renderFunctionSlotButton",
       "function-icon-slot",

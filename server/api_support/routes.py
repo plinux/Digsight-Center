@@ -1,7 +1,5 @@
 """Shared API route metadata for HTTP dispatch and gateway locking."""
 
-import json
-
 
 MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
 MAX_VEHICLE_IMAGE_JSON_BODY_BYTES = 3 * 1024 * 1024
@@ -30,9 +28,8 @@ POST_ROUTES = {
   "/api/controller/read-info": "controller.read_info",
   "/api/track-power": "controller.track_power",
   "/api/dc-control": "controller.dc_control",
-  "/api/controller/connect": "controller.connect",
+  "/api/controller/reset-config": "controller.reset_config",
   "/api/controller/probe": "controller.probe",
-  "/api/controller/disconnect": "controller.disconnect",
   "/api/cv/read": "cv.read",
   "/api/cv/read-all": "cv.read_all",
   "/api/cv/read-all/cancel": "cv.read_all_cancel",
@@ -87,23 +84,43 @@ API_MUTATION_ROUTES = {
 }
 
 
+def route_segments(route: str) -> list[str]:
+  normalized = route[1:] if route.startswith("/") else route
+  return normalized.split("/") if normalized else []
+
+
+def resource_route(route: str, resource: str) -> bool:
+  segments = route_segments(route)
+  return len(segments) == 3 and segments[:2] == ["api", resource] and segments[2] != ""
+
+
+def consist_operation_route(route: str) -> bool:
+  segments = route_segments(route)
+  return (
+    len(segments) == 4
+    and segments[:2] == ["api", "consists"]
+    and segments[2] != ""
+    and segments[3] in {"speed", "stop"}
+  )
+
+
 def dynamic_handler(method: str, route: str) -> str | None:
   if method == "PATCH":
-    if route.startswith("/api/categories/"):
+    if resource_route(route, "categories"):
       return "categories.patch"
-    if route.startswith("/api/vehicles/"):
+    if resource_route(route, "vehicles"):
       return "vehicles.patch"
-    if route.startswith("/api/consists/"):
+    if resource_route(route, "consists"):
       return "consists.patch"
   if method == "DELETE":
-    if route.startswith("/api/categories/"):
+    if resource_route(route, "categories"):
       return "categories.delete"
-    if route.startswith("/api/vehicles/"):
+    if resource_route(route, "vehicles"):
       return "vehicles.delete"
-    if route.startswith("/api/consists/"):
+    if resource_route(route, "consists"):
       return "consists.delete"
-  if method == "POST" and route.startswith("/api/consists/") and route.endswith(("/speed", "/stop")):
-    return "consists.speed"
+  if method == "POST" and consist_operation_route(route):
+    return "consists.operation"
   return None
 
 
@@ -119,19 +136,12 @@ def handler_for(method: str, route: str) -> str | None:
   return None
 
 
-def mutation_route_spec(method: str, route: str, body: bytes) -> dict:
+def mutation_route_spec(method: str, route: str) -> dict:
   spec = dict(API_MUTATION_DEFAULT)
   spec.update(API_MUTATION_ROUTES.get(route, {}))
   if method == "DELETE":
     spec["json_body"] = False
     spec["body_limit"] = 0
-  if method == "POST" and route.startswith("/api/consists/") and route.endswith(("/speed", "/stop")):
+  if method == "POST" and consist_operation_route(route):
     spec["lock_mode"] = LOCK_MODE_HARDWARE
-  if method == "PATCH" and route == "/api/controller/settings":
-    try:
-      payload = json.loads(body.decode("utf-8") or "{}")
-    except (UnicodeDecodeError, json.JSONDecodeError):
-      return spec
-    if isinstance(payload, dict) and payload.get("apply_to_device") is True:
-      spec["lock_mode"] = LOCK_MODE_HARDWARE
   return spec

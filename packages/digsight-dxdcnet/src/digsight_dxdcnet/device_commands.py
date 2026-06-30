@@ -1,5 +1,6 @@
 """DXDCNet device status, version and parameter command builders."""
 
+from digsight_dxdcnet._validation import validate_byte, validate_int_range
 from digsight_dxdcnet.constants import (
   CMD_MAC_REQUEST,
   CMD_PARAMETER_READ,
@@ -16,24 +17,12 @@ from digsight_dxdcnet.constants import (
 from digsight_dxdcnet.frames import build_udp_frame
 
 
-def _validate_range(name: str, value: int, minimum: int, maximum: int) -> int:
-  if not isinstance(value, int):
-    raise ValueError(f"{name} must be an integer")
-  if value < minimum or value > maximum:
-    raise ValueError(f"{name} must be in {minimum}..{maximum}")
-  return value
-
-
 def _validate_device_type(target_type: int) -> int:
-  return _validate_range("target_type", target_type, 0, 0x0F)
+  return validate_int_range("target_type", target_type, 0, 0x0F)
 
 
 def _validate_network_id(target_id: int) -> int:
-  return _validate_range("target_id", target_id, 0, 0x7F)
-
-
-def _validate_byte(name: str, value: int) -> int:
-  return _validate_range(name, value, 0, 0xFF)
+  return validate_int_range("target_id", target_id, 0, 0x7F)
 
 
 def build_request_device_status_payload(target_type: int, target_id: int) -> bytes:
@@ -49,7 +38,7 @@ def build_track_output_payload(
   dc_direction_positive: bool = True,
 ) -> bytes:
   target_id = _validate_network_id(target_id)
-  output_value = _validate_byte("output_value", output_value)
+  output_value = validate_byte("output_value", output_value)
   status = 0
   if powered:
     status |= TRACK_OUTPUT_POWER_ON
@@ -66,7 +55,7 @@ def build_read_parameter_payload(target_type: int, target_id: int, param_address
   return bytes([
     _validate_device_type(target_type),
     _validate_network_id(target_id),
-    _validate_byte("param_address", param_address),
+    validate_byte("param_address", param_address),
   ])
 
 
@@ -74,8 +63,8 @@ def build_write_parameter_payload(target_type: int, target_id: int, param_addres
   return bytes([
     _validate_device_type(target_type),
     _validate_network_id(target_id),
-    _validate_byte("param_address", param_address),
-    _validate_byte("value", value),
+    validate_byte("param_address", param_address),
+    validate_byte("value", value),
   ])
 
 

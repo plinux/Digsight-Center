@@ -1,5 +1,7 @@
 """Digsight DXDCNet controller adapter."""
 
+import json
+
 from digsight_dxdcnet.constants import (
   CMD_DEVICE_STATUS,
   CMD_LOCO_CONTROL_ACK,
@@ -50,6 +52,7 @@ from digsight_dxdcnet.programming_track import (
   ProgrammingTrackSafety,
   ProgrammingTrackStatus,
 )
+from digsight_dxdcnet.session import DXDCNetSessionManager
 from digsight_dxdcnet.udp_transport import UDPTransport
 
 from server import models
@@ -59,7 +62,7 @@ from server.controllers.base import (
   ControllerInfoReadRequest,
   ControllerInfoReadResult,
   ControllerParameterWriteError,
-  ControllerTransportDefaults,
+  ControllerTransportDescriptor,
   CvCommandRequest,
   CvCommandResult,
   LocoCommandResult,
@@ -70,41 +73,86 @@ from server.controllers.base import (
   TrackOutputRequest,
   TrackOutputResult,
 )
+from server.controllers.dxdcnet_constants import (
+  CURRENT_LIMIT_PARAM_TO_MODE,
+  PARAM_RAILCOM,
+  PARAM_SCREEN_BRIGHTNESS,
+  PARAM_SCREEN_DIRECTION,
+)
 from server.controllers.dxdcnet_info_parser import DXDCNetControllerInfoParser
-
-PARAM_RAILCOM = 0x03
-PARAM_SCREEN_BRIGHTNESS = 0x7E
-PARAM_SCREEN_DIRECTION = 0x80
-CURRENT_LIMIT_PARAM_TO_MODE = {
-  models.N_CURRENT_PARAM: models.TRACK_MODE_N,
-  models.HO_CURRENT_PARAM: models.TRACK_MODE_HO,
-  models.G_CURRENT_PARAM: models.TRACK_MODE_G,
-  models.DC_CURRENT_PARAM: models.TRACK_MODE_DC,
-}
+from server.udp_transport_config import normalize_transport_config, transport_port_value
 
 
 class DigsightDXDCNetControllerAdapter:
   kind = "digsight_controller"
-  label = "动芯 DXDCNet"
-  config_file_name = models.controller_config_file_name(kind)
+  label = "动芯 拾Pro"
+  default_display_name = "动芯 拾Pro"
+  protocol = models.CONTROLLER_PROTOCOL_DXDCNET
+  supported_protocols = (models.CONTROLLER_PROTOCOL_DXDCNET,)
+  config_file_name = "Digsight_D9000.json"
   default_ip = models.CONTROLLER_DEFAULT_IP
+  runtime_transport_fields = ("udp_port", "local_udp_port", "udp_checksum_algorithm")
+  field_descriptions = {
+    "protocol": "该控制器使用的通讯协议名称；动芯拾Pro当前使用 DXDCNet。",
+    "transport.kind": "传输类型；动芯拾Pro的 DXDCNet 协议当前使用 udp。",
+    "transport.udp_port": "控制器远端 UDP 端口；动芯拾Pro当前默认使用 12000。",
+    "transport.local_udp_port": "本机绑定的 UDP 端口；动芯拾Pro真实硬件通讯当前使用 6667。",
+    "transport.udp_checksum_algorithm": "UDP 帧校验算法；动芯拾Pro当前使用 xor。",
+    "track_profiles.<mode>.current_param": "动芯 D9000 限流参数地址；N/HO/G/DC 分别对应 0x81/0x82/0x83/0x84。",
+  }
   capabilities = ControllerCapabilities(
     track_power=True,
+    dc_control=True,
     read_info=True,
     cv_programming=True,
     loco_control=True,
     controller_settings=True,
   )
-  transport_defaults = ControllerTransportDefaults(
-    udp_port=models.DXDCNET_DEFAULT_UDP_PORT,
-    local_udp_port=models.DXDCNET_DEFAULT_LOCAL_UDP_PORT,
-    checksum_algorithm=models.DXDCNET_DEFAULT_CHECKSUM_ALGORITHM,
-    checksum_algorithms=(models.DXDCNET_DEFAULT_CHECKSUM_ALGORITHM,),
-    allow_zero_local_udp_port=False,
+  transport_descriptor = ControllerTransportDescriptor(
+    kind="udp",
+    defaults={
+      "udp_port": models.DXDCNET_DEFAULT_UDP_PORT,
+      "local_udp_port": models.DXDCNET_DEFAULT_LOCAL_UDP_PORT,
+      "udp_checksum_algorithm": models.DXDCNET_DEFAULT_CHECKSUM_ALGORITHM,
+    },
+    endpoint_required_paths=("transport.udp_port",),
+    metadata={
+      "checksum_algorithms": (models.DXDCNET_DEFAULT_CHECKSUM_ALGORITHM,),
+      "allow_zero_local_udp_port": False,
+    },
   )
 
   def __init__(self, info_parser=None):
     self.info_parser = info_parser or DXDCNetControllerInfoParser()
+
+  def create_session_manager(self, *, transport=None, context=None):
+    return DXDCNetSessionManager(transport)
+
+  def normalize_transport_config(self, transport, *, strict: bool) -> dict:
+    return normalize_transport_config(transport, self.transport_descriptor, strict=strict)
+
+  def endpoint_identity(self, controller: dict) -> tuple:
+    return (
+      ("transport", "udp"),
+      ("ip", str(controller.get("ip") or "")),
+      ("udp_port", str(controller.get("udp_port") or "")),
+      ("local_udp_port", str(controller.get("local_udp_port") or "")),
+      ("udp_checksum_algorithm", str(controller.get("udp_checksum_algorithm") or "").casefold()),
+    )
+
+  def session_identity(self, controller: dict) -> tuple:
+    return (
+      ("settings", json.dumps(controller.get("settings") or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))),
+    )
+
+  def apply_transport_runtime(self, controller: dict) -> None:
+    transport = controller.get("transport") if isinstance(controller.get("transport"), dict) else {}
+    defaults = self.transport_descriptor.defaults
+    controller["udp_port"] = transport_port_value(transport.get("udp_port", defaults.get("udp_port", 0)))
+    controller["local_udp_port"] = transport_port_value(transport.get("local_udp_port", defaults.get("local_udp_port", 0)))
+    controller["udp_checksum_algorithm"] = str(
+      transport.get("udp_checksum_algorithm", defaults.get("udp_checksum_algorithm", "unconfirmed"))
+    )
 
   def main_track_loco_pom_op(self) -> int:
     return PROGRAMMER_OP_MAIN_LOCO_POM
@@ -151,17 +199,12 @@ class DigsightDXDCNetControllerAdapter:
     read_warnings = []
     request_debug = []
     for spec in requests:
-      if isinstance(spec, dict):
-        name = spec["name"]
-        request_frame = spec["request_frame"]
-        expected_command = spec.get("expected_command")
-        expected_device_type = spec.get("expected_device_type")
-        timeout_seconds = spec.get("timeout_seconds", float(controller.get("read_info_timeout_seconds", 0.4)))
-        stop_when = spec.get("stop_when")
-      else:
-        name, request_frame, expected_command, expected_device_type = spec
-        timeout_seconds = float(controller.get("read_info_timeout_seconds", 0.4))
-        stop_when = None
+      name = spec["name"]
+      request_frame = spec["request_frame"]
+      expected_command = spec.get("expected_command")
+      expected_device_type = spec.get("expected_device_type")
+      timeout_seconds = spec.get("timeout_seconds", float(controller.get("read_info_timeout_seconds", 0.4)))
+      stop_when = spec.get("stop_when")
       try:
         frames = self.exchange(
           session_manager,
@@ -200,7 +243,7 @@ class DigsightDXDCNetControllerAdapter:
     *,
     transport=None,
   ) -> ControllerInfoReadResult:
-    client_id = self._controller_client_id(controller)
+    client_id = self.controller_client_id(controller)
     request_specs = [
       ("command_station_status", build_status_request_frame(client_id, DEVICE_TYPE_COMMAND_STATION, 0), CMD_DEVICE_STATUS, DEVICE_TYPE_COMMAND_STATION),
       ("booster_status", build_status_request_frame(client_id, DEVICE_TYPE_BOOSTER, 1), CMD_DEVICE_STATUS, DEVICE_TYPE_BOOSTER),
@@ -252,6 +295,8 @@ class DigsightDXDCNetControllerAdapter:
 
   def runtime_readiness_warnings(self, controller: dict) -> list[str]:
     warnings = []
+    if str(controller.get("ip") or "").strip() in ("", models.CONTROLLER_DEFAULT_IP):
+      warnings.append("controller_ip_unconfigured")
     if int(controller.get("udp_port", 0)) <= 0:
       warnings.append("udp_port_unconfirmed")
     if (controller.get("udp_checksum_algorithm") or "unconfirmed") == "unconfirmed":
@@ -266,6 +311,18 @@ class DigsightDXDCNetControllerAdapter:
 
   def status_not_ready_message(self) -> str:
     return "控制器通信参数尚未确认"
+
+  def readiness_warning_detail(self, warnings: list[str]) -> str:
+    warning_set = set(warnings)
+    if warning_set == {"controller_ip_unconfigured"}:
+      return "控制器 IP 尚未配置"
+    if warning_set == {"udp_checksum_algorithm_unconfirmed"}:
+      return "控制器 UDP 校验算法未确认"
+    if "udp_port_unconfirmed" in warning_set and "udp_checksum_algorithm_unconfirmed" in warning_set:
+      return "控制器 UDP 端口和校验算法未确认"
+    if "udp_port_unconfirmed" in warning_set:
+      return "控制器 UDP 端口未确认"
+    return "控制器通信端点尚未确认"
 
   def is_booster_status_confirmed(self, controller: dict) -> bool:
     booster_status = controller.get("booster_status")
@@ -308,7 +365,7 @@ class DigsightDXDCNetControllerAdapter:
     *,
     transport=None,
   ) -> TrackOutputResult:
-    client_id = self._controller_client_id(controller)
+    client_id = self.controller_client_id(controller)
     request_frame = build_track_output_frame(
       client_id,
       1,
@@ -614,25 +671,28 @@ class DigsightDXDCNetControllerAdapter:
     for frame in frames:
       if frame.command != command:
         continue
-      feedback = parser(frame)
+      try:
+        feedback = parser(frame)
+      except ValueError:
+        continue
       if int(feedback.get("address", 0)) == int(address):
         return feedback
     return None
 
   def apply_track_profile_parameters(self, session_manager, controller: dict, profiles: dict, modes: list[str], *, transport=None) -> list[dict]:
     results = []
-    client_id = self._controller_client_id(controller)
+    client_id = self.controller_client_id(controller)
     for mode in modes:
       profile = profiles.get(mode, {})
-      current_limit_ma = profile.get("current_limit_ma")
-      if current_limit_ma in ("", None):
+      target_current_limit_ma = profile.get("target_current_limit_ma")
+      if target_current_limit_ma in ("", None):
         continue
       param_address = int(profile.get("current_param", models.default_track_profiles()[mode]["current_param"]))
-      raw_value = int(int(current_limit_ma) / models.CURRENT_STEP_MA)
+      raw_value = int(int(target_current_limit_ma) / models.CURRENT_STEP_MA)
       if raw_value < 1 or raw_value > 0xFF:
         raise ControllerParameterWriteError(
           f"{profile.get('name', mode)} 限流值不能转换为 D9000 参数原始值",
-          {"mode": mode, "current_limit_ma": current_limit_ma, "raw_value": raw_value},
+          {"mode": mode, "target_current_limit_ma": target_current_limit_ma, "raw_value": raw_value},
         )
       write_frame = build_parameter_write_frame(client_id, DEVICE_TYPE_COMMAND_STATION, 0, param_address, raw_value)
       read_frame = build_parameter_read_frame(client_id, DEVICE_TYPE_COMMAND_STATION, 0, param_address)
@@ -685,13 +745,13 @@ class DigsightDXDCNetControllerAdapter:
         "mode": mode,
         "param_address": param_address,
         "raw_value": raw_value,
-        "current_limit_ma": int(current_limit_ma),
+        "target_current_limit_ma": int(target_current_limit_ma),
         "write_request_hex": write_frame.hex(" "),
         "read_request_hex": read_frame.hex(" "),
       })
     return results
 
-  def _controller_client_id(self, controller: dict) -> int:
+  def controller_client_id(self, controller: dict) -> int:
     client_id = int(controller.get("client_id", 1))
     if client_id < 0 or client_id > 127:
       raise ValueError("DXDCNet client id must be in 0..127")

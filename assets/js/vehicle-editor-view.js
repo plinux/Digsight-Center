@@ -626,28 +626,6 @@ function vehicleTypeOptions() {
   ];
 }
 
-function energyTypeOptions() {
-  return [
-    ["diesel", VEHICLE_KIND_META.diesel.label],
-    ["electric", VEHICLE_KIND_META.electric.label],
-    ["steam", VEHICLE_KIND_META.steam.label],
-    ["hybrid", VEHICLE_KIND_META.hybrid.label]
-  ];
-}
-
-function carSubtypeOptions() {
-  return [
-    ["passenger", VEHICLE_KIND_META.passenger.label],
-    ["engineering", VEHICLE_KIND_META.engineering.label],
-    ["inspection", VEHICLE_KIND_META.inspection.label],
-    ["crane", VEHICLE_KIND_META.crane.label]
-  ];
-}
-
-function vehicleKindOptionMeta(keys) {
-  return Object.fromEntries(keys.map((key) => [key, VEHICLE_KIND_META[key]]));
-}
-
 function createVehicleValueDatalist(id, values) {
   const datalist = document.createElement("datalist");
   datalist.id = id;

@@ -290,18 +290,12 @@ function buildChipInfoSummary(metadata, cvState) {
   const chipInfo = cvState.chipInfo || null;
   const manufacturerId = numericResult(results[8]) ?? numericResult(chipInfo?.manufacturer_id);
   const software = numericResult(results[7]);
-  const registry = metadata?.manufacturer_registry?.known_ids || {};
-  const unassigned = metadata?.manufacturer_registry?.unassigned_notes || {};
-  const profileName = manufacturerId === null ? null : metadata?.cv_catalog?.profile_map?.[String(manufacturerId)];
-  const profile = profileName ? metadata?.cv_catalog?.vendor_profiles?.[profileName] : null;
-  const manufacturerName = profile?.manufacturer_name || chipInfo?.manufacturer_name || (manufacturerId === null ? "--" : (registry[String(manufacturerId)] || unassigned[String(manufacturerId)] || `厂家 ID ${manufacturerId}`));
+  const manufacturerName = resolveManufacturerDisplayName(metadata, chipInfo, manufacturerId);
   return {
     manufacturer: formatManufacturerName(manufacturerName, manufacturerId),
-    model: chipInfo?.model === null || chipInfo?.model === undefined ? "--" : String(chipInfo.model),
-    hardware: chipInfo?.hardware_version === null || chipInfo?.hardware_version === undefined ? "--" : String(chipInfo.hardware_version),
-    software: chipInfo?.software_version === null || chipInfo?.software_version === undefined
-      ? (software === null ? "--" : String(software))
-      : String(chipInfo.software_version)
+    model: formatNullableValue(chipInfo?.model),
+    hardware: formatNullableValue(chipInfo?.hardware_version),
+    software: formatNullableValue(chipInfo?.software_version, formatNullableValue(software))
   };
 }
 
@@ -318,6 +312,28 @@ function formatManufacturerName(name, manufacturerId) {
     return name || "--";
   }
   return `${name || "未知厂家"} (${manufacturerId})`;
+}
+
+function resolveManufacturerDisplayName(metadata, chipInfo, manufacturerId) {
+  if (manufacturerId === null) {
+    return chipInfo?.manufacturer_name || "--";
+  }
+  const registry = metadata?.manufacturer_registry?.known_ids || {};
+  const unassigned = metadata?.manufacturer_registry?.unassigned_notes || {};
+  const profileName = metadata?.cv_catalog?.profile_map?.[String(manufacturerId)];
+  const profile = profileName ? metadata?.cv_catalog?.vendor_profiles?.[profileName] : null;
+  return profile?.manufacturer_name
+    || chipInfo?.manufacturer_name
+    || registry[String(manufacturerId)]
+    || unassigned[String(manufacturerId)]
+    || `厂家 ID ${manufacturerId}`;
+}
+
+function formatNullableValue(value, fallback = "--") {
+  if (value === null || value === undefined) {
+    return fallback;
+  }
+  return String(value);
 }
 
 function numericResult(value) {

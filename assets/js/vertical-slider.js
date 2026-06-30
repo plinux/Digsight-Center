@@ -1,4 +1,4 @@
-export function verticalRatioFromPointer(element, event) {
+function verticalRatioFromPointer(element, event) {
   const rect = element.getBoundingClientRect();
   if (!rect.height) {
     return 0;

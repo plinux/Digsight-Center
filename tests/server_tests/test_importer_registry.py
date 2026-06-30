@@ -1,14 +1,13 @@
 import unittest
 from unittest.mock import patch
-import sqlite3
 import tempfile
 from pathlib import Path
-import zipfile
 
 from server.importers.base import ConfigImportRequest, ConfigImportResult, ImportFormatDescriptor, ImportSource
 from server.importers.registry import ImportRegistry
 from server.importers.z21 import Z21ConfigImporter
 from server.importers.z21_parser import Z21Importer
+from tests.server_tests.z21_fixture_builder import write_minimal_z21_archive
 
 
 class AlphaConfigImporter:
@@ -16,6 +15,54 @@ class AlphaConfigImporter:
     format="alpha_layout_config",
     label="Alpha Layout Config",
     extensions=[".alpha"],
+  )
+
+  def import_bytes(self, request):
+    raise NotImplementedError
+
+
+class UnsafePublicFileImporter:
+  descriptor = ImportFormatDescriptor(
+    format="unsafe_public_file_layout_config",
+    label="Unsafe Public File Layout Config",
+    extensions=[".unsafe"],
+    public_files=["/server/api.py"],
+  )
+
+  def import_bytes(self, request):
+    raise NotImplementedError
+
+
+class GenericPublicFileImporter:
+  descriptor = ImportFormatDescriptor(
+    format="generic_public_file_layout_config",
+    label="Generic Public File Layout Config",
+    extensions=[".generic"],
+    public_files=["/config/importers/generic-public.json"],
+  )
+
+  def import_bytes(self, request):
+    raise NotImplementedError
+
+
+class UnsafeFunctionIconMappingImporter:
+  descriptor = ImportFormatDescriptor(
+    format="unsafe_mapping_layout_config",
+    label="Unsafe Mapping Layout Config",
+    extensions=[".unsafe"],
+    function_icon_mapping_files=["/config/importers/not-a-function-map.json"],
+  )
+
+  def import_bytes(self, request):
+    raise NotImplementedError
+
+
+class TraversalMappingImporter:
+  descriptor = ImportFormatDescriptor(
+    format="traversal_mapping_layout_config",
+    label="Traversal Mapping Layout Config",
+    extensions=[".traversal"],
+    function_icon_mapping_files=["/config/function-icon-mappings/../private.json"],
   )
 
   def import_bytes(self, request):
@@ -61,6 +108,7 @@ class Z21ConfigImporterTest(unittest.TestCase):
     self.assertEqual(importer.descriptor.format, "z21_layout_config")
     self.assertIn(".z21", importer.descriptor.extensions)
     self.assertEqual(importer.descriptor.public_files, ["/config/function-icon-mappings/z21.json"])
+    self.assertEqual(importer.descriptor.function_icon_mapping_files, ["/config/function-icon-mappings/z21.json"])
 
   def test_z21_importer_rejects_non_zip_bytes_with_format_error(self):
     importer = Z21ConfigImporter(image_dir="/tmp/digsight-images")
@@ -107,47 +155,19 @@ class Z21ConfigImporterTest(unittest.TestCase):
       self.assertTrue((root / "images" / "z21-ho-vehicle-1.png").exists())
 
   def _write_minimal_z21(self, root: Path, image_bytes: bytes) -> Path:
-    sqlite_path = root / "Loco.sqlite"
-    con = sqlite3.connect(sqlite_path)
-    try:
-      con.execute(
-        """
-        CREATE TABLE vehicles (
-          id INTEGER PRIMARY KEY,
-          position INTEGER,
-          image_name TEXT,
-          name TEXT,
-          address INTEGER,
-          type INTEGER
-        )
-        """
-      )
-      con.execute(
-        """
-        CREATE TABLE functions (
-          id INTEGER PRIMARY KEY,
-          vehicle_id INTEGER,
-          position INTEGER,
-          image_name TEXT,
-          shortcut TEXT,
-          function INTEGER,
-          button_type INTEGER,
-          time INTEGER,
-          show_function_number INTEGER
-        )
-        """
-      )
-      con.execute(
-        "INSERT INTO vehicles (id, position, image_name, name, address, type) VALUES (1, 1, 'loco.png', '测试车', 3, 0)"
-      )
-      con.commit()
-    finally:
-      con.close()
-    z21_path = root / "HO.z21"
-    with zipfile.ZipFile(z21_path, "w") as archive:
-      archive.write(sqlite_path, "Loco.sqlite")
-      archive.writestr("loco.png", image_bytes)
-    return z21_path
+    return write_minimal_z21_archive(
+      root,
+      sqlite_member="Loco.sqlite",
+      vehicles=[{
+        "id": 1,
+        "position": 1,
+        "image_name": "loco.png",
+        "name": "测试车",
+        "address": 3,
+        "type": 0,
+      }],
+      image_files={"loco.png": image_bytes},
+    )
 
 
 class ImportRegistryTest(unittest.TestCase):
@@ -169,6 +189,10 @@ class ImportRegistryTest(unittest.TestCase):
       "alpha_layout_config",
     ])
 
+    descriptors = registry.descriptors()
+    z21_descriptor = next(descriptor for descriptor in descriptors if descriptor["format"] == "z21_layout_config")
+    self.assertEqual(z21_descriptor["function_icon_mapping_files"], ["/config/function-icon-mappings/z21.json"])
+
   def test_default_format_requires_explicit_default(self):
     registry = ImportRegistry()
     registry.register(Z21ConfigImporter(image_dir="/tmp/digsight-images"))
@@ -177,6 +201,34 @@ class ImportRegistryTest(unittest.TestCase):
       _ = registry.default_format
     self.assertEqual(str(caught.exception), "Default import format is not configured")
 
+  def test_registry_rejects_importer_public_file_outside_allowed_prefixes(self):
+    registry = ImportRegistry()
+    registry.register(UnsafePublicFileImporter())
+
+    with self.assertRaises(ValueError):
+      registry.descriptors()
+
+  def test_registry_allows_generic_importer_public_files_under_importer_config_prefix(self):
+    registry = ImportRegistry()
+    registry.register(GenericPublicFileImporter())
+
+    descriptor = registry.descriptors()[0]
+
+    self.assertEqual(descriptor["public_files"], ["/config/importers/generic-public.json"])
+
+  def test_registry_keeps_function_icon_mapping_files_on_mapping_prefix(self):
+    registry = ImportRegistry()
+    registry.register(UnsafeFunctionIconMappingImporter())
+
+    with self.assertRaises(ValueError):
+      registry.descriptors()
+
+  def test_registry_rejects_importer_function_icon_mapping_traversal(self):
+    registry = ImportRegistry()
+    registry.register(TraversalMappingImporter())
+
+    with self.assertRaises(ValueError):
+      registry.descriptors()
 
 if __name__ == "__main__":
   unittest.main()

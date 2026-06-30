@@ -84,19 +84,36 @@ export function buildCvRuntimeActions({
       );
   }
 
+  async function runPreparedCvAction(operationName, targetPayload, requestFn) {
+    if (!targetPayload) {
+      return {completed: false, targetPayload: null, result: null};
+    }
+    const safetyReady = await refreshCvSafety(operationName, targetPayload.programming_target);
+    if (!safetyReady) {
+      return {completed: false, targetPayload, result: null};
+    }
+    const result = await runCvRequestWithSafetyRetry(
+      operationName,
+      targetPayload.programming_target,
+      () => requestFn(targetPayload)
+    );
+    return {completed: true, targetPayload, result};
+  }
+
+  async function runTargetedCvAction(operationName, requestFn) {
+    const targetPayload = cvProgrammingRequest(operationName);
+    return await runPreparedCvAction(operationName, targetPayload, requestFn);
+  }
+
   async function readChipInfo() {
     cvState.results = {};
     cvState.chipInfo = null;
     try {
-      const targetPayload = cvProgrammingRequest("芯片信息读取");
-      if (!targetPayload) {
+      const actionResult = await runTargetedCvAction("芯片信息读取", (targetPayload) => readChipInfoFromController(targetPayload));
+      if (!actionResult.completed) {
         return;
       }
-      const safetyReady = await refreshCvSafety("芯片信息读取", targetPayload.programming_target);
-      if (!safetyReady) {
-        return;
-      }
-      const chipInfo = await runCvRequestWithSafetyRetry("芯片信息读取", targetPayload.programming_target, () => readChipInfoFromController(targetPayload));
+      const chipInfo = actionResult.result;
       for (const [cvNumber, result] of Object.entries(chipInfo.cvs || {})) {
         cvState.results[Number(cvNumber)] = result.value;
       }
@@ -117,9 +134,7 @@ export function buildCvRuntimeActions({
     const methodText = resetMethod.configured
       ? `已按 ${resetMethod.profileName} 厂商 CV 表选择复位方法：${resetCommand}。`
       : `未读取到可匹配的厂商 CV 表，将使用通用复位方法：${resetCommand}。`;
-    const manufacturerText = resetMethod.manufacturerName
-      ? `当前芯片厂商：${resetMethod.manufacturerName}${resetMethod.manufacturerId === null ? "" : ` (${resetMethod.manufacturerId})`}`
-      : "当前尚未读取芯片厂商信息。";
+    const manufacturerText = formatResetManufacturerText(resetMethod);
     const message = [
       "确认重置编程轨上的当前芯片？",
       manufacturerText,
@@ -137,11 +152,14 @@ export function buildCvRuntimeActions({
       if (!targetPayload) {
         return;
       }
-      const safetyReady = await refreshCvSafety("芯片重置", targetPayload.programming_target);
-      if (!safetyReady) {
+      const actionResult = await runPreparedCvAction(
+        "芯片重置",
+        targetPayload,
+        (targetPayload) => writeCv(resetMethod.cv, resetMethod.value, true, targetPayload)
+      );
+      if (!actionResult.completed) {
         return;
       }
-      await runCvRequestWithSafetyRetry("芯片重置", targetPayload.programming_target, () => writeCv(resetMethod.cv, resetMethod.value, true, targetPayload));
       cvState.chipInfo = null;
       cvState.results = {};
       cvState.cvList = {
@@ -163,15 +181,14 @@ export function buildCvRuntimeActions({
     return {
       onReadAddress: async () => {
         try {
-          const targetPayload = cvProgrammingRequest("地址读取");
-          if (!targetPayload) {
+          const actionResult = await runTargetedCvAction(
+            "地址读取",
+            (targetPayload) => readAddress(targetPayload.vehicle_id, targetPayload)
+          );
+          if (!actionResult.completed) {
             return;
           }
-          const safetyReady = await refreshCvSafety("地址读取", targetPayload.programming_target);
-          if (!safetyReady) {
-            return;
-          }
-          const result = await runCvRequestWithSafetyRetry("地址读取", targetPayload.programming_target, () => readAddress(targetPayload.vehicle_id, targetPayload));
+          const result = actionResult.result;
           cvState.address = result.address;
           setStatus(`地址：${result.address}`);
           await refreshState();
@@ -185,15 +202,19 @@ export function buildCvRuntimeActions({
           if (!targetPayload) {
             return;
           }
-          const confirmed = typeof globalScope.confirm === "function" ? globalScope.confirm(`确认写入车辆地址 ${address}？`) : true;
+          const confirmed = typeof globalScope.confirm === "function" ? globalScope.confirm(`确认写入车辆地址 ${address}？`) : false;
           if (!confirmed) {
             return;
           }
-          const safetyReady = await refreshCvSafety("地址写入", targetPayload.programming_target);
-          if (!safetyReady) {
+          const actionResult = await runPreparedCvAction(
+            "地址写入",
+            targetPayload,
+            (targetPayload) => writeAddress(targetPayload.vehicle_id, address, true, targetPayload)
+          );
+          if (!actionResult.completed) {
             return;
           }
-          const result = await runCvRequestWithSafetyRetry("地址写入", targetPayload.programming_target, () => writeAddress(targetPayload.vehicle_id, address, true, targetPayload));
+          const result = actionResult.result;
           cvState.address = result.address;
           setStatus(`地址 ${result.address} 已写入`);
           await refreshState();
@@ -209,15 +230,14 @@ export function buildCvRuntimeActions({
       onReadCv: async (cvNumber) => {
         cvState.cvNumber = cvNumber;
         try {
-          const targetPayload = cvProgrammingRequest("CV 读取");
-          if (!targetPayload) {
+          const actionResult = await runTargetedCvAction(
+            "CV 读取",
+            (targetPayload) => readCv(cvNumber, targetPayload)
+          );
+          if (!actionResult.completed) {
             return;
           }
-          const safetyReady = await refreshCvSafety("CV 读取", targetPayload.programming_target);
-          if (!safetyReady) {
-            return;
-          }
-          const result = await runCvRequestWithSafetyRetry("CV 读取", targetPayload.programming_target, () => readCv(cvNumber, targetPayload));
+          const result = actionResult.result;
           cvState.results[cvNumber] = result.value;
           cvState.value = Number(result.value);
           setStatus(`CV${cvNumber}: ${result.value}`);
@@ -234,15 +254,18 @@ export function buildCvRuntimeActions({
           if (!targetPayload) {
             return;
           }
-          const confirmed = typeof globalScope.confirm === "function" ? globalScope.confirm(`确认写入 CV${cvNumber}=${value}？`) : true;
+          const confirmed = typeof globalScope.confirm === "function" ? globalScope.confirm(`确认写入 CV${cvNumber}=${value}？`) : false;
           if (!confirmed) {
             return;
           }
-          const safetyReady = await refreshCvSafety("CV 写入", targetPayload.programming_target);
-          if (!safetyReady) {
+          const actionResult = await runPreparedCvAction(
+            "CV 写入",
+            targetPayload,
+            (targetPayload) => writeCv(cvNumber, value, true, targetPayload)
+          );
+          if (!actionResult.completed) {
             return;
           }
-          await runCvRequestWithSafetyRetry("CV 写入", targetPayload.programming_target, () => writeCv(cvNumber, value, true, targetPayload));
           setStatus(`CV${cvNumber} 写入完成`);
         } catch (error) {
           setStatus(formatError(error));
@@ -252,9 +275,7 @@ export function buildCvRuntimeActions({
   }
 
   function finishCvListRead(operationName) {
-    const manufacturer = cvState.cvList.manufacturer_id === null || cvState.cvList.manufacturer_id === undefined
-      ? cvState.cvList.manufacturer_name
-      : `${cvState.cvList.manufacturer_name} (${cvState.cvList.manufacturer_id})`;
+    const manufacturer = formatCvListManufacturer(cvState.cvList);
     setStatus(cvState.cvList.cancelled
       ? `CV 读取已中止：${cvDomain.cvListProgressText()}`
       : `${operationName}完成：${cvDomain.cvListProgressText()}，${manufacturer}`);
@@ -387,4 +408,19 @@ export function buildCvRuntimeActions({
     buildCvAddressHandlers,
     buildSingleCvHandlers
   };
+}
+
+function formatResetManufacturerText(resetMethod) {
+  if (!resetMethod.manufacturerName) {
+    return "当前尚未读取芯片厂商信息。";
+  }
+  const idSuffix = resetMethod.manufacturerId === null ? "" : ` (${resetMethod.manufacturerId})`;
+  return `当前芯片厂商：${resetMethod.manufacturerName}${idSuffix}`;
+}
+
+function formatCvListManufacturer(cvList) {
+  if (cvList.manufacturer_id === null || cvList.manufacturer_id === undefined) {
+    return cvList.manufacturer_name;
+  }
+  return `${cvList.manufacturer_name} (${cvList.manufacturer_id})`;
 }

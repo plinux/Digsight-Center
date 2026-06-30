@@ -2,8 +2,8 @@ export async function initializeApp({
   appState,
   elements,
   getCapabilities,
-  renderControllerKindOptions,
-  renderImportFormatOptions,
+  renderControllerCapabilities,
+  renderImportCapabilities,
   setFunctionIconCatalog,
   loadFunctionIconCatalog,
   getCvMetadata,
@@ -12,14 +12,20 @@ export async function initializeApp({
   setStatus,
   controllerReadStatusMessage,
   controllerReadStatusDetail,
-  formatError
+  formatError,
+  persistentConfigurationStatus
 }) {
   appState.capabilities = await getCapabilities();
-  renderControllerKindOptions(elements, appState.capabilities);
-  renderImportFormatOptions(elements, appState.capabilities);
-  setFunctionIconCatalog(await loadFunctionIconCatalog());
+  renderControllerCapabilities(elements, appState);
+  renderImportCapabilities(elements, appState.capabilities);
+  setFunctionIconCatalog(await loadFunctionIconCatalog(appState.capabilities));
   appState.cvMetadata = await getCvMetadata();
   await refreshState();
+  const persistentStatus = persistentConfigurationStatus?.();
+  if (persistentStatus) {
+    setStatus(persistentStatus);
+    return;
+  }
   setStatus("正在读取控制器信息");
   try {
     const result = await readControllerInfo();
@@ -38,19 +44,21 @@ export function wireAppEvents({
   elements,
   appState,
   importConfig,
+  runImportConfigWorkflow,
   setActiveView,
   setOperationMode,
   setProgrammingTarget,
   setGatewayBusy,
   openStatusDetailDialog,
   syncControllerEndpoint,
-  runTrackPowerRequestWithStatusRetry,
+  runControllerStatusRetry,
   setTrackPower,
+  readControllerInfo,
+  resetSelectedControllerConfig,
   setStatus,
   operationModeName,
   refreshState,
   formatError,
-  importSelectedConfigFile,
   toggleVehicleSelectionMode,
   createNewVehicle,
   deleteSelectedVehicles,
@@ -80,7 +88,13 @@ export function wireAppEvents({
   elements.powerOnButton.addEventListener("click", async () => {
     try {
       await syncControllerEndpoint();
-      const result = await runTrackPowerRequestWithStatusRetry(true, () => setTrackPower(true));
+      const result = await runControllerStatusRetry({
+        requiresFreshStatus: true,
+        requestFn: () => setTrackPower(true),
+        setStatus,
+        readControllerInfo,
+        refreshState
+      });
       setStatus(`${operationModeName(result.track_mode)} 轨道已通电`);
       await refreshState();
     } catch (error) {
@@ -99,9 +113,11 @@ export function wireAppEvents({
     }
   });
 
-  elements.importConfigButton.addEventListener("click", () => importSelectedConfigFile({
+  elements.resetControllerConfigButton.addEventListener("click", resetSelectedControllerConfig);
+
+  elements.importConfigButton.addEventListener("click", () => runImportConfigWorkflow({
     elements,
-    capabilities: appState.capabilities,
+    appState,
     importConfig,
     setStatus,
     refreshState,

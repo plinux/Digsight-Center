@@ -36,7 +36,11 @@ class FrontendVehicleControlContractTest(SourceAssertionsMixin, unittest.TestCas
     ])
     self.assert_source_contains_all(app_source, [
       "async function sendDcControl",
-      "await setDcControl(appState.dcControl.voltageV, appState.dcControl.direction)",
+      "const voltageV = Number(appState.dcControl.voltageV || 0)",
+      "const direction = appState.dcControl.direction === \"reverse\" ? \"reverse\" : \"forward\"",
+      "runControllerStatusRetry({",
+      "requiresFreshStatus: voltageV > 0",
+      "requestFn: () => setDcControl(voltageV, direction)",
     ])
     self.assert_source_contains_all(css, [
       ".dc-control-panel",
@@ -58,6 +62,22 @@ class FrontendVehicleControlContractTest(SourceAssertionsMixin, unittest.TestCas
       "renderVehicleControlWorkspace(elements.vehicleRegistry, visibleVehicles, visibleFunctions",
       "updateVehicleHeader(visibleVehicles, operationMode);",
     ])
+
+  def test_cab_selection_conflict_predicate_is_shared(self):
+    helper_source = self.read_text("assets/js/cab-state.js")
+    app_source = self.read_text("assets/js/app.js")
+    view_source = self.read_text("assets/js/vehicle-cab-view.js")
+    self.assert_source_contains_all(helper_source, [
+      "export function vehicleSelectedByOtherCabState",
+      "Object.entries(cabs || {}).some",
+      "otherCabId !== cabId",
+    ])
+    self.assertIn('from "./cab-state.js"', app_source)
+    self.assertIn('from "./cab-state.js"', view_source)
+    self.assertIn("vehicleSelectedByOtherCabState(appState.cabs, cabId, vehicleId)", app_source)
+    self.assertIn("vehicleSelectedByOtherCabState(cabState?.cabs, cabId, vehicleId)", view_source)
+    self.assertNotIn("Object.entries(appState.cabs || {}).some", app_source)
+    self.assertNotIn("Object.entries(cabState?.cabs || {}).some", view_source)
 
   def test_cab_functions_render_fixed_f0_to_f9_and_expanded_extra_slots(self):
     source = self.read_text("assets/js/vehicle-cab-view.js")
@@ -532,11 +552,9 @@ class FrontendVehicleControlContractTest(SourceAssertionsMixin, unittest.TestCas
 
   def test_vehicle_order_route_is_checked_before_vehicle_id_patch_route(self):
     source = self.read_text("server/api_support/routes.py")
-    self.assert_source_order(
-      source,
-      '"/api/vehicles/order": "vehicles.reorder"',
-      'route.startswith("/api/vehicles/")',
-    )
+    self.assertIn('"/api/vehicles/order": "vehicles.reorder"', source)
+    self.assertIn('resource_route(route, "vehicles")', source)
+    self.assertNotIn('route.startswith("/api/vehicles/")', source)
 
   def test_state_store_tracks_left_and_right_cabs(self):
     source = self.read_text("assets/js/state-store.js")
@@ -588,20 +606,12 @@ class FrontendVehicleControlContractTest(SourceAssertionsMixin, unittest.TestCas
     ]:
       self.assertIn(token, source + css)
 
-  def test_vehicle_registry_does_not_repeat_tab_title(self):
-    source = self.read_text("assets/js/vehicle-view.js")
-    registry = source[
-      source.index("export function renderVehicleRegistry"):
-      source.index("export function resolveFunctionIcon")
-    ]
-    self.assertNotIn('title.textContent = "车辆控制";', registry)
-
   def test_cab_control_panel_uses_side_actions_speed_scaling_and_function_state(self):
     view_source = self.read_text("assets/js/vehicle-cab-view.js")
     app_source = self.read_text("assets/js/app.js")
     runtime_source = self.read_text("assets/js/loco-runtime-actions.js")
     css = self.read_text("assets/css/app.css")
-    for token in [
+    self.assert_source_contains_all(view_source + app_source + runtime_source + css, [
       "cab-control-main-row",
       "cab-control-info",
       "cab-control-identity",
@@ -716,8 +726,7 @@ class FrontendVehicleControlContractTest(SourceAssertionsMixin, unittest.TestCas
       "const timer = globalScope.setTimeout(() => {",
       "setCabFunctionState(cabId, functionNumber, false);",
       "await setCabFunctionState(cabId, functionNumber, !Boolean(cab.functions[String(functionNumber)]));",
-    ]:
-      self.assertIn(token, view_source + app_source + runtime_source + css)
+    ])
 
   def test_cab_control_panel_is_split_into_named_view_helpers(self):
     source = self.read_text("assets/js/vehicle-cab-view.js")

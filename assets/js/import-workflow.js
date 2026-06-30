@@ -1,3 +1,27 @@
+import {renderImportFormatOptions} from "./capability-selectors.js";
+
+export function renderImportCapabilities(elements, capabilities = {}) {
+  renderImportFormatOptions(elements, capabilities);
+}
+
+export async function runImportConfigWorkflow({
+  elements,
+  appState,
+  importConfig,
+  setStatus,
+  refreshState,
+  formatError
+}) {
+  return importSelectedConfigFile({
+    elements,
+    capabilities: appState.capabilities,
+    importConfig,
+    setStatus,
+    refreshState,
+    formatError
+  });
+}
+
 export async function importSelectedConfigFile({
   elements,
   capabilities = {},

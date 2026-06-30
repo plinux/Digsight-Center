@@ -103,6 +103,11 @@ class UdpTransportTest(unittest.TestCase):
     with self.assertRaises(ValueError):
       transport.request("127.0.0.1", 0, b"abc")
 
+  def test_request_rejects_port_above_udp_range(self):
+    transport = UDPTransport(timeout_seconds=0.05, retries=0)
+    with self.assertRaises(ValueError):
+      transport.request("127.0.0.1", 65536, b"abc")
+
   def test_exchange_collects_packets_until_stop_condition(self):
     port_holder = []
     ready = threading.Event()
@@ -157,6 +162,10 @@ class UdpTransportTest(unittest.TestCase):
       transport.exchange("127.0.0.1", 0, b"abc")
     with self.assertRaises(ValueError):
       transport.exchange("127.0.0.1", 12000, b"abc", local_port=-1)
+    with self.assertRaises(ValueError):
+      transport.exchange("127.0.0.1", 65536, b"abc")
+    with self.assertRaises(ValueError):
+      transport.exchange("127.0.0.1", 12000, b"abc", local_port=65536)
 
   def test_exchange_returns_packets_received_before_timeout(self):
     port_holder = []

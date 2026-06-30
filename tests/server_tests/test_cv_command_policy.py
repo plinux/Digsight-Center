@@ -54,6 +54,23 @@ class RaisingUdpTransport:
     raise self.exc
 
 
+class SequencedRaisingUdpTransport(SequencedUdpTransport):
+  def exchange(self, host, port, payload, local_port=0, max_packets=32, stop_when=None):
+    batch = self.response_batches[0] if self.response_batches else []
+    if isinstance(batch, Exception):
+      self.response_batches.pop(0)
+      self.requests.append({
+        "host": host,
+        "port": port,
+        "payload": payload,
+        "local_port": local_port,
+        "max_packets": max_packets,
+        "stop_when": bool(stop_when),
+      })
+      raise batch
+    return super().exchange(host, port, payload, local_port, max_packets, stop_when)
+
+
 class CvCommandPolicyTest(unittest.TestCase):
   def test_cv_read_all_workflow_is_split_into_helpers(self):
     router_source = inspect.getsource(ApiRouter)
@@ -74,7 +91,7 @@ class CvCommandPolicyTest(unittest.TestCase):
     self.assertEqual(context.client_id, 1)
     self.assertEqual(context.request_hex, "ff ff")
 
-  def test_shared_fake_udp_transport_module_exports_cv_fakes(self):
+  def test_shared_fake_controller_transport_module_exports_cv_fakes(self):
     try:
       module = __import__("tests.server_tests.fake_udp", fromlist=["FakeUdpTransport", "SequencedUdpTransport"])
     except ModuleNotFoundError as exc:
@@ -84,6 +101,7 @@ class CvCommandPolicyTest(unittest.TestCase):
 
   def _state_with_safe_programming_track(self):
     state = default_state()
+    state["controller"]["ip"] = "192.0.2.10"
     state["controller"]["udp_port"] = 21105
     state["controller"]["udp_checksum_algorithm"] = "xor"
     state["controller"]["programming_track_status"] = {
@@ -121,7 +139,7 @@ class CvCommandPolicyTest(unittest.TestCase):
     state["controller"]["safety_snapshot"]["booster_status_fresh"] = True
     state["controller"]["safety_snapshot"]["programming_track_status_fresh"] = True
     transport = RaisingUdpTransport(TimeoutError("simulated timeout"))
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/cv/read",
       b'{"cv":1}',
@@ -138,7 +156,7 @@ class CvCommandPolicyTest(unittest.TestCase):
     state["controller"]["safety_snapshot"]["booster_status_fresh"] = True
     state["controller"]["safety_snapshot"]["programming_track_status_fresh"] = True
     transport = RaisingUdpTransport(OSError("simulated network error"))
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/cv/write",
       b'{"cv":1,"value":3,"confirmed":true}',
@@ -225,7 +243,7 @@ class CvCommandPolicyTest(unittest.TestCase):
         build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x1C, 0x06, 0x01, 0x01])),
         build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x00, 0x0C, 0x01, 0x01])),
       ])
-      body, status = ApiRouter(None, udp_transport=transport, vehicle_store=vehicle_store).handle_json("POST", "/api/address/read", b'{"vehicle_id":"v1"}', state)
+      body, status = ApiRouter(None, controller_transport=transport, vehicle_store=vehicle_store).handle_json("POST", "/api/address/read", b'{"vehicle_id":"v1"}', state)
       payload = json.loads(body.decode("utf-8"))
       self.assertEqual(status, 200)
       self.assertEqual(payload["data"]["address"], 12)
@@ -243,7 +261,7 @@ class CvCommandPolicyTest(unittest.TestCase):
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x10, 0xC3, 0x01, 0x01])),
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x11, 0xE8, 0x01, 0x01])),
     ])
-    body, status = ApiRouter(None, udp_transport=transport).handle_json("POST", "/api/address/read", b"{}", state)
+    body, status = ApiRouter(None, controller_transport=transport).handle_json("POST", "/api/address/read", b"{}", state)
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 200)
     self.assertEqual(payload["data"]["address"], 1000)
@@ -263,7 +281,7 @@ class CvCommandPolicyTest(unittest.TestCase):
         build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x1C, 0x26, 0x01, 0x01])),
         build_udp_frame(0, 0, CMD_PROGRAM_TRACK_ACK, bytes([PROGRAMMER_ACK_ACK, 0x01, 0x01])),
       ])
-      body, status = ApiRouter(None, udp_transport=transport, vehicle_store=vehicle_store).handle_json(
+      body, status = ApiRouter(None, controller_transport=transport, vehicle_store=vehicle_store).handle_json(
         "POST",
         "/api/address/write",
         b'{"vehicle_id":"v1","address":12,"confirmed":true}',
@@ -289,7 +307,7 @@ class CvCommandPolicyTest(unittest.TestCase):
       [build_udp_frame(0, 0, CMD_PROGRAM_TRACK_ACK, bytes([PROGRAMMER_ACK_BUSY, 0x01, 0x01]))],
       [build_udp_frame(0, 0, CMD_PROGRAM_TRACK_ACK, bytes([PROGRAMMER_ACK_ACK, 0x01, 0x01]))],
     ])
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/address/write",
       b'{"address":12,"confirmed":true}',
@@ -311,7 +329,7 @@ class CvCommandPolicyTest(unittest.TestCase):
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x1C, 0x06, 0x01, 0x01])),
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_ACK, bytes([PROGRAMMER_ACK_ACK, 0x01, 0x01])),
     ])
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/address/write",
       b'{"address":1000,"confirmed":true}',
@@ -353,6 +371,7 @@ class CvCommandPolicyTest(unittest.TestCase):
 
   def test_cv_read_requires_confirmed_checksum_when_port_is_set(self):
     state = default_state()
+    state["controller"]["ip"] = "192.0.2.10"
     state["controller"]["udp_port"] = 21105
     state["controller"]["udp_checksum_algorithm"] = "unconfirmed"
     body, status = ApiRouter(None).handle_json("POST", "/api/cv/read", b'{"cv":1}', state)
@@ -363,6 +382,7 @@ class CvCommandPolicyTest(unittest.TestCase):
 
   def test_cv_read_requires_parsed_programming_track_status(self):
     state = default_state()
+    state["controller"]["ip"] = "192.0.2.10"
     state["controller"]["udp_port"] = 21105
     state["controller"]["udp_checksum_algorithm"] = "xor"
     body, status = ApiRouter(None).handle_json("POST", "/api/cv/read", b'{"cv":1}', state)
@@ -373,6 +393,7 @@ class CvCommandPolicyTest(unittest.TestCase):
 
   def test_cv_read_rejects_unsafe_programming_track_status(self):
     state = default_state()
+    state["controller"]["ip"] = "192.0.2.10"
     state["controller"]["udp_port"] = 21105
     state["controller"]["udp_checksum_algorithm"] = "xor"
     state["controller"]["programming_track_status"] = {
@@ -400,7 +421,7 @@ class CvCommandPolicyTest(unittest.TestCase):
     state = self._state_with_safe_programming_track()
     state["controller"]["programming_target"] = "main_track"
     transport = FakeUdpTransport([])
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/cv/read",
       b'{"cv":1,"programming_target":"main_track"}',
@@ -415,7 +436,7 @@ class CvCommandPolicyTest(unittest.TestCase):
     state = self._state_with_main_track_ready()
     state["controller"]["safety_snapshot"]["booster_status_fresh"] = False
     transport = FakeUdpTransport([])
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/cv/read",
       b'{"cv":1,"programming_target":"main_track","vehicle_id":"v1"}',
@@ -432,7 +453,7 @@ class CvCommandPolicyTest(unittest.TestCase):
     transport = FakeUdpTransport([
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x00, 0x03, 0x01, 0x01, 0x0C, 0x00])),
     ])
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/cv/read",
       b'{"cv":1,"programming_target":"main_track","vehicle_id":"v1"}',
@@ -466,7 +487,7 @@ class CvCommandPolicyTest(unittest.TestCase):
     transport = FakeUdpTransport([
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x00, 0x09, 0x01, 0x01, 0x4D, 0x00])),
     ])
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/cv/read",
       b'{"cv":1,"programming_target":"main_track","vehicle_id":"mu"}',
@@ -499,7 +520,7 @@ class CvCommandPolicyTest(unittest.TestCase):
       transport = FakeUdpTransport([
         build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x00, 0x07, 0x01, 0x01, 0x0C, 0x00])),
       ])
-      body, status = ApiRouter(None, udp_transport=transport, vehicle_store=store).handle_json(
+      body, status = ApiRouter(None, controller_transport=transport, vehicle_store=store).handle_json(
         "POST",
         "/api/cv/read",
         b'{"cv":1,"programming_target":"main_track","vehicle_id":"v1"}',
@@ -518,7 +539,7 @@ class CvCommandPolicyTest(unittest.TestCase):
     state = self._state_with_main_track_ready()
     state["controller"]["booster_status"]["power_on"] = False
     transport = FakeUdpTransport([])
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/cv/read",
       b'{"cv":1,"programming_target":"main_track","vehicle_id":"v1"}',
@@ -538,7 +559,7 @@ class CvCommandPolicyTest(unittest.TestCase):
       payload=bytes([0x80, 0x07, 0x91, 0x01, 0x01]),
     )
     transport = FakeUdpTransport([value_response])
-    body, status = ApiRouter(None, udp_transport=transport).handle_json("POST", "/api/cv/read", b'{"cv":8}', state)
+    body, status = ApiRouter(None, controller_transport=transport).handle_json("POST", "/api/cv/read", b'{"cv":8}', state)
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 200)
     self.assertEqual(payload["data"]["value"], 0x91)
@@ -556,7 +577,7 @@ class CvCommandPolicyTest(unittest.TestCase):
     checksum_invalid_response = valid_value_response[:-1] + bytes([valid_value_response[-1] ^ 0x01])
     transport = FakeUdpTransport([checksum_invalid_response])
 
-    body, status = ApiRouter(None, udp_transport=transport).handle_json("POST", "/api/cv/read", b'{"cv":8}', state)
+    body, status = ApiRouter(None, controller_transport=transport).handle_json("POST", "/api/cv/read", b'{"cv":8}', state)
     payload = json.loads(body.decode("utf-8"))
 
     self.assertEqual(status, 502)
@@ -573,7 +594,7 @@ class CvCommandPolicyTest(unittest.TestCase):
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x00, 0x03, 0x01, 0x01])),
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x3E, 0x5A, 0x01, 0x01])),
     ])
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/cv/read-all",
       b'{"cv_numbers":[8,1,63]}',
@@ -604,7 +625,7 @@ class CvCommandPolicyTest(unittest.TestCase):
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x00, 0x03, 0x01, 0x01])),
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x06, 0x01, 0x01, 0x01])),
     ])
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/cv/read-all",
       b'{"read_mode":"known"}',
@@ -621,7 +642,7 @@ class CvCommandPolicyTest(unittest.TestCase):
     transport = FakeUdpTransport([
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x07, 0x56, 0x01, 0x01])),
     ])
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/cv/read-all",
       b'{"read_mode":"full"}',
@@ -631,6 +652,28 @@ class CvCommandPolicyTest(unittest.TestCase):
     self.assertEqual(status, 200)
     self.assertEqual(payload["data"]["read_mode"], "full")
     self.assertEqual(payload["data"]["read_count"], 1024)
+
+  def test_cv_read_all_stops_after_transport_failure(self):
+    state = self._state_with_safe_programming_track()
+    transport = SequencedRaisingUdpTransport([
+      [build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x07, 0x56, 0x01, 0x01]))],
+      TimeoutError("simulated timeout"),
+    ])
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
+      "POST",
+      "/api/cv/read-all",
+      b'{"cv_numbers":[8,1,2]}',
+      state,
+    )
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 200)
+    self.assertTrue(payload["data"]["stopped"])
+    self.assertEqual(payload["data"]["stop_reason"], "cv_read_timeout")
+    self.assertEqual([row["cv"] for row in payload["data"]["rows"]], [8, 1])
+    self.assertEqual([request["payload"] for request in transport.requests], [
+      build_cv_read_frame(8, client_id=1),
+      build_cv_read_frame(1, client_id=1),
+    ])
 
   def test_cv_read_cancel_endpoint_marks_session_cancelled(self):
     sessions = CVReadSessionRegistry()
@@ -653,7 +696,7 @@ class CvCommandPolicyTest(unittest.TestCase):
     transport = CancellingUdpTransport([
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x07, 0x56, 0x01, 0x01])),
     ], sessions, "session-1")
-    body, status = ApiRouter(None, udp_transport=transport, cv_read_sessions=sessions).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport, cv_read_sessions=sessions).handle_json(
       "POST",
       "/api/cv/read-all",
       b'{"read_mode":"full","session_id":"session-1"}',
@@ -673,7 +716,7 @@ class CvCommandPolicyTest(unittest.TestCase):
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x07, 0x55, 0x01, 0x01])),
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x06, 0x01, 0x01, 0x01])),
     ])
-    body, status = ApiRouter(None, udp_transport=transport).handle_json("POST", "/api/chip-info/read", b"{}", state)
+    body, status = ApiRouter(None, controller_transport=transport).handle_json("POST", "/api/chip-info/read", b"{}", state)
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 200)
     self.assertEqual(payload["data"]["manufacturer_id"], 85)
@@ -695,7 +738,7 @@ class CvCommandPolicyTest(unittest.TestCase):
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x7E, 0xA1, 0x01, 0x01])),
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x7F, 0x34, 0x01, 0x01])),
     ])
-    body, status = ApiRouter(None, udp_transport=transport).handle_json("POST", "/api/chip-info/read", b"{}", state)
+    body, status = ApiRouter(None, controller_transport=transport).handle_json("POST", "/api/chip-info/read", b"{}", state)
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 200)
     self.assertEqual(payload["data"]["manufacturer_id"], 30)
@@ -718,7 +761,7 @@ class CvCommandPolicyTest(unittest.TestCase):
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x07, 0xEE, 0x01, 0x01])),
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x06, 0x02, 0x01, 0x01])),
     ])
-    body, status = ApiRouter(None, udp_transport=transport).handle_json("POST", "/api/chip-info/read", b"{}", state)
+    body, status = ApiRouter(None, controller_transport=transport).handle_json("POST", "/api/chip-info/read", b"{}", state)
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 200)
     self.assertEqual(payload["data"]["manufacturer_id"], 238)
@@ -747,7 +790,7 @@ class CvCommandPolicyTest(unittest.TestCase):
       command=CMD_PROGRAM_TRACK_ACK,
       payload=bytes([PROGRAMMER_ACK_NOACK, 0x01, 0x01]),
     )
-    body, status = ApiRouter(None, udp_transport=FakeUdpTransport([noack_response])).handle_json(
+    body, status = ApiRouter(None, controller_transport=FakeUdpTransport([noack_response])).handle_json(
       "POST",
       "/api/chip-info/read",
       b'{"programming_target":"main_track","vehicle_id":"v1"}',
@@ -769,7 +812,7 @@ class CvCommandPolicyTest(unittest.TestCase):
       command=CMD_PROGRAM_TRACK_ACK,
       payload=bytes([PROGRAMMER_ACK_NOACK, 0x01, 0x01]),
     )
-    body, status = ApiRouter(None, udp_transport=FakeUdpTransport([ack_response])).handle_json(
+    body, status = ApiRouter(None, controller_transport=FakeUdpTransport([ack_response])).handle_json(
       "POST",
       "/api/cv/read",
       b'{"cv":8}',
@@ -788,7 +831,7 @@ class CvCommandPolicyTest(unittest.TestCase):
       command=CMD_PROGRAM_TRACK_VALUE,
       payload=b"\x00",
     )
-    body, status = ApiRouter(None, udp_transport=FakeUdpTransport([malformed_value])).handle_json(
+    body, status = ApiRouter(None, controller_transport=FakeUdpTransport([malformed_value])).handle_json(
       "POST",
       "/api/cv/read",
       b'{"cv":8}',
@@ -815,6 +858,7 @@ class CvCommandPolicyTest(unittest.TestCase):
 
   def test_cv_write_requires_confirmed_checksum_when_port_is_set(self):
     state = default_state()
+    state["controller"]["ip"] = "192.0.2.10"
     state["controller"]["udp_port"] = 21105
     state["controller"]["udp_checksum_algorithm"] = "unconfirmed"
     body, status = ApiRouter(None).handle_json("POST", "/api/cv/write", b'{"cv":1,"value":3,"confirmed":true}', state)
@@ -825,6 +869,7 @@ class CvCommandPolicyTest(unittest.TestCase):
 
   def test_cv_write_requires_parsed_programming_track_status(self):
     state = default_state()
+    state["controller"]["ip"] = "192.0.2.10"
     state["controller"]["udp_port"] = 21105
     state["controller"]["udp_checksum_algorithm"] = "xor"
     body, status = ApiRouter(None).handle_json("POST", "/api/cv/write", b'{"cv":1,"value":3,"confirmed":true}', state)
@@ -835,6 +880,7 @@ class CvCommandPolicyTest(unittest.TestCase):
 
   def test_cv_write_rejects_unsafe_programming_track_status(self):
     state = default_state()
+    state["controller"]["ip"] = "192.0.2.10"
     state["controller"]["udp_port"] = 21105
     state["controller"]["udp_checksum_algorithm"] = "xor"
     state["controller"]["programming_track_status"] = {
@@ -860,7 +906,7 @@ class CvCommandPolicyTest(unittest.TestCase):
       payload=bytes([PROGRAMMER_ACK_ACK, 0x01, 0x01]),
     )
     transport = FakeUdpTransport([ack_response])
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/cv/write",
       b'{"cv":1,"value":3,"confirmed":true}',
@@ -875,7 +921,7 @@ class CvCommandPolicyTest(unittest.TestCase):
   def test_cv_write_reports_no_ack_after_safety_passes(self):
     state = self._state_with_safe_programming_track()
     transport = FakeUdpTransport([])
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/cv/write",
       b'{"cv":1,"value":3,"confirmed":true}',
@@ -895,7 +941,7 @@ class CvCommandPolicyTest(unittest.TestCase):
       command=CMD_PROGRAM_TRACK_ACK,
       payload=b"\x00",
     )
-    body, status = ApiRouter(None, udp_transport=FakeUdpTransport([malformed_ack])).handle_json(
+    body, status = ApiRouter(None, controller_transport=FakeUdpTransport([malformed_ack])).handle_json(
       "POST",
       "/api/cv/write",
       b'{"cv":1,"value":3,"confirmed":true}',
@@ -913,7 +959,7 @@ class CvCommandPolicyTest(unittest.TestCase):
       [build_udp_frame(0, 0, CMD_PROGRAM_TRACK_ACK, bytes([PROGRAMMER_ACK_BUSY, 0x01, 0x01]))],
       [build_udp_frame(0, 0, CMD_PROGRAM_TRACK_ACK, bytes([PROGRAMMER_ACK_ACK, 0x01, 0x01]))],
     ])
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/cv/write",
       b'{"cv":1,"value":3,"confirmed":true}',
@@ -935,7 +981,7 @@ class CvCommandPolicyTest(unittest.TestCase):
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_ACK, bytes([PROGRAMMER_ACK_ACK, 0x01, 0x01])),
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x00, 0x05, 0x01, 0x01, 0x0C, 0x00])),
     ])
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/cv/write",
       b'{"cv":1,"value":5,"confirmed":true,"programming_target":"main_track","vehicle_id":"v1"}',
@@ -959,7 +1005,7 @@ class CvCommandPolicyTest(unittest.TestCase):
     transport = FakeUdpTransport([
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_ACK, bytes([PROGRAMMER_ACK_ACK, 0x01, 0x01])),
     ])
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/cv/write",
       b'{"cv":1,"value":5,"confirmed":true,"programming_target":"main_track","vehicle_id":"v1"}',
@@ -977,7 +1023,7 @@ class CvCommandPolicyTest(unittest.TestCase):
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_ACK, bytes([PROGRAMMER_ACK_ACK, 0x01, 0x01])),
       build_udp_frame(0, 0, CMD_PROGRAM_TRACK_VALUE, bytes([0x80, 0x00, 0x04, 0x01, 0x01, 0x0C, 0x00])),
     ])
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/cv/write",
       b'{"cv":1,"value":5,"confirmed":true,"programming_target":"main_track","vehicle_id":"v1"}',
@@ -997,7 +1043,7 @@ class CvCommandPolicyTest(unittest.TestCase):
       payload=bytes([PROGRAMMER_ACK_ACK, 0x08, 0x01]),
     )
     transport = FakeUdpTransport([ack_response])
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/cv/write",
       b'{"cv":8,"value":8,"confirmed":true}',

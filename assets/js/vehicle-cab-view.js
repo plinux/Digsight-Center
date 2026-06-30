@@ -1,4 +1,5 @@
 import {sortedConsistMembers} from "./consist-helpers.js";
+import {vehicleSelectedByOtherCabState} from "./cab-state.js";
 import {FALLBACK_FUNCTION_ICON_CATALOG} from "./function-icon-catalog.js";
 import {bindVerticalSlider, setVerticalSliderFill} from "./vertical-slider.js";
 import {
@@ -19,7 +20,7 @@ export function renderVehicleControlWorkspace(container, vehicles, functions, ca
   if (!vehicles.length) {
     const empty = document.createElement("p");
     empty.className = "empty-state";
-    empty.textContent = handlers.emptyText || "暂无车辆，请先导入 Z21 配置";
+    empty.textContent = handlers.emptyText || "暂无车辆，请先导入配置";
     container.append(empty);
     return;
   }
@@ -622,74 +623,6 @@ function formatCabAddressText(vehicle, context = {}) {
   return String(vehicle?.address || "--");
 }
 
-export function renderLocoControl(container, vehicle, functions, control, handlers = {}) {
-  container.replaceChildren();
-  if (!vehicle) {
-    container.hidden = true;
-    return;
-  }
-  container.hidden = false;
-  const toolbar = subviewToolbar("车辆控制", handlers.onBack);
-  const shell = document.createElement("div");
-  shell.className = "loco-control";
-  const imagePanel = document.createElement("div");
-  imagePanel.className = "image-preview large";
-  imagePanel.append(vehicleImage(vehicle));
-
-  const speedPanel = document.createElement("section");
-  speedPanel.className = "speed-panel";
-  const name = document.createElement("h2");
-  name.textContent = `${vehicle.name} / ${vehicle.address}`;
-  const gauge = document.createElement("meter");
-  gauge.className = "speed-gauge";
-  gauge.min = "0";
-  gauge.max = "126";
-  gauge.value = String(control.speed || 0);
-  const speedText = document.createElement("strong");
-  speedText.textContent = `${control.speed || 0}`;
-  const slider = document.createElement("input");
-  slider.type = "range";
-  slider.min = "0";
-  slider.max = "126";
-  slider.value = String(control.speed || 0);
-  slider.addEventListener("input", () => handlers.onSpeed?.(Number(slider.value), control.direction || "forward"));
-  const directionRow = document.createElement("div");
-  directionRow.className = "segmented";
-  const reverse = segmentButton("←", control.direction === "reverse", () => handlers.onDirection?.("reverse"));
-  reverse.title = "后退";
-  reverse.setAttribute("aria-label", "后退");
-  const forward = segmentButton("→", control.direction !== "reverse", () => handlers.onDirection?.("forward"));
-  forward.title = "前进";
-  forward.setAttribute("aria-label", "前进");
-  directionRow.append(reverse, forward);
-  const stop = document.createElement("button");
-  stop.type = "button";
-  stop.className = "danger";
-  stop.textContent = "紧急停车";
-  stop.addEventListener("click", () => handlers.onEmergencyStop?.());
-  speedPanel.append(name, gauge, speedText, slider, directionRow, stop);
-
-  const functionPanel = document.createElement("section");
-  functionPanel.className = "function-grid";
-  const functionIconCatalog = handlers.functionIconCatalog || FALLBACK_FUNCTION_ICON_CATALOG;
-  for (const fn of functions) {
-    const button = document.createElement("button");
-    button.type = "button";
-    const icon = resolveFunctionIcon(fn, functionIconCatalog);
-    appendFunctionButtonContent(button, fn, icon);
-    button.addEventListener("click", () => handlers.onFunction?.(fn.function_number, true));
-    functionPanel.append(button);
-  }
-  if (!functions.length) {
-    const empty = document.createElement("p");
-    empty.className = "empty-state";
-    empty.textContent = "暂无功能键";
-    functionPanel.append(empty);
-  }
-  shell.append(imagePanel, speedPanel, functionPanel);
-  container.append(toolbar, shell);
-}
-
 export function renderDcControl(container, dcControl, handlers = {}) {
   container.hidden = false;
   container.replaceChildren();
@@ -798,25 +731,8 @@ function updateDcVoltageSliderFill(slider, voltage, maxVoltage = 15.2) {
   );
 }
 
-export function renderUnsupportedVehicleControl(container, modeName) {
-  container.replaceChildren();
-  const header = document.createElement("div");
-  header.className = "section-title";
-  const title = document.createElement("h1");
-  title.textContent = "车辆控制";
-  const mode = document.createElement("span");
-  mode.textContent = modeName;
-  header.append(title, mode);
-  const empty = document.createElement("p");
-  empty.className = "empty-state";
-  empty.textContent = "当前模式不支持数码车辆控制";
-  container.append(header, empty);
-}
-
 function selectedByOtherCab(cabId, cabState, vehicleId) {
-  return Object.entries(cabState?.cabs || {}).some(([otherCabId, otherCab]) => {
-    return otherCabId !== cabId && String(otherCab?.vehicleId || "") === String(vehicleId || "");
-  });
+  return vehicleSelectedByOtherCabState(cabState?.cabs, cabId, vehicleId);
 }
 
 function buildFunctionSlots(functions, maxFunctionNumber) {
@@ -934,17 +850,4 @@ function segmentButton(text, active, onClick) {
   button.textContent = text;
   button.addEventListener("click", onClick);
   return button;
-}
-
-function subviewToolbar(titleText, onBack) {
-  const toolbar = document.createElement("div");
-  toolbar.className = "subview-toolbar";
-  const back = document.createElement("button");
-  back.type = "button";
-  back.textContent = "返回";
-  back.addEventListener("click", () => onBack?.());
-  const title = document.createElement("h1");
-  title.textContent = titleText;
-  toolbar.append(back, title);
-  return toolbar;
 }

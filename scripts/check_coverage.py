@@ -17,6 +17,7 @@ FUNCTION_COVERAGE_MINIMUM = 100.0
 LINE_COVERAGE_MINIMUM = 90.0
 BRANCH_COVERAGE_MINIMUM = 80.0
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+MIN_PYTHON_VERSION = (3, 10)
 
 
 @dataclass(frozen=True)
@@ -33,12 +34,14 @@ class FunctionCoverage:
 
 
 def main() -> int:
+  if not python_version_supported():
+    print(python_version_error(sys.version.split()[0]), file=sys.stderr)
+    return 2
   if not _coverage_module_available():
     print("缺少 coverage.py，请先执行：python3 -m pip install -r requirements-dev.txt", file=sys.stderr)
     return 2
 
-  env = os.environ.copy()
-  env["PYTHONPATH"] = str(PROJECT_ROOT)
+  env = coverage_environment()
   _run([sys.executable, "-m", "coverage", "erase"], env)
   _run([sys.executable, "-m", "coverage", "run", "-m", "unittest", "discover", "-s", "tests"], env)
 
@@ -49,6 +52,35 @@ def main() -> int:
 
   _run([sys.executable, "-m", "coverage", "report", "-m"], env)
   return _enforce_thresholds(coverage_data)
+
+
+def python_version_supported(version_info=sys.version_info) -> bool:
+  return tuple(version_info[:2]) >= MIN_PYTHON_VERSION
+
+
+def python_version_error(version_text: str) -> str:
+  return (
+    "Digsight-Center coverage checks require Python 3.10 or newer; "
+    f"current Python is {version_text}. Use a Python 3.10+ interpreter."
+  )
+
+
+def local_package_pythonpath_entries() -> list[str]:
+  return [
+    str(PROJECT_ROOT),
+    str(PROJECT_ROOT / "packages" / "train-dcc" / "src"),
+    str(PROJECT_ROOT / "packages" / "digsight-dxdcnet" / "src"),
+  ]
+
+
+def coverage_environment(base_env: dict | None = None) -> dict:
+  env = dict(base_env or os.environ)
+  existing_pythonpath = env.get("PYTHONPATH", "")
+  env["PYTHONPATH"] = os.pathsep.join([
+    *local_package_pythonpath_entries(),
+    *([existing_pythonpath] if existing_pythonpath else []),
+  ])
+  return env
 
 
 def _coverage_module_available() -> bool:

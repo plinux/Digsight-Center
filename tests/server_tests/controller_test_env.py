@@ -10,6 +10,8 @@ import tempfile
 from server import models
 from server.api import ApiRouter
 from server.app_state import default_state
+from server.controllers.base import ControllerCapabilities, ControllerTransportDescriptor
+from server.controllers.registry import default_controller_registry
 from server.vehicle_store import VehicleStore
 
 
@@ -19,12 +21,47 @@ DEFAULT_RUNTIME_CONFIG_PATH = Path("data/app-state.json")
 DEFAULT_CONTROLLER_CONFIG_DIR = Path("config/controllers")
 
 
+class CustomDefaultsControllerAdapter:
+  kind = "custom_defaults_controller"
+  label = "Custom Defaults Controller"
+  default_display_name = "Custom Defaults Controller"
+  protocol = "CustomProtocol"
+  supported_protocols = ("CustomProtocol",)
+  default_ip = "192.0.2.44"
+  config_file_name = "custom-controller-settings.json"
+  capabilities = ControllerCapabilities(
+    track_power=False,
+    dc_control=False,
+    read_info=False,
+    cv_programming=False,
+    loco_control=False,
+    controller_settings=False,
+  )
+  runtime_transport_fields = ("udp_port", "local_udp_port", "udp_checksum_algorithm")
+  transport_descriptor = ControllerTransportDescriptor(
+    kind="udp",
+    defaults={
+      "udp_port": 21105,
+      "local_udp_port": 0,
+      "udp_checksum_algorithm": "none",
+    },
+    metadata={"checksum_algorithms": ("none",)},
+  )
+
+  def apply_transport_runtime(self, controller: dict) -> None:
+    transport = controller.get("transport") if isinstance(controller.get("transport"), dict) else {}
+    defaults = self.transport_descriptor.defaults
+    controller["udp_port"] = int(transport.get("udp_port", defaults["udp_port"]))
+    controller["local_udp_port"] = int(transport.get("local_udp_port", defaults["local_udp_port"]))
+    controller["udp_checksum_algorithm"] = str(transport.get("udp_checksum_algorithm", defaults["udp_checksum_algorithm"]))
+
+
 def controller_runtime_config_path() -> Path:
   return DEFAULT_RUNTIME_CONFIG_PATH
 
 
 def controller_config_path(controller_kind: str) -> Path:
-  return DEFAULT_CONTROLLER_CONFIG_DIR / models.controller_config_file_name(controller_kind)
+  return DEFAULT_CONTROLLER_CONFIG_DIR / default_controller_registry().config_file_name(controller_kind)
 
 
 def configured_controller_kind() -> str:
@@ -71,12 +108,43 @@ def controller_test_ip() -> str:
 
 def controller_ip_payload(**overrides) -> bytes:
   payload = {"ip": controller_test_ip()}
+  transport = {}
+  for key in ["udp_port", "local_udp_port", "udp_checksum_algorithm"]:
+    if key in overrides:
+      transport[key] = overrides.pop(key)
+  if transport:
+    payload["transport"] = transport
   payload.update(overrides)
   return json.dumps(payload).encode("utf-8")
 
 
 def ping_command(ip=None) -> list[str]:
   return ["ping", "-c", "2", "-W", "1000", ip or controller_test_ip()]
+
+
+def ready_loco_control_state(track_mode: str = "ho") -> dict:
+  state = default_state()
+  state["controller"].update({
+    "ip": "192.0.2.10",
+    "track_mode": track_mode,
+    "udp_port": 12000,
+    "local_udp_port": 6667,
+    "udp_checksum_algorithm": "xor",
+    "last_probe_ok": True,
+    "controller_reachable": True,
+    "booster_status": {
+      "source": "dxdcnet_status_0x23",
+      "power_on": True,
+      "dcc_mode": True,
+    },
+    "safety_snapshot": {
+      "controller_endpoint_version": 1,
+      "last_read_info_at": "2026-06-22T00:00:00+08:00",
+      "booster_status_fresh": True,
+      "programming_track_status_fresh": True,
+    },
+  })
+  return state
 
 
 @contextmanager

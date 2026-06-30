@@ -9,19 +9,27 @@ const maxVehicleImageUploadBytes = 1536 * 1024;
 const maxVehicleImageDimension = 1600;
 
 export async function requestJson(path, options = {}) {
-  notifyGatewayBusy(true);
-  try {
-    const response = await fetch(path, {
+  return executeGatewayRequest(() => ({
+    path,
+    options: {
       ...options,
       headers: {
         ...digsightClientHeader,
         "Content-Type": "application/json",
         ...(options.headers || {})
       }
-    });
+    }
+  }), "请求失败");
+}
+
+async function executeGatewayRequest(requestFactory, failureMessage) {
+  notifyGatewayBusy(true);
+  try {
+    const request = await requestFactory();
+    const response = await fetch(request.path, request.options);
     const payload = await response.json();
     if (!payload.ok) {
-      const error = new Error(payload.error?.message || "请求失败");
+      const error = new Error(payload.error?.message || failureMessage);
       error.payload = payload;
       throw error;
     }
@@ -71,6 +79,10 @@ export function readControllerInfo() {
   return postJson("/api/controller/read-info", {});
 }
 
+export function resetControllerConfig(kind) {
+  return postJson("/api/controller/reset-config", {kind});
+}
+
 export function saveControllerSettings(changes) {
   return patchJson("/api/controller/settings", changes);
 }
@@ -91,9 +103,9 @@ export function setDcControl(voltageV, direction) {
 }
 
 export async function importConfig(format, file) {
-  notifyGatewayBusy(true);
-  try {
-    const response = await fetch("/api/import/config", {
+  return executeGatewayRequest(async () => ({
+    path: "/api/import/config",
+    options: {
       method: "POST",
       headers: {
         ...digsightClientHeader,
@@ -102,17 +114,8 @@ export async function importConfig(format, file) {
         "X-File-Name": file.name
       },
       body: await file.arrayBuffer()
-    });
-    const payload = await response.json();
-    if (!payload.ok) {
-      const error = new Error(payload.error?.message || "导入失败");
-      error.payload = payload;
-      throw error;
     }
-    return payload.data;
-  } finally {
-    notifyGatewayBusy(false);
-  }
+  }), "导入失败");
 }
 
 export function readCv(cvNumber, options = {}) {
@@ -245,10 +248,6 @@ export function updateConsist(consistId, changes) {
 
 export function deleteConsist(consistId) {
   return deleteJson(`/api/consists/${encodeURIComponent(consistId)}`);
-}
-
-export function setConsistSpeed(consistId, speed, direction) {
-  return postJson(`/api/consists/${encodeURIComponent(consistId)}/speed`, {speed, direction});
 }
 
 export function setLocoSpeed(vehicleId, speed, direction) {

@@ -4,6 +4,12 @@ from datetime import datetime
 
 from server import models
 from server.controller_safety import mark_controller_safety_fresh
+from server.controllers.dxdcnet_constants import (
+  CURRENT_LIMIT_PARAM_TO_MODE,
+  PARAM_RAILCOM,
+  PARAM_SCREEN_BRIGHTNESS,
+  PARAM_SCREEN_DIRECTION,
+)
 from server.controllers.dxdcnet_info_helpers import apply_parameter_spec, merge_device_info, version_fields
 from digsight_dxdcnet.constants import (
   CMD_DEVICE_STATUS,
@@ -27,17 +33,6 @@ from digsight_dxdcnet.programming_track import (
   ProgrammingTrackSafety,
   ProgrammingTrackStatus,
 )
-
-
-PARAM_RAILCOM = 0x03
-PARAM_SCREEN_BRIGHTNESS = 0x7E
-PARAM_SCREEN_DIRECTION = 0x80
-CURRENT_LIMIT_PARAM_TO_MODE = {
-  models.N_CURRENT_PARAM: models.TRACK_MODE_N,
-  models.HO_CURRENT_PARAM: models.TRACK_MODE_HO,
-  models.G_CURRENT_PARAM: models.TRACK_MODE_G,
-  models.DC_CURRENT_PARAM: models.TRACK_MODE_DC,
-}
 
 
 class DXDCNetControllerInfoParser:
@@ -309,7 +304,7 @@ class DXDCNetControllerInfoParser:
         parsed_parameter = parse_parameter_response(parameter_frame.payload)
         if parsed_parameter["param_address"] == param_address:
           profiles.setdefault(mode, models.default_track_profiles()[mode])
-          profiles[mode]["current_limit_ma"] = parsed_parameter.get("current_limit_ma")
+          profiles[mode]["target_current_limit_ma"] = parsed_parameter.get("current_limit_ma")
           profiles[mode]["current_limit_raw"] = parsed_parameter["value"]
           if parsed_parameter["param_address"] == current_param:
             parameter_value = parsed_parameter

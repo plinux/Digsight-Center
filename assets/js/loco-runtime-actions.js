@@ -1,11 +1,9 @@
 export function buildLocoRuntimeActions({
   appState,
-  controlledVehicle,
   cabVehicle,
   cabFunctionVehicle,
   functionDefinition,
   isDigitalOperationMode,
-  syncActiveCabControlState,
   syncControllerEndpoint,
   setLocoSpeed,
   setLocoFunction,
@@ -16,22 +14,6 @@ export function buildLocoRuntimeActions({
 }) {
   const cabFunctionTimers = new Map();
 
-  async function sendLocoSpeed(speed, direction) {
-    const vehicle = controlledVehicle();
-    if (!vehicle || !isDigitalOperationMode()) {
-      return;
-    }
-    try {
-      await syncControllerEndpoint();
-      await setLocoSpeed(vehicle.id, speed, direction);
-      setStatus(`速度 ${speed} / ${direction === "reverse" ? "后退" : "前进"}`);
-    } catch (error) {
-      setStatus(formatError(error));
-    } finally {
-      renderAll();
-    }
-  }
-
   async function sendCabSpeed(cabId, speed, direction) {
     const vehicle = cabVehicle(cabId);
     const cab = appState.cabs[cabId];
@@ -40,7 +22,6 @@ export function buildLocoRuntimeActions({
     }
     appState.activeCabId = cabId;
     appState.selectedVehicleId = vehicle.id;
-    syncActiveCabControlState(cabId);
     try {
       await syncControllerEndpoint();
       await setLocoSpeed(vehicle.id, speed, direction);
@@ -64,7 +45,6 @@ export function buildLocoRuntimeActions({
     const functionKey = String(functionNumber);
     const previousEnabled = Boolean(cab.functions[functionKey]);
     cab.functions[functionKey] = Boolean(enabled);
-    syncActiveCabControlState(cabId);
     renderAll();
     try {
       await syncControllerEndpoint();
@@ -72,7 +52,6 @@ export function buildLocoRuntimeActions({
       setStatus(`${cabStatusLabel(cabId)}：${targetVehicle.name} F${functionNumber} ${enabled ? "开启" : "关闭"}`);
     } catch (error) {
       cab.functions[functionKey] = previousEnabled;
-      syncActiveCabControlState(cabId);
       setStatus(formatError(error));
     } finally {
       renderAll();
@@ -134,7 +113,6 @@ export function buildLocoRuntimeActions({
   }
 
   return {
-    sendLocoSpeed,
     sendCabSpeed,
     setCabFunctionState,
     sendCabFunction,

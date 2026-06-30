@@ -2,9 +2,7 @@
 
 CONTROLLER_DEFAULT_IP = "0.0.0.0"
 CONTROLLER_KIND_DIGSIGHT = "digsight_controller"
-CONTROLLER_CONFIG_FILES = {
-  CONTROLLER_KIND_DIGSIGHT: "Digsight_D9000.json",
-}
+CONTROLLER_PROTOCOL_DXDCNET = "DXDCNet"
 DXDCNET_DEFAULT_UDP_PORT = 12000
 DXDCNET_DEFAULT_LOCAL_UDP_PORT = 6667
 DXDCNET_DEFAULT_CHECKSUM_ALGORITHM = "xor"
@@ -49,15 +47,10 @@ SCREEN_DIRECTION_LABELS = {
 
 
 def validate_controller_kind(kind: str) -> str:
-  value = str(kind or CONTROLLER_KIND_DIGSIGHT).strip().lower()
+  value = str(kind or "").strip().lower()
   if not value or not value.endswith("_controller"):
     raise ValueError(f"controller kind must use xx_controller format: {value}")
   return value
-
-
-def controller_config_file_name(kind: str) -> str:
-  controller_kind = validate_controller_kind(kind)
-  return CONTROLLER_CONFIG_FILES.get(controller_kind, f"{controller_kind}.json")
 
 
 def screen_direction_label(raw_value) -> str:
@@ -97,41 +90,41 @@ def default_track_profiles() -> dict:
       "mode": TRACK_MODE_N,
       "name": "N",
       "output_value": N_OUTPUT_VALUE,
-      "voltage_v": 12.0,
-      "max_voltage_v": 12.0,
+      "target_voltage_v": 12.0,
+      "max_target_voltage_v": 12.0,
       "current_param": N_CURRENT_PARAM,
-      "current_limit_ma": None,
-      "max_current_limit_ma": CONTROLLER_CURRENT_LIMIT_MAX_MA,
+      "target_current_limit_ma": None,
+      "max_target_current_limit_ma": CONTROLLER_CURRENT_LIMIT_MAX_MA,
     },
     TRACK_MODE_HO: {
       "mode": TRACK_MODE_HO,
       "name": "HO",
       "output_value": HO_OUTPUT_VALUE,
-      "voltage_v": 15.2,
-      "max_voltage_v": 15.2,
+      "target_voltage_v": 15.2,
+      "max_target_voltage_v": 15.2,
       "current_param": HO_CURRENT_PARAM,
-      "current_limit_ma": None,
-      "max_current_limit_ma": CONTROLLER_CURRENT_LIMIT_MAX_MA,
+      "target_current_limit_ma": None,
+      "max_target_current_limit_ma": CONTROLLER_CURRENT_LIMIT_MAX_MA,
     },
     TRACK_MODE_G: {
       "mode": TRACK_MODE_G,
       "name": "G",
       "output_value": G_OUTPUT_VALUE,
-      "voltage_v": 18.0,
-      "max_voltage_v": 18.0,
+      "target_voltage_v": 18.0,
+      "max_target_voltage_v": 18.0,
       "current_param": G_CURRENT_PARAM,
-      "current_limit_ma": None,
-      "max_current_limit_ma": CONTROLLER_CURRENT_LIMIT_MAX_MA,
+      "target_current_limit_ma": None,
+      "max_target_current_limit_ma": CONTROLLER_CURRENT_LIMIT_MAX_MA,
     },
     TRACK_MODE_DC: {
       "mode": TRACK_MODE_DC,
       "name": "DC",
       "output_value": DC_OUTPUT_VALUE,
-      "voltage_v": 12.0,
-      "max_voltage_v": 15.2,
+      "target_voltage_v": 12.0,
+      "max_target_voltage_v": 15.2,
       "current_param": DC_CURRENT_PARAM,
-      "current_limit_ma": None,
-      "max_current_limit_ma": CONTROLLER_CURRENT_LIMIT_MAX_MA,
+      "target_current_limit_ma": None,
+      "max_target_current_limit_ma": CONTROLLER_CURRENT_LIMIT_MAX_MA,
     },
   }
 
@@ -140,21 +133,24 @@ def validate_track_profile(mode: str, profile: dict) -> dict:
   normalized = validate_profile_mode(mode)
   defaults = default_track_profiles()[normalized]
   result = dict(defaults)
-  result.update(profile)
-  voltage = float(result["voltage_v"])
-  if voltage <= 0 or voltage > defaults["max_voltage_v"]:
-    raise ValueError(f"{defaults['name']} voltage must be > 0 and <= {defaults['max_voltage_v']} V")
-  current_limit = result.get("current_limit_ma")
+  if "target_voltage_v" in profile:
+    result["target_voltage_v"] = profile["target_voltage_v"]
+  if "target_current_limit_ma" in profile:
+    result["target_current_limit_ma"] = profile["target_current_limit_ma"]
+  voltage = float(result["target_voltage_v"])
+  if voltage <= 0 or voltage > defaults["max_target_voltage_v"]:
+    raise ValueError(f"{defaults['name']} target voltage must be > 0 and <= {defaults['max_target_voltage_v']} V")
+  current_limit = result.get("target_current_limit_ma")
   if current_limit in ("", None):
-    result["current_limit_ma"] = None
+    result["target_current_limit_ma"] = None
   else:
     current_limit = int(current_limit)
-    if current_limit < CURRENT_STEP_MA or current_limit > defaults["max_current_limit_ma"]:
-      raise ValueError(f"{defaults['name']} current limit must be {CURRENT_STEP_MA}..{defaults['max_current_limit_ma']} mA")
+    if current_limit < CURRENT_STEP_MA or current_limit > defaults["max_target_current_limit_ma"]:
+      raise ValueError(f"{defaults['name']} target current limit must be {CURRENT_STEP_MA}..{defaults['max_target_current_limit_ma']} mA")
     if current_limit % CURRENT_STEP_MA != 0:
-      raise ValueError(f"{defaults['name']} current limit must use {CURRENT_STEP_MA} mA steps")
-    result["current_limit_ma"] = current_limit
-  result["voltage_v"] = voltage
+      raise ValueError(f"{defaults['name']} target current limit must use {CURRENT_STEP_MA} mA steps")
+    result["target_current_limit_ma"] = current_limit
+  result["target_voltage_v"] = voltage
   result["output_value"] = defaults["output_value"]
   result["current_param"] = defaults["current_param"]
   return result

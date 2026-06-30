@@ -69,14 +69,20 @@ class ControllerProbeTest(unittest.TestCase):
     finally:
       probe_module.subprocess.run = original_run
 
-  def test_controller_probe_api_updates_state(self):
+  def test_controller_probe_api_reports_reachability_without_saving_state(self):
     state = default_state()
+    state["controller"]["ip"] = "0.0.0.0"
+    state["controller"]["last_probe_ok"] = False
+    state["controller"]["last_probe_at"] = ""
     router = ApiRouter(None, probe_runner=lambda _cmd: (0, "reachable", ""))
     body, status = router.handle_json("POST", "/api/controller/probe", controller_ip_payload(), state)
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 200)
     self.assertTrue(payload["data"]["reachable"])
-    self.assertTrue(state["controller"]["last_probe_ok"])
+    self.assertEqual(payload["data"]["ip"], controller_test_ip())
+    self.assertEqual(state["controller"]["ip"], "0.0.0.0")
+    self.assertFalse(state["controller"]["last_probe_ok"])
+    self.assertEqual(state["controller"]["last_probe_at"], "")
 
   def test_controller_probe_rejects_invalid_ip(self):
     state = default_state()

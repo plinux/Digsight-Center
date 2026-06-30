@@ -6,6 +6,10 @@ from pathlib import Path
 from server import models
 from server.api import ApiRouter
 from server.app_state import AppStateStore, default_state
+from server.api_support.controller import controller_settings_apply_to_device
+from server.api_support.routes import LOCK_MODE_HARDWARE, handler_for, mutation_route_spec
+from server.controllers.digsight import DigsightDXDCNetControllerAdapter
+from server.controllers.registry import ControllerRegistry
 from digsight_dxdcnet.constants import (
   CMD_DEVICE_STATUS,
   CMD_LOCO_CONTROL_ACK,
@@ -17,7 +21,13 @@ from digsight_dxdcnet.constants import (
 )
 from digsight_dxdcnet.frames import build_udp_frame
 from digsight_dxdcnet.loco_control import build_loco_control_request_frame, build_loco_function_frame, build_loco_speed_frame
-from tests.server_tests.controller_test_env import controller_ip_payload, controller_test_ip, temporary_vehicle_router
+from tests.server_tests.controller_test_env import (
+  CustomDefaultsControllerAdapter,
+  controller_ip_payload,
+  controller_test_ip,
+  ready_loco_control_state,
+  temporary_vehicle_router,
+)
 from tests.server_tests.fake_udp import FakeRequestMappedUdpTransport, FakeUdpTransport
 
 
@@ -36,7 +46,7 @@ class ApiRouterTest(unittest.TestCase):
     self.assertIn("self.loco_control_api", source)
     self.assertLess(source.count("def _handle_"), 57)
 
-  def test_shared_fake_udp_transport_module_exports_request_mapped_fake(self):
+  def test_shared_fake_controller_transport_module_exports_request_mapped_fake(self):
     try:
       module = __import__("tests.server_tests.fake_udp", fromlist=["FakeRequestMappedUdpTransport"])
     except ModuleNotFoundError as exc:
@@ -49,6 +59,77 @@ class ApiRouterTest(unittest.TestCase):
     self.assertEqual(status, 404)
     self.assertEqual(payload["error"]["type"], "not_found")
     self.assertEqual(payload["error"]["detail"], "/api/missing")
+
+  def test_dynamic_api_routes_reject_extra_path_segments(self):
+    invalid_routes = [
+      ("PATCH", "/api/vehicles/foo/bar"),
+      ("PATCH", "/api/vehicles/"),
+      ("PATCH", "/api//vehicles/foo"),
+      ("PATCH", "/api/vehicles//foo"),
+      ("PATCH", "/api/vehicles/foo/"),
+      ("DELETE", "/api/vehicles/"),
+      ("DELETE", "/api/categories/foo/bar"),
+      ("DELETE", "/api/categories/"),
+      ("DELETE", "/api/categories//foo"),
+      ("PATCH", "/api/consists/foo/bar"),
+      ("PATCH", "/api/consists/"),
+      ("DELETE", "/api/consists/"),
+      ("POST", "/api/consists/a/b/speed"),
+      ("POST", "/api/consists/a/b/stop"),
+      ("POST", "/api//consists/c1/speed"),
+      ("POST", "/api/consists//c1/stop"),
+      ("POST", "/api/consists/c1//speed"),
+      ("POST", "/api/consists/c1/speed/"),
+    ]
+    for method, route in invalid_routes:
+      with self.subTest(method=method, route=route):
+        self.assertIsNone(handler_for(method, route))
+
+  def test_consist_operation_route_hardware_lock_requires_exact_shape(self):
+    self.assertEqual(handler_for("POST", "/api/consists/c1/speed"), "consists.operation")
+    self.assertEqual(handler_for("POST", "/api/consists/c1/stop"), "consists.operation")
+
+    valid_speed_spec = mutation_route_spec("POST", "/api/consists/c1/speed")
+    valid_stop_spec = mutation_route_spec("POST", "/api/consists/c1/stop")
+    invalid_speed_spec = mutation_route_spec("POST", "/api/consists/c1/extra/speed")
+    empty_prefix_spec = mutation_route_spec("POST", "/api//consists/c1/speed")
+    empty_id_spec = mutation_route_spec("POST", "/api/consists//c1/stop")
+
+    self.assertEqual(valid_speed_spec["lock_mode"], LOCK_MODE_HARDWARE)
+    self.assertEqual(valid_stop_spec["lock_mode"], LOCK_MODE_HARDWARE)
+    self.assertNotEqual(invalid_speed_spec["lock_mode"], LOCK_MODE_HARDWARE)
+    self.assertNotEqual(empty_prefix_spec["lock_mode"], LOCK_MODE_HARDWARE)
+    self.assertNotEqual(empty_id_spec["lock_mode"], LOCK_MODE_HARDWARE)
+
+  def test_controller_settings_apply_to_device_lock_policy_lives_in_controller_support(self):
+    route_spec = mutation_route_spec("PATCH", "/api/controller/settings")
+    routes_source = Path("server/api_support/routes.py").read_text(encoding="utf-8")
+    main_source = Path("server/main.py").read_text(encoding="utf-8")
+
+    self.assertNotEqual(route_spec["lock_mode"], LOCK_MODE_HARDWARE)
+    self.assertTrue(controller_settings_apply_to_device(
+      "PATCH",
+      "/api/controller/settings",
+      b'{"apply_to_device":true}',
+    ))
+    self.assertFalse(controller_settings_apply_to_device(
+      "PATCH",
+      "/api/controller/settings",
+      b'{"apply_to_device":false}',
+    ))
+    self.assertFalse(controller_settings_apply_to_device(
+      "PATCH",
+      "/api/controller/settings",
+      b'{"apply_to_device":"true"}',
+    ))
+    self.assertFalse(controller_settings_apply_to_device("PATCH", "/api/controller/settings", b"{"))
+    self.assertFalse(controller_settings_apply_to_device(
+      "POST",
+      "/api/controller/settings",
+      b'{"apply_to_device":true}',
+    ))
+    self.assertNotIn("json.loads", routes_source)
+    self.assertIn("controller_settings_apply_to_device", main_source)
 
   def test_get_vehicle_and_category_routes_use_vehicle_store(self):
     with temporary_vehicle_router() as (router, vehicle_store, state):
@@ -65,47 +146,45 @@ class ApiRouterTest(unittest.TestCase):
       self.assertEqual(json.loads(vehicle_body.decode("utf-8"))["data"][0]["id"], "v1")
       self.assertEqual(json.loads(category_body.decode("utf-8"))["data"][0]["id"], "c1")
 
-  def test_controller_disconnect_route_clears_probe_state(self):
-    state = self._ready_loco_state()
-    state["controller"]["programming_track_status"] = {"source": "dxdcnet_status_0x23"}
-    body, status = ApiRouter(None).handle_json("POST", "/api/controller/disconnect", b"{}", state)
-    payload = json.loads(body.decode("utf-8"))
-    self.assertEqual(status, 200)
-    self.assertFalse(payload["data"]["connected"])
-    self.assertFalse(state["controller"]["last_probe_ok"])
-    self.assertFalse(state["controller"]["controller_reachable"])
-    self.assertEqual(state["controller"]["controller_unreachable_reason"], "controller_disconnected")
-    self.assertNotIn("booster_status", state["controller"])
-    self.assertNotIn("programming_track_status", state["controller"])
-    self.assertFalse(state["controller"]["safety_snapshot"]["booster_status_fresh"])
-    self.assertFalse(state["controller"]["safety_snapshot"]["programming_track_status_fresh"])
+  def test_old_controller_connect_disconnect_routes_are_not_available(self):
+    router = ApiRouter(None)
+    for path in ["/api/controller/connect", "/api/controller/disconnect"]:
+      with self.subTest(path=path):
+        body, status = router.handle_json("POST", path, b"{}", default_state())
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["error"]["type"], "not_found")
 
-  def _ready_loco_state(self):
-    state = default_state()
-    state["controller"].update({
-      "track_mode": "ho",
-      "udp_port": 12000,
-      "local_udp_port": 6667,
-      "udp_checksum_algorithm": "xor",
-      "last_probe_ok": True,
-      "controller_reachable": True,
-      "booster_status": {
-        "source": "dxdcnet_status_0x23",
-        "power_on": True,
-        "dcc_mode": True,
-      },
-      "safety_snapshot": {
-        "controller_endpoint_version": 1,
-        "last_read_info_at": "2026-06-22T00:00:00+08:00",
-        "booster_status_fresh": True,
-        "programming_track_status_fresh": True,
-      },
-    })
-    return state
+  def test_controller_reset_config_route_rewrites_current_controller_file(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      root = Path(temp_dir)
+      state_store = AppStateStore(root / "data" / "app-state.json")
+      config_dir = root / "config" / "controllers"
+      config_dir.mkdir(parents=True)
+      config_path = config_dir / "Digsight_D9000.json"
+      config_path.write_text("not json", encoding="utf-8")
+      state = state_store.load()
+      router = ApiRouter(state_store)
+
+      body, status = router.handle_json(
+        "POST",
+        "/api/controller/reset-config",
+        b'{"kind":"digsight_controller"}',
+        state,
+      )
+
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 200)
+      self.assertTrue(payload["ok"])
+      self.assertEqual(payload["data"]["controller_kind"], "digsight_controller")
+      self.assertEqual(payload["data"]["reset_files"], ["config/controllers/Digsight_D9000.json"])
+      self.assertEqual(json.loads(config_path.read_text(encoding="utf-8"))["ip"], models.CONTROLLER_DEFAULT_IP)
+      self.assertIsNone(state_store.load()["last_error"])
 
   def _fresh_track_power_state(self, track_mode="n"):
     state = default_state()
     state["controller"].update({
+      "ip": "192.0.2.10",
       "track_mode": track_mode,
       "last_probe_ok": True,
       "controller_reachable": True,
@@ -126,6 +205,7 @@ class ApiRouterTest(unittest.TestCase):
   def _safe_programming_track_state(self):
     state = default_state()
     state["controller"].update({
+      "ip": "192.0.2.10",
       "udp_port": 21105,
       "udp_checksum_algorithm": "xor",
       "programming_track_status": {
@@ -193,7 +273,7 @@ class ApiRouterTest(unittest.TestCase):
     self.assertEqual(payload["error"]["type"], "protocol_not_ready")
 
   def test_error_response_keeps_message_detail_and_debug_shape(self):
-    router = ApiRouter(state_store=None, udp_transport=FakeUdpTransport([]))
+    router = ApiRouter(state_store=None, controller_transport=FakeUdpTransport([]))
     body, status = router.handle_json("POST", "/api/cv/read", b'{"cv":7}', self._safe_programming_track_state())
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 502)
@@ -210,7 +290,7 @@ class ApiRouterTest(unittest.TestCase):
   def test_loco_speed_rejects_invalid_controller_client_id(self):
     with temporary_vehicle_router() as (router, vehicle_store, state):
       vehicle_store.create_vehicle({"id": "v1", "name": "测试车", "address": 3, "track_mode": "ho"})
-      state.update(self._ready_loco_state())
+      state.update(ready_loco_control_state())
       state["controller"]["client_id"] = 128
       body, status = router.handle_json(
         "POST",
@@ -222,41 +302,40 @@ class ApiRouterTest(unittest.TestCase):
       self.assertEqual(status, 409)
       self.assertEqual(payload["error"]["type"], "invalid_controller_settings")
 
-  def test_connect_rejects_invalid_controller_ip(self):
+  def test_settings_rejects_invalid_controller_ip(self):
     router = ApiRouter(state_store=None)
-    body, status = router.handle_json("POST", "/api/controller/connect", b'{"ip":"not-an-ip"}', default_state())
+    body, status = router.handle_json("PATCH", "/api/controller/settings", b'{"ip":"not-an-ip"}', default_state())
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 400)
-    self.assertEqual(payload["error"]["type"], "invalid_controller_ip")
+    self.assertEqual(payload["error"]["type"], "invalid_controller_settings")
 
-  def test_connect_defaults_to_confirmed_dxdcnet_udp_settings(self):
+  def test_settings_defaults_to_confirmed_dxdcnet_udp_settings(self):
     state = default_state()
     router = ApiRouter(state_store=None)
-    body, status = router.handle_json("POST", "/api/controller/connect", controller_ip_payload(), state)
+    body, status = router.handle_json("PATCH", "/api/controller/settings", controller_ip_payload(), state)
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 200)
-    self.assertEqual(payload["data"]["udp_port"], 12000)
-    self.assertEqual(payload["data"]["local_udp_port"], 6667)
-    self.assertEqual(payload["data"]["udp_checksum_algorithm"], "xor")
-    self.assertTrue(payload["data"]["connected"])
+    self.assertEqual(payload["data"]["transport"]["udp_port"], 12000)
+    self.assertEqual(payload["data"]["transport"]["local_udp_port"], 6667)
+    self.assertEqual(payload["data"]["transport"]["udp_checksum_algorithm"], "xor")
     self.assertEqual(state["controller"]["udp_port"], 12000)
 
-  def test_connect_normalizes_zero_local_udp_port_when_adapter_disallows_it(self):
+  def test_settings_normalizes_zero_local_udp_port_when_adapter_disallows_it(self):
     state = default_state()
     router = ApiRouter(state_store=None)
     body, status = router.handle_json(
-      "POST",
-      "/api/controller/connect",
+      "PATCH",
+      "/api/controller/settings",
       controller_ip_payload(local_udp_port=0),
       state,
     )
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 200)
-    self.assertEqual(payload["data"]["local_udp_port"], 6667)
+    self.assertEqual(payload["data"]["transport"]["local_udp_port"], 6667)
     self.assertEqual(state["controller"]["local_udp_port"], 6667)
 
-  def test_connect_clears_safety_cache_when_transport_identity_changes(self):
-    state = self._ready_loco_state()
+  def test_settings_clears_safety_cache_when_transport_identity_changes(self):
+    state = ready_loco_control_state()
     state["controller"]["programming_track_status"] = {
       "source": "dxdcnet_status_0x23",
       "track_mode": "ho",
@@ -268,16 +347,44 @@ class ApiRouterTest(unittest.TestCase):
       "current_limit_confirmed": False,
     }
     body, status = ApiRouter(state_store=None).handle_json(
-      "POST",
-      "/api/controller/connect",
+      "PATCH",
+      "/api/controller/settings",
       controller_ip_payload(udp_port=12001, local_udp_port=6667, udp_checksum_algorithm="xor"),
       state,
     )
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 200)
-    self.assertEqual(payload["data"]["udp_port"], 12001)
+    self.assertEqual(payload["data"]["transport"]["udp_port"], 12001)
     self.assertNotIn("booster_status", state["controller"])
     self.assertNotIn("programming_track_status", state["controller"])
+    self.assertFalse(state["controller"]["safety_snapshot"]["booster_status_fresh"])
+    self.assertFalse(state["controller"]["safety_snapshot"]["programming_track_status_fresh"])
+
+  def test_controller_kind_change_does_not_copy_previous_runtime_sections(self):
+    registry = ControllerRegistry()
+    registry.register(DigsightDXDCNetControllerAdapter(), default=True)
+    registry.register(CustomDefaultsControllerAdapter())
+    state = ready_loco_control_state()
+    state["controller"]["telemetry"] = {"track_voltage_v": 99}
+    state["controller"]["device_info"] = {"device_name": "旧控制器", "source": "dxdcnet"}
+    state["controller"]["programming_track_status"] = {"source": "dxdcnet_status_0x23"}
+    state["controller"]["dc_control"] = {"voltage_v": 9.9, "direction": "reverse"}
+
+    body, status = ApiRouter(None, controller_registry=registry).handle_json(
+      "PATCH",
+      "/api/controller/settings",
+      b'{"kind":"custom_defaults_controller","ip":"0.0.0.0"}',
+      state,
+    )
+
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 200)
+    self.assertEqual(payload["data"]["kind"], "custom_defaults_controller")
+    self.assertNotIn("booster_status", state["controller"])
+    self.assertNotIn("programming_track_status", state["controller"])
+    self.assertNotIn("dc_control", state["controller"])
+    self.assertEqual(state["controller"]["telemetry"]["track_voltage_v"], None)
+    self.assertEqual(state["controller"]["device_info"]["device_name"], "")
     self.assertFalse(state["controller"]["safety_snapshot"]["booster_status_fresh"])
     self.assertFalse(state["controller"]["safety_snapshot"]["programming_track_status_fresh"])
 
@@ -294,7 +401,7 @@ class ApiRouterTest(unittest.TestCase):
         )
       ]
     })
-    body, status = ApiRouter(None, udp_transport=transport).handle_json("POST", "/api/track-power", b'{"powered":true}', state)
+    body, status = ApiRouter(None, controller_transport=transport).handle_json("POST", "/api/track-power", b'{"powered":true}', state)
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 200)
     self.assertTrue(payload["data"]["powered"])
@@ -328,7 +435,7 @@ class ApiRouterTest(unittest.TestCase):
         )
       ]
     })
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/track-power",
       b'{"powered":true}',
@@ -410,7 +517,7 @@ class ApiRouterTest(unittest.TestCase):
     self.assertNotIn("def _execute_loco_speed_targets(", router_source)
 
   def test_loco_speed_rejects_stale_booster_status_after_ip_change(self):
-    state = self._ready_loco_state()
+    state = ready_loco_control_state()
     state["vehicles"].append({"id": "v1", "name": "Test", "address": 3, "track_mode": "ho"})
     body, status = ApiRouter(None).handle_json(
       "PATCH",
@@ -425,7 +532,7 @@ class ApiRouterTest(unittest.TestCase):
       control_request: [self._loco_control_ack(3)],
       speed_request: [self._loco_speed_feedback(3, 10, "forward")],
     })
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/loco/speed",
       b'{"vehicle_id":"v1","speed":10,"direction":"forward"}',
@@ -437,28 +544,27 @@ class ApiRouterTest(unittest.TestCase):
     self.assertIn("booster_status_stale", payload["debug"]["warnings"])
     self.assertEqual(transport.requests, [])
 
-  def test_failed_probe_invalidates_stale_safety_when_ip_is_unchanged(self):
-    state = self._ready_loco_state()
+  def test_failed_probe_reports_result_without_invalidating_safety_when_ip_is_unchanged(self):
+    state = ready_loco_control_state()
     state["vehicles"].append({"id": "v1", "name": "Test", "address": 3, "track_mode": "ho"})
 
     def failing_probe(command):
-      self.assertEqual(command[-1], models.CONTROLLER_DEFAULT_IP)
+      self.assertEqual(command[-1], state["controller"]["ip"])
       return 1, "", "simulated failure"
 
     body, status = ApiRouter(None, probe_runner=failing_probe).handle_json(
       "POST",
       "/api/controller/probe",
-      json.dumps({"ip": models.CONTROLLER_DEFAULT_IP}).encode("utf-8"),
+      json.dumps({"ip": state["controller"]["ip"]}).encode("utf-8"),
       state,
     )
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 502)
     self.assertFalse(payload["data"]["reachable"])
-    self.assertFalse(state["controller"]["last_probe_ok"])
-    self.assertFalse(state["controller"]["controller_reachable"])
-    self.assertEqual(state["controller"]["controller_unreachable_reason"], "controller_probe_failed")
-    self.assertNotIn("booster_status", state["controller"])
-    self.assertFalse(state["controller"]["safety_snapshot"]["booster_status_fresh"])
+    self.assertTrue(state["controller"]["last_probe_ok"])
+    self.assertTrue(state["controller"]["controller_reachable"])
+    self.assertIn("booster_status", state["controller"])
+    self.assertTrue(state["controller"]["safety_snapshot"]["booster_status_fresh"])
 
     control_request = build_loco_control_request_frame(address=3, client_id=1)
     speed_request = build_loco_speed_frame(address=3, speed=10, direction="forward", client_id=1)
@@ -466,20 +572,19 @@ class ApiRouterTest(unittest.TestCase):
       control_request: [self._loco_control_ack(3)],
       speed_request: [self._loco_speed_feedback(3, 10, "forward")],
     })
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/loco/speed",
       b'{"vehicle_id":"v1","speed":10,"direction":"forward"}',
       state,
     )
     payload = json.loads(body.decode("utf-8"))
-    self.assertEqual(status, 409)
-    self.assertEqual(payload["error"]["type"], "protocol_not_ready")
-    self.assertIn("booster_status_stale", payload["debug"]["warnings"])
-    self.assertEqual(transport.requests, [])
+    self.assertEqual(status, 200)
+    self.assertTrue(payload["ok"])
+    self.assertEqual([entry["payload"] for entry in transport.requests], [control_request, speed_request])
 
   def test_loco_speed_continues_when_control_ack_is_missing(self):
-    state = self._ready_loco_state()
+    state = ready_loco_control_state()
     state["vehicles"].append({"id": "v1", "name": "Test", "address": 3, "track_mode": "ho"})
     control_request = build_loco_control_request_frame(address=3, client_id=1)
     speed_request = build_loco_speed_frame(address=3, speed=10, direction="forward", client_id=1)
@@ -487,7 +592,7 @@ class ApiRouterTest(unittest.TestCase):
       control_request: [],
       speed_request: [self._loco_speed_feedback(3, 10, "forward")],
     })
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/loco/speed",
       b'{"vehicle_id":"v1","speed":10,"direction":"forward"}',
@@ -503,7 +608,7 @@ class ApiRouterTest(unittest.TestCase):
     state = self._fresh_track_power_state("n")
     request = bytes.fromhex("ff ff 17 01 20 01 90 78 df")
     transport = FakeRequestMappedUdpTransport({request: []})
-    body, status = ApiRouter(None, udp_transport=transport).handle_json("POST", "/api/track-power", b'{"powered":true}', state)
+    body, status = ApiRouter(None, controller_transport=transport).handle_json("POST", "/api/track-power", b'{"powered":true}', state)
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 504)
     self.assertEqual(payload["error"]["type"], "track_power_status_missing")
@@ -523,7 +628,7 @@ class ApiRouterTest(unittest.TestCase):
         )
       ]
     })
-    body, status = ApiRouter(None, udp_transport=transport).handle_json("POST", "/api/track-power", b'{"powered":true}', state)
+    body, status = ApiRouter(None, controller_transport=transport).handle_json("POST", "/api/track-power", b'{"powered":true}', state)
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 200)
     self.assertEqual(payload["data"]["track_mode"], "g")
@@ -533,7 +638,7 @@ class ApiRouterTest(unittest.TestCase):
   def test_track_power_rejects_dc_mode_on(self):
     state = self._fresh_track_power_state("dc")
     transport = FakeRequestMappedUdpTransport({})
-    body, status = ApiRouter(None, udp_transport=transport).handle_json("POST", "/api/track-power", b'{"powered":true}', state)
+    body, status = ApiRouter(None, controller_transport=transport).handle_json("POST", "/api/track-power", b'{"powered":true}', state)
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 409)
     self.assertEqual(payload["error"]["type"], "unsafe_track_mode")
@@ -553,7 +658,7 @@ class ApiRouterTest(unittest.TestCase):
         )
       ]
     })
-    body, status = ApiRouter(None, udp_transport=transport).handle_json("POST", "/api/track-power", b'{"powered":false}', state)
+    body, status = ApiRouter(None, controller_transport=transport).handle_json("POST", "/api/track-power", b'{"powered":false}', state)
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 200)
     self.assertEqual(payload["data"]["track_mode"], "dc")
@@ -562,8 +667,7 @@ class ApiRouterTest(unittest.TestCase):
     self.assertEqual(transport.requests[0]["payload"], request)
 
   def test_dc_control_sets_reverse_voltage_without_real_hardware(self):
-    state = default_state()
-    state["controller"]["track_mode"] = "dc"
+    state = self._fresh_track_power_state("dc")
     request = bytes.fromhex("ff ff 17 01 20 01 d0 4e a9")
     transport = FakeRequestMappedUdpTransport({
       request: [
@@ -575,7 +679,7 @@ class ApiRouterTest(unittest.TestCase):
         )
       ]
     })
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/dc-control",
       b'{"voltage_v":7.8,"direction":"reverse"}',
@@ -588,8 +692,25 @@ class ApiRouterTest(unittest.TestCase):
     self.assertEqual(payload["data"]["direction"], "reverse")
     self.assertEqual(transport.requests[0]["payload"], request)
 
+  def test_dc_control_voltage_requires_fresh_controller_status(self):
+    state = default_state()
+    state["controller"]["track_mode"] = "dc"
+    body, status = ApiRouter(None).handle_json(
+      "POST",
+      "/api/dc-control",
+      b'{"voltage_v":7.8,"direction":"reverse"}',
+      state,
+    )
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 409)
+    self.assertEqual(payload["error"]["type"], "protocol_not_ready")
+    self.assertEqual(payload["error"]["message"], "请先连接控制器并读取最新状态")
+    self.assertIn("booster_status_stale", payload["debug"]["warnings"])
+    self.assertIn("booster_status_unconfirmed", payload["debug"]["warnings"])
+
   def test_dc_control_emergency_stop_sends_dc_power_off_without_real_hardware(self):
     state = default_state()
+    state["controller"]["ip"] = "192.0.2.10"
     state["controller"]["track_mode"] = "dc"
     request = bytes.fromhex("ff ff 17 01 20 01 70 00 47")
     transport = FakeRequestMappedUdpTransport({
@@ -602,7 +723,7 @@ class ApiRouterTest(unittest.TestCase):
         )
       ]
     })
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/dc-control",
       b'{"voltage_v":0,"direction":"forward"}',
@@ -616,6 +737,7 @@ class ApiRouterTest(unittest.TestCase):
 
   def test_track_power_off_allows_mode_bit_reset(self):
     state = default_state()
+    state["controller"]["ip"] = "192.0.2.10"
     state["controller"]["track_mode"] = "dc"
     request = bytes.fromhex("ff ff 17 01 20 01 70 00 47")
     transport = FakeRequestMappedUdpTransport({
@@ -628,7 +750,7 @@ class ApiRouterTest(unittest.TestCase):
         )
       ]
     })
-    body, status = ApiRouter(None, udp_transport=transport).handle_json("POST", "/api/track-power", b'{"powered":false}', state)
+    body, status = ApiRouter(None, controller_transport=transport).handle_json("POST", "/api/track-power", b'{"powered":false}', state)
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 200)
     self.assertFalse(payload["data"]["powered"])
@@ -703,11 +825,11 @@ class ApiRouterTest(unittest.TestCase):
         control_b: [self._loco_control_ack(22)],
         request_b: [self._loco_speed_feedback(22, 42, "forward")],
       })
-      body, status = ApiRouter(None, udp_transport=transport, vehicle_store=store).handle_json(
+      body, status = ApiRouter(None, controller_transport=transport, vehicle_store=store).handle_json(
         "POST",
         "/api/loco/speed",
         b'{"vehicle_id":"mu","speed":42,"direction":"forward"}',
-        self._ready_loco_state(),
+        ready_loco_control_state(),
       )
       payload = json.loads(body.decode("utf-8"))
       self.assertEqual(status, 200)
@@ -738,11 +860,11 @@ class ApiRouterTest(unittest.TestCase):
         control_b: [self._loco_control_ack(22)],
         request_b: [self._loco_speed_feedback(22, 42, "reverse")],
       })
-      body, status = ApiRouter(None, udp_transport=transport, vehicle_store=store).handle_json(
+      body, status = ApiRouter(None, controller_transport=transport, vehicle_store=store).handle_json(
         "POST",
         "/api/loco/speed",
         b'{"vehicle_id":"mu","speed":42,"direction":"forward"}',
-        self._ready_loco_state(),
+        ready_loco_control_state(),
       )
       payload = json.loads(body.decode("utf-8"))
       self.assertEqual(status, 200)
@@ -778,11 +900,11 @@ class ApiRouterTest(unittest.TestCase):
         control_b: [self._loco_control_ack(22)],
         request_b: [self._loco_function_feedback(22, True)],
       })
-      body, status = ApiRouter(None, udp_transport=transport, vehicle_store=store).handle_json(
+      body, status = ApiRouter(None, controller_transport=transport, vehicle_store=store).handle_json(
         "POST",
         "/api/loco/function",
         b'{"vehicle_id":"loco-a","function_number":0,"enabled":true,"function_states":{"0":true}}',
-        self._ready_loco_state(),
+        ready_loco_control_state(),
       )
       payload = json.loads(body.decode("utf-8"))
       self.assertEqual(status, 200)

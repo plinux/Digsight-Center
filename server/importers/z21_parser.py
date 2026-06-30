@@ -45,6 +45,12 @@ def map_z21_button_type_to_trigger_mode(button_type) -> str:
   return Z21_BUTTON_TYPE_TO_TRIGGER_MODE.get(numeric_type, "toggle")
 
 
+def row_value(row, row_keys: set[str], column: str, default=""):
+  if column in row_keys:
+    return row[column]
+  return default
+
+
 @dataclass
 class Z21ImportResult:
   vehicles: list
@@ -62,6 +68,7 @@ class Z21Importer:
     function_icon_mapping_path: Path | None = None,
   ):
     self.image_dir = Path(image_dir)
+    self.config_warnings = []
     self.function_icon_catalog = self._load_function_icon_catalog(function_icon_catalog_path)
     self.function_icon_mappings = self._load_function_icon_mapping(function_icon_mapping_path)
 
@@ -123,7 +130,7 @@ class Z21Importer:
         "images_imported": sum(1 for vehicle in vehicles if vehicle.get("image_path")),
         "layout_controls_seen": self._count_table(con, "control_station_controls"),
         "layout_routes_seen": self._count_table(con, "control_station_routes"),
-        "warnings": [],
+        "warnings": list(self.config_warnings),
       }
       return Z21ImportResult(vehicles, functions, categories, consists, summary)
     finally:
@@ -136,14 +143,15 @@ class Z21Importer:
     vehicle_id_by_source_id = {}
     vehicle_token_by_source_id = {}
     for row in rows:
-      row_keys = row.keys()
+      row_keys = set(row.keys())
+      metadata = self._z21_vehicle_metadata(row, row_keys)
       source_vehicle_id = self._source_key(row["id"])
       vehicle_token = self._unique_source_token(source_vehicle_id, used_tokens)
       vehicle_id = f"z21-{import_scope}-vehicle-{vehicle_token}"
       vehicle_id_by_source_id[source_vehicle_id] = vehicle_id
       vehicle_token_by_source_id[source_vehicle_id] = vehicle_token
-      image_path = self._extract_vehicle_image(vehicle_id, row["image_name"], archive, png_names)
-      vehicle_name = row["name"] or f"车辆 {row['address']}"
+      image_path = self._extract_vehicle_image(vehicle_id, metadata["image_name"], archive, png_names)
+      vehicle_name = metadata["name"] or f"车辆 {row['address']}"
       category_ids = vehicle_categories.get(row["id"], [])
       category_names = [category_names_by_id.get(category_id, "") for category_id in category_ids]
       vehicles.append({
@@ -151,31 +159,49 @@ class Z21Importer:
         "source": "z21",
         "source_vehicle_id": source_vehicle_id,
         "track_mode": track_mode,
-        "source_position": row["position"] if "position" in row_keys else None,
+        "source_position": metadata["source_position"],
         "name": vehicle_name,
         "address": row["address"],
         "type": row["type"],
         "energy_type": self._infer_energy_type(row["type"], category_names),
         "car_subtype": self._default_car_subtype(row["type"]),
         "consist_kind": self._infer_consist_kind_from_categories(row["type"], category_names),
-        "max_speed": row["max_speed"] if "max_speed" in row_keys else None,
-        "brand": self._infer_brand(row["name"] if "name" in row_keys else ""),
-        "image_name": row["image_name"],
+        "max_speed": metadata["max_speed"],
+        "brand": self._infer_brand(metadata["name"]),
+        "image_name": metadata["image_name"],
         "image_path": image_path,
-        "full_name": row["full_name"] if "full_name" in row_keys else "",
-        "railway": row["railway"] if "railway" in row_keys else "",
-        "article_number": row["article_number"] if "article_number" in row_keys else "",
-        "decoder_type": row["decoder_type"] if "decoder_type" in row_keys else "",
-        "buffer_length": row["buffer_length"] if "buffer_length" in row_keys else "",
-        "model_buffer_length": row["model_buffer_length"] if "model_buffer_length" in row_keys else "",
-        "service_weight": row["service_weight"] if "service_weight" in row_keys else "",
-        "model_weight": row["model_weight"] if "model_weight" in row_keys else "",
-        "rmin": row["rmin"] if "rmin" in row_keys else "",
-        "description": row["description"] if "description" in row_keys else "",
+        "full_name": metadata["full_name"],
+        "railway": metadata["railway"],
+        "article_number": metadata["article_number"],
+        "decoder_type": metadata["decoder_type"],
+        "buffer_length": metadata["buffer_length"],
+        "model_buffer_length": metadata["model_buffer_length"],
+        "service_weight": metadata["service_weight"],
+        "model_weight": metadata["model_weight"],
+        "rmin": metadata["rmin"],
+        "description": metadata["description"],
         "category_ids": category_ids,
         "import_file": file_name,
       })
     return vehicles, vehicle_id_by_source_id, vehicle_token_by_source_id
+
+  def _z21_vehicle_metadata(self, row, row_keys: set[str]) -> dict:
+    return {
+      "source_position": row_value(row, row_keys, "position", None),
+      "name": row_value(row, row_keys, "name"),
+      "max_speed": row_value(row, row_keys, "max_speed", None),
+      "image_name": row_value(row, row_keys, "image_name"),
+      "full_name": row_value(row, row_keys, "full_name"),
+      "railway": row_value(row, row_keys, "railway"),
+      "article_number": row_value(row, row_keys, "article_number"),
+      "decoder_type": row_value(row, row_keys, "decoder_type"),
+      "buffer_length": row_value(row, row_keys, "buffer_length"),
+      "model_buffer_length": row_value(row, row_keys, "model_buffer_length"),
+      "service_weight": row_value(row, row_keys, "service_weight"),
+      "model_weight": row_value(row, row_keys, "model_weight"),
+      "rmin": row_value(row, row_keys, "rmin"),
+      "description": row_value(row, row_keys, "description"),
+    }
 
   def _read_categories(self, con):
     if not self._table_exists(con, "categories"):
@@ -449,23 +475,37 @@ class Z21Importer:
 
   def _load_function_icon_catalog(self, function_icon_catalog_path: Path | None) -> dict:
     catalog_path = Path(function_icon_catalog_path) if function_icon_catalog_path else PROJECT_ROOT / "config" / "function-icons.json"
-    try:
-      catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-      return {"default_icon": DEFAULT_FUNCTION_ICON, "icons": {DEFAULT_FUNCTION_ICON: {}}}
+    catalog = self._load_json_config(
+      catalog_path,
+      "function_icon_catalog_load_failed",
+      self._default_function_icon_catalog,
+    )
     if not isinstance(catalog.get("icons"), dict):
-      return {"default_icon": DEFAULT_FUNCTION_ICON, "icons": {DEFAULT_FUNCTION_ICON: {}}}
+      self.config_warnings.append("function_icon_catalog_invalid")
+      return self._default_function_icon_catalog()
     return catalog
 
   def _load_function_icon_mapping(self, function_icon_mapping_path: Path | None = None) -> dict:
     mapping_path = Path(function_icon_mapping_path) if function_icon_mapping_path else PROJECT_ROOT / "config" / "function-icon-mappings" / "z21.json"
-    try:
-      mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    load_failed = object()
+    mapping = self._load_json_config(mapping_path, "function_icon_mapping_load_failed", lambda: load_failed)
+    if mapping is load_failed:
       return {}
     if mapping.get("source_system") != "z21" or not isinstance(mapping.get("mappings"), dict):
+      self.config_warnings.append("function_icon_mapping_invalid")
       return {}
     return mapping["mappings"]
+
+  def _load_json_config(self, path: Path, warning: str, fallback_factory):
+    try:
+      return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+      self.config_warnings.append(warning)
+      return fallback_factory()
+
+  @staticmethod
+  def _default_function_icon_catalog() -> dict:
+    return {"default_icon": DEFAULT_FUNCTION_ICON, "icons": {DEFAULT_FUNCTION_ICON: {}}}
 
   def _resolve_function_icon_name(self, image_name, shortcut) -> str:
     icons = self.function_icon_catalog.get("icons", {})

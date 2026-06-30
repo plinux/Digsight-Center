@@ -12,6 +12,7 @@ import {
   readControllerInfo,
   readCv,
   reorderVehicles,
+  resetControllerConfig,
   saveControllerSettings,
   setControllerTrackMode,
   setDcControl,
@@ -32,22 +33,25 @@ import {buildCvPanelHandlers, createCvDomainModel} from "./cv-controller.js";
 import {buildCvRuntimeActions, newCvReadSessionId} from "./cv-runtime-actions.js";
 import {buildVehicleEditorHandlers} from "./vehicle-editor-controller.js";
 import {initializeApp, wireAppEvents} from "./app-bootstrap.js";
-import {renderControllerKindOptions, renderImportFormatOptions} from "./capability-selectors.js";
 import {buildCabWorkspaceActions} from "./cab-workspace-actions.js";
 import {buildLocoRuntimeActions} from "./loco-runtime-actions.js";
+import {vehicleSelectedByOtherCabState} from "./cab-state.js";
 import {
   FALLBACK_FUNCTION_ICON_CATALOG,
   loadFunctionIconCatalog
 } from "./function-icon-catalog.js";
-import {importSelectedConfigFile} from "./import-actions.js";
 import {
-  renderVehicleRegistry
-} from "./vehicle-view.js";
+  controllerDescriptor,
+  controllerEndpointReady,
+  persistentConfigurationStatus,
+  resetSelectedControllerConfig,
+  runControllerStatusRetry,
+  syncControllerDescriptorControls
+} from "./controller-workflow.js";
+import {renderImportCapabilities, runImportConfigWorkflow} from "./import-workflow.js";
 import {buildVehicleEditorActions} from "./vehicle-editor-actions.js";
 import {
   renderDcControl,
-  renderLocoControl,
-  renderUnsupportedVehicleControl,
   renderVehicleControlWorkspace
 } from "./vehicle-cab-view.js";
 import {renderVehicleEditor} from "./vehicle-editor-view.js";
@@ -68,6 +72,7 @@ const elements = {
   headerPower: document.getElementById("headerPower"),
   powerOnButton: document.getElementById("powerOnButton"),
   powerOffButton: document.getElementById("powerOffButton"),
+  resetControllerConfigButton: document.getElementById("resetControllerConfigButton"),
   connectionStatus: document.getElementById("connectionStatus"),
   statusDetailButton: document.getElementById("statusDetailButton"),
   statusDetailDialog: document.getElementById("statusDetailDialog"),
@@ -153,12 +158,10 @@ const {
 } = cvRuntimeActions;
 const locoRuntimeActions = buildLocoRuntimeActions({
   appState,
-  controlledVehicle,
   cabVehicle,
   cabFunctionVehicle,
   functionDefinition,
   isDigitalOperationMode,
-  syncActiveCabControlState,
   syncControllerEndpoint,
   setLocoSpeed,
   setLocoFunction,
@@ -167,7 +170,6 @@ const locoRuntimeActions = buildLocoRuntimeActions({
   renderAll
 });
 const {
-  sendLocoSpeed,
   sendCabSpeed,
   sendCabFunction,
   sendCabFunctionByMode
@@ -220,8 +222,18 @@ function formatError(error) {
     return String(error || "操作失败");
   }
   if (error.payload) {
+    const apiError = error.payload?.error;
+    if (apiError?.type === "controller_protocol_not_supported") {
+      return {
+        summary: apiError.message || "当前控制器配置了不支持的协议",
+        detail: [
+          "请检查当前控制器配置文件中的 protocol。",
+          JSON.stringify(error.payload, null, 2)
+        ].join("\n\n")
+      };
+    }
     return {
-      summary: error.payload?.error?.message || error.message,
+      summary: apiError?.message || error.message,
       detail: JSON.stringify(error.payload, null, 2)
     };
   }
@@ -245,13 +257,14 @@ const controllerWarningMessages = {
   "booster_status_stale": "请先连接控制器并读取最新状态",
   "booster_status_unconfirmed": "轨道状态未确认",
   "command_station_status_missing": "未收到命令站状态回包",
+  "controller_ip_unconfigured": "控制器 IP 未配置",
   "controller_not_confirmed": "控制器连接状态未确认",
   "programming_track_current_limit_unconfirmed": "编程轨限流未确认",
   "programming_track_safety_failed": "编程轨安全校验未通过",
   "programming_track_status_stale": "编程轨状态已过期，请重新读取控制器信息",
   "programming_track_status_unconfirmed": "编程轨状态未确认",
-  "udp_checksum_algorithm_unconfirmed": "DXDCNet UDP 校验方式未确认",
-  "udp_port_unconfirmed": "DXDCNet UDP 端口未确认",
+  "udp_checksum_algorithm_unconfirmed": "控制器通讯校验方式未确认",
+  "udp_port_unconfirmed": "控制器通讯端口未确认",
   "unsafe_track_mode": "当前轨道模式不支持 CV 编程",
   "version_response_missing": "未收到控制器版本信息回包"
 };
@@ -282,10 +295,6 @@ function controllerReadStatusMessage(result) {
 function controllerReadStatusDetail(result) {
   const visibleWarnings = userVisibleWarnings(result.warnings || []);
   return result.safe_for_cv || !visibleWarnings.length ? "" : visibleWarnings.join("\n");
-}
-
-function selectedVehicle() {
-  return vehiclesForOperationMode(currentOperationMode()).find((vehicle) => vehicle.id === appState.selectedVehicleId) || null;
 }
 
 function selectedCvProgrammingVehicle() {
@@ -331,13 +340,7 @@ function cabFunctionVehicle(cabId) {
 }
 
 function vehicleSelectedByOtherCab(cabId, vehicleId) {
-  return Object.entries(appState.cabs || {}).some(([otherCabId, otherCab]) => {
-    return otherCabId !== cabId && String(otherCab?.vehicleId || "") === String(vehicleId || "");
-  });
-}
-
-function controlledVehicle() {
-  return vehiclesForOperationMode(currentOperationMode()).find((vehicle) => vehicle.id === appState.control.vehicleId) || selectedVehicle();
+  return vehicleSelectedByOtherCabState(appState.cabs, cabId, vehicleId);
 }
 
 function selectedFunctions(vehicleId = appState.selectedVehicleId) {
@@ -526,25 +529,12 @@ async function saveVehicleConsist(changes, controlVehicleId) {
   });
 }
 
-function showLocoControl(vehicleId) {
-  if (!isDigitalOperationMode()) {
-    setStatus("数码车辆控制只支持 N、HO 或 G 模式");
-    showVehicleRegistry();
-    return;
-  }
-  appState.selectedVehicleId = vehicleId;
-  appState.control.vehicleId = vehicleId;
-  appState.vehicleSubview = "control";
-  renderAll();
-}
-
 function activateCab(cabId, options = {}) {
   if (!appState.cabs[cabId]) {
     return;
   }
   appState.activeCabId = cabId;
   appState.selectedVehicleId = appState.cabs[cabId].vehicleId || "";
-  syncActiveCabControlState(cabId);
   if (options.render === false) {
     return;
   }
@@ -563,7 +553,6 @@ function selectCabVehicle(cabId, vehicleId) {
   appState.cabs[cabId].vehicleId = vehicleId;
   appState.cabs[cabId].memberIndex = null;
   appState.selectedVehicleId = vehicleId;
-  syncActiveCabControlState(cabId);
   renderAll();
 }
 
@@ -589,6 +578,16 @@ function switchCabConsistMember(cabId, step) {
   renderAll();
 }
 
+function selectCabForControl(cabId) {
+  const cab = appState.cabs[cabId];
+  if (!cab) {
+    return null;
+  }
+  appState.activeCabId = cabId;
+  appState.selectedVehicleId = cab.vehicleId || "";
+  return cab;
+}
+
 function toggleCabExpanded(cabId) {
   const cab = appState.cabs[cabId];
   if (!cab) {
@@ -599,43 +598,27 @@ function toggleCabExpanded(cabId) {
     return;
   }
   cab.expanded = !cab.expanded;
-  appState.activeCabId = cabId;
-  appState.selectedVehicleId = cab.vehicleId || "";
-  syncActiveCabControlState(cabId);
+  selectCabForControl(cabId);
   renderAll();
 }
 
 function toggleCabFunctionNumbers(cabId) {
-  const cab = appState.cabs[cabId];
+  const cab = selectCabForControl(cabId);
   if (!cab) {
     return;
   }
   cab.showFunctionNumbers = !cab.showFunctionNumbers;
-  appState.activeCabId = cabId;
-  appState.selectedVehicleId = cab.vehicleId || "";
-  syncActiveCabControlState(cabId);
   renderAll();
 }
 
 function toggleCabFunctionLabels(cabId) {
-  const cab = appState.cabs[cabId];
+  const cab = selectCabForControl(cabId);
   if (!cab) {
     return;
   }
   cab.showFunctionLabels = !cab.showFunctionLabels;
   cab.expanded = false;
-  appState.activeCabId = cabId;
-  appState.selectedVehicleId = cab.vehicleId || "";
-  syncActiveCabControlState(cabId);
   renderAll();
-}
-
-function syncActiveCabControlState(cabId = appState.activeCabId) {
-  const cab = appState.cabs[cabId] || activeCab();
-  appState.control.vehicleId = cab.vehicleId || "";
-  appState.control.speed = cab.speed || 0;
-  appState.control.direction = cab.direction || "forward";
-  appState.control.functions = cab.functions || {};
 }
 
 function vehicleTrackMode(vehicle) {
@@ -738,7 +721,6 @@ function syncCabSelectionForVisibleVehicles(visibleVehicles) {
     appState.activeCabId = "left";
   }
   appState.selectedVehicleId = appState.cabs[appState.activeCabId]?.vehicleId || appState.cabs.left.vehicleId || "";
-  syncActiveCabControlState(appState.activeCabId);
 }
 
 function updateVehicleHeader(visibleVehicles, operationMode) {
@@ -841,25 +823,31 @@ function currentTrackProfile(trackMode = currentOperationMode()) {
   return stateProfiles[trackMode] || infoProfiles[trackMode] || {};
 }
 
-function controllerDescriptor(kind = appState.controller.kind || appState.capabilities.default_controller_kind) {
-  return (appState.capabilities.controllers || []).find((controller) => controller.kind === kind) || {};
-}
-
 async function syncControllerEndpoint() {
   const kind = elements.controllerKindSelect.value || appState.capabilities.default_controller_kind;
   const ip = elements.controllerIp.value.trim();
   if (!ip) {
     throw new Error("控制器 IP 不能为空");
   }
-  if (kind === appState.controller.kind && ip === appState.controller.ip && Number(appState.controller.udp_port || 0) > 0) {
+  const descriptor = controllerDescriptor(appState.capabilities, kind);
+  if (kind === appState.controller.kind && ip === appState.controller.ip && controllerEndpointReady(descriptor, appState.controller)) {
     return;
   }
   const result = await saveControllerSettings({kind, ip});
   appState.controller.kind = result.kind ?? kind;
   appState.controller.ip = result.ip ?? ip;
-  appState.controller.udp_port = result.udp_port ?? appState.controller.udp_port;
-  appState.controller.local_udp_port = result.local_udp_port ?? appState.controller.local_udp_port;
-  appState.controller.udp_checksum_algorithm = result.udp_checksum_algorithm ?? appState.controller.udp_checksum_algorithm;
+  appState.controller.transport = result.transport ?? appState.controller.transport;
+}
+
+async function handleResetSelectedControllerConfig() {
+  await resetSelectedControllerConfig({
+    appState,
+    elements,
+    resetControllerConfig,
+    refreshState,
+    setStatus,
+    formatError
+  });
 }
 
 async function setOperationMode(trackMode) {
@@ -917,7 +905,6 @@ function cabWorkspaceActions() {
     },
     sendCabSpeed,
     clampSpeed,
-    syncActiveCabControlState,
     sendCabFunctionByMode
   });
 }
@@ -1050,7 +1037,7 @@ function renderDcModeView() {
   elements.vehicleControlDetailView.hidden = true;
   renderDcControl(elements.vehicleRegistry, {
     ...appState.dcControl,
-    maxVoltageV: currentTrackProfile("dc").max_voltage_v || 15.2
+    maxVoltageV: currentTrackProfile("dc").max_target_voltage_v || 15.2
   }, {
     onVoltagePreview: (voltageV) => {
       appState.dcControl.voltageV = voltageV;
@@ -1094,51 +1081,17 @@ function renderActiveVehicleView({operationMode, leftVehicles, rightVehicles, vi
     actions: vehicleEditorActions(vehicle),
     functionIconCatalog
   }));
-
-  const controlVehicle = controlledVehicle();
-  renderLocoControl(
-    elements.vehicleControlDetailView,
-    controlVehicle,
-    selectedFunctions(controlVehicle?.id),
-    appState.control,
-    {
-      onBack: showVehicleRegistry,
-      onDirection: async (direction) => {
-        appState.control.direction = direction;
-        await sendLocoSpeed(appState.control.speed, direction);
-      },
-      onSpeed: async (speed, direction) => {
-        appState.control.speed = clampSpeed(speed);
-        appState.control.direction = direction;
-        await sendLocoSpeed(appState.control.speed, direction);
-      },
-      onEmergencyStop: async () => {
-        appState.control.speed = 0;
-        await sendLocoSpeed(0, appState.control.direction);
-      },
-      onFunction: async (functionNumber, enabled) => {
-        try {
-          await syncControllerEndpoint();
-          await setLocoFunction(controlVehicle.id, functionNumber, enabled);
-          setStatus(`F${functionNumber} 已发送`);
-        } catch (error) {
-          setStatus(formatError(error));
-        }
-      },
-      functionIconCatalog
-    }
-  );
+  elements.vehicleControlDetailView.hidden = true;
 }
 
 function renderActiveCvView({visibleVehicles}) {
-  const vehicle = editingVehicle();
   const cvProgrammingTargetVehicle = currentProgrammingTarget() === "main_track" ? selectedCvProgrammingVehicle() : null;
   renderCvPanel(elements, cvProgrammingTargetVehicle, appState.cvMetadata, {
     ...cvState,
     programmingTarget: currentProgrammingTarget(),
     programmingVehicles: visibleVehicles
   }, buildCvPanelHandlers({
-    programmingVehicleHandlers: () => buildCvProgrammingVehicleHandlers(vehicle),
+    programmingVehicleHandlers: () => buildCvProgrammingVehicleHandlers(),
     chipHandlers: buildCvChipHandlers,
     readAllHandlers: buildCvReadAllHandlers,
     exportHandlers: buildCvExportHandlers,
@@ -1153,11 +1106,19 @@ function renderActiveControllerView() {
 
 async function sendDcControl() {
   try {
+    const voltageV = Number(appState.dcControl.voltageV || 0);
+    const direction = appState.dcControl.direction === "reverse" ? "reverse" : "forward";
     await syncControllerEndpoint();
-    await setDcControl(appState.dcControl.voltageV, appState.dcControl.direction);
-    const voltage = Number(appState.dcControl.voltageV || 0).toFixed(1);
-    const direction = appState.dcControl.direction === "reverse" ? "反向" : "正向";
-    setStatus(`DC ${voltage} V / ${direction}`);
+    await runControllerStatusRetry({
+      requiresFreshStatus: voltageV > 0,
+      requestFn: () => setDcControl(voltageV, direction),
+      setStatus,
+      readControllerInfo,
+      refreshState
+    });
+    const voltage = voltageV.toFixed(1);
+    const directionText = direction === "reverse" ? "反向" : "正向";
+    setStatus(`DC ${voltage} V / ${directionText}`);
     await refreshState();
   } catch (error) {
     setStatus(formatError(error));
@@ -1173,7 +1134,7 @@ async function saveCustomVehicleOrder(cabId, vehicleId, orderedVehicleIds) {
   });
   const nextVehicleIds = Array.isArray(orderedVehicleIds) && orderedVehicleIds.length
     ? mergeVisibleCustomOrder(cab, orderedVehicleIds)
-    : fallbackCustomOrder(vehicles, vehicleId);
+    : fallbackCustomOrder(vehicles, draggedVehicleId, vehicleId);
   if (!nextVehicleIds.length) {
     return;
   }
@@ -1183,8 +1144,8 @@ async function saveCustomVehicleOrder(cabId, vehicleId, orderedVehicleIds) {
   cab.sortDirection = "asc";
 }
 
-function fallbackCustomOrder(vehicles, targetVehicleId) {
-  const from = vehicles.findIndex((vehicle) => vehicle.id === draggedVehicleId);
+function fallbackCustomOrder(vehicles, draggedId, targetVehicleId) {
+  const from = vehicles.findIndex((vehicle) => vehicle.id === draggedId);
   const to = vehicles.findIndex((vehicle) => vehicle.id === targetVehicleId);
   if (from < 0 || to < 0 || from === to) {
     return [];
@@ -1218,36 +1179,9 @@ async function refreshState() {
   const [state, controllerInfo] = await Promise.all([getState(), getControllerInfo()]);
   replaceState(state);
   appState.controllerInfo = controllerInfo;
-  renderControllerKindOptions(elements, appState.capabilities);
-  renderImportFormatOptions(elements, appState.capabilities);
-  const controllerKind = appState.controller.kind || appState.capabilities.default_controller_kind;
-  elements.controllerKindSelect.value = controllerKind;
-  elements.controllerIp.value = appState.controller.ip || controllerDescriptor(controllerKind).default_ip || "";
+  syncControllerDescriptorControls(elements, appState);
+  renderImportCapabilities(elements, appState.capabilities);
   renderAll();
-}
-
-async function runTrackPowerRequestWithStatusRetry(powered, requestFn) {
-  try {
-    return await requestFn();
-  } catch (error) {
-    if (!powered || !isRetryableTrackPowerStatusError(error)) {
-      throw error;
-    }
-    setStatus("轨道状态未确认，正在重新读取控制器信息");
-    await readControllerInfo();
-    await refreshState();
-    return await requestFn();
-  }
-}
-
-function isRetryableTrackPowerStatusError(error) {
-  const warningSet = new Set(error.payload?.debug?.warnings || []);
-  return error.payload?.error?.type === "protocol_not_ready"
-    && (
-      warningSet.has("booster_status_unconfirmed")
-      || warningSet.has("booster_status_stale")
-      || warningSet.has("controller_not_confirmed")
-    );
 }
 
 async function initialize() {
@@ -1255,8 +1189,8 @@ async function initialize() {
     appState,
     elements,
     getCapabilities,
-    renderControllerKindOptions,
-    renderImportFormatOptions,
+    renderControllerCapabilities: syncControllerDescriptorControls,
+    renderImportCapabilities,
     setFunctionIconCatalog: (catalog) => {
       functionIconCatalog = catalog;
     },
@@ -1267,7 +1201,8 @@ async function initialize() {
     setStatus,
     controllerReadStatusMessage,
     controllerReadStatusDetail,
-    formatError
+    formatError,
+    persistentConfigurationStatus: () => persistentConfigurationStatus(appState)
   });
 }
 
@@ -1275,19 +1210,21 @@ wireAppEvents({
   elements,
   appState,
   importConfig,
+  runImportConfigWorkflow,
   setActiveView,
   setOperationMode,
   setProgrammingTarget,
   setGatewayBusy,
   openStatusDetailDialog,
   syncControllerEndpoint,
-  runTrackPowerRequestWithStatusRetry,
+  runControllerStatusRetry,
   setTrackPower,
+  readControllerInfo,
+  resetSelectedControllerConfig: handleResetSelectedControllerConfig,
   setStatus,
   operationModeName,
   refreshState,
   formatError,
-  importSelectedConfigFile,
   toggleVehicleSelectionMode,
   createNewVehicle,
   deleteSelectedVehicles,

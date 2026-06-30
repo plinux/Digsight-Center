@@ -14,7 +14,7 @@ export function buildCabWorkspaceHandlers(context) {
     };
   }
   return {
-    emptyText: `当前 ${operationModeName(operationMode)} 模式暂无车辆，请导入对应的 Z21 配置文件`,
+    emptyText: `当前 ${operationModeName(operationMode)} 模式暂无车辆，请导入对应的配置文件`,
     cabVehicles: {left: leftVehicles, right: rightVehicles},
     vehicles: appState.vehicles || [],
     consists: appState.consists || [],

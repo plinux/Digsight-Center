@@ -3,7 +3,6 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from server.api import ApiRouter
 from server.app_state import AppStateStore
 from server.importers.base import ConfigImportRequest, ConfigImportResult, ImportFormatDescriptor, ImportSource
 from server.importers.registry import ImportRegistry

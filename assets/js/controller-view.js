@@ -136,17 +136,17 @@ function renderTrackProfiles(container, profiles, handlers) {
     legend.textContent = profile.name || mode.toUpperCase();
     fieldset.append(
       legend,
-      labeledInput("电压 V", "number", profile.voltage_v ?? "", {
-        "data-field": "voltage_v",
+      labeledInput("目标电压 V", "number", profile.target_voltage_v ?? "", {
+        "data-field": "target_voltage_v",
         min: 0,
-        max: profile.max_voltage_v || "",
+        max: profile.max_target_voltage_v || "",
         step: 0.1,
         disabled: mode === "dc"
       }).label,
-      labeledInput("电流 mA", "number", profile.current_limit_ma ?? "", {
-        "data-field": "current_limit_ma",
+      labeledInput("目标限流 mA", "number", profile.target_current_limit_ma ?? "", {
+        "data-field": "target_current_limit_ma",
         min: 40,
-        max: profile.max_current_limit_ma || 10200,
+        max: profile.max_target_current_limit_ma || 10200,
         step: 40
       }).label
     );
@@ -162,8 +162,8 @@ function renderTrackProfiles(container, profiles, handlers) {
     for (const fieldset of form.querySelectorAll("fieldset")) {
       const mode = fieldset.dataset.mode;
       nextProfiles[mode] = {
-        voltage_v: Number(fieldset.querySelector('[data-field="voltage_v"]').value),
-        current_limit_ma: fieldset.querySelector('[data-field="current_limit_ma"]').value
+        target_voltage_v: Number(fieldset.querySelector('[data-field="target_voltage_v"]').value),
+        target_current_limit_ma: fieldset.querySelector('[data-field="target_current_limit_ma"]').value
       };
     }
     handlers.onSave?.({track_profiles: nextProfiles});
@@ -171,29 +171,33 @@ function renderTrackProfiles(container, profiles, handlers) {
   container.append(title, form);
 }
 
+function isBlankDisplayValue(value) {
+  return value === null || value === undefined || value === "";
+}
+
 function formatMetric(value, unit) {
-  if (value === null || value === undefined || value === "") {
+  if (isBlankDisplayValue(value)) {
     return "--";
   }
   return `${value}${unit}`;
 }
 
 function formatBoolean(value) {
-  if (value === null || value === undefined || value === "") {
+  if (isBlankDisplayValue(value)) {
     return "--";
   }
   return value ? "开启" : "关闭";
 }
 
 function formatBrightness(value) {
-  if (value === null || value === undefined || value === "") {
+  if (isBlankDisplayValue(value)) {
     return "--";
   }
   return `${value}`;
 }
 
 function formatScreenDirection(rawValue, label) {
-  if (rawValue === null || rawValue === undefined || rawValue === "") {
+  if (isBlankDisplayValue(rawValue)) {
     return "--";
   }
   return label ? `${label} / 原始值 ${rawValue}` : `原始值 ${rawValue}`;

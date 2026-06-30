@@ -60,17 +60,13 @@ class LocoControlApiSupport:
     )
     if error_response:
       return http_helpers.service_result(error_response)
-    first_result = target_results[0]
-    return response.success({
-      "vehicle_id": vehicle.get("id"),
-      "address": first_result["address"],
-      "speed": speed,
-      "direction": direction,
-      "request_hex": first_result["request_hex"],
-      "feedback": first_result["feedback"],
-      "control_mode": control_mode,
-      "targets": target_results,
-    }), 200
+    return self._loco_control_success_response(
+      vehicle.get("id"),
+      target_results,
+      control_mode,
+      speed=speed,
+      direction=direction,
+    )
 
   def _handle_function(self, request: dict, state: dict, vehicle: dict):
     try:
@@ -93,19 +89,15 @@ class LocoControlApiSupport:
     )
     if error_response:
       return http_helpers.service_result(error_response)
-    first_result = target_results[0]
-    return response.success({
-      "vehicle_id": vehicle.get("id"),
-      "address": first_result["address"],
-      "function_number": function_number,
-      "enabled": enabled,
-      "request_hex": first_result["request_hex"],
-      "feedback": first_result["feedback"],
-      "control_mode": control_mode,
-      "targets": target_results,
-    }), 200
+    return self._loco_control_success_response(
+      vehicle.get("id"),
+      target_results,
+      control_mode,
+      function_number=function_number,
+      enabled=enabled,
+    )
 
-  def handle_consist_speed(self, route: str, body: bytes, state: dict):
+  def handle_consist_operation(self, route: str, body: bytes, state: dict):
     unsupported = self.controller_api.controller_capability_failure(state["controller"], "loco_control", "consist_control")
     if unsupported:
       return unsupported
@@ -141,17 +133,26 @@ class LocoControlApiSupport:
     )
     if error_response:
       return http_helpers.service_result(error_response)
+    return self._loco_control_success_response(
+      consist_id,
+      target_results,
+      "consist",
+      speed=speed,
+      direction=direction,
+    )
+
+  def _loco_control_success_response(self, vehicle_id, target_results, control_mode, **fields):
     first_result = target_results[0]
-    return response.success({
-      "vehicle_id": consist_id,
+    payload = {
+      "vehicle_id": vehicle_id,
       "address": first_result["address"],
-      "speed": speed,
-      "direction": direction,
+      **fields,
       "request_hex": first_result["request_hex"],
       "feedback": first_result["feedback"],
-      "control_mode": "consist",
+      "control_mode": control_mode,
       "targets": target_results,
-    }), 200
+    }
+    return response.success(payload), 200
 
   def _loco_control_preflight(self, state: dict, operation_name: str):
     blocked = self.controller_service.digital_operation_mode_failure(state["controller"], operation_name)

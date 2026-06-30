@@ -4,6 +4,8 @@ ASSET_PUBLIC_PREFIX = "/assets/"
 MANUAL_ASSET_PUBLIC_PREFIX = "/manual/assets/"
 CONTROLLER_CONFIG_RELATIVE_PREFIX = "config/controllers/"
 CONTROLLER_CONFIG_PUBLIC_PREFIX = f"/{CONTROLLER_CONFIG_RELATIVE_PREFIX}"
+IMPORTER_CONFIG_PUBLIC_PREFIX = "/config/importers/"
+FUNCTION_ICON_MAPPING_PUBLIC_PREFIX = "/config/function-icon-mappings/"
 VEHICLE_IMAGE_PUBLIC_PREFIX = "/data/vehicle-images/"
 VEHICLE_TYPE_ICON_PUBLIC_PREFIX = "/assets/icons/vehicle-types/"
 

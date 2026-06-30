@@ -8,7 +8,13 @@ import sqlite3
 import uuid
 
 from server import models
+from server.controller_config_defaults import controller_default_config_rows
+from server.controllers.registry import default_controller_registry
 from server.importers.category_merge import shared_category_id, should_share_by_name
+from server.public_paths import (
+  ALLOWED_VEHICLE_IMAGE_PATH_PREFIXES,
+  VEHICLE_TYPE_ICON_PUBLIC_PREFIX,
+)
 
 
 VEHICLE_FIELDS = (
@@ -47,11 +53,7 @@ VEHICLE_UPDATE_COLUMNS = (
   "created_at",
   "updated_at",
 )
-
-ALLOWED_VEHICLE_IMAGE_PATH_PREFIXES = (
-  "/data/vehicle-images/",
-  "/assets/icons/vehicle-types/",
-)
+VEHICLE_LIST_ORDER_BY = "custom_sort_order, source_position IS NULL, source_position, name, address"
 
 FUNCTION_FIELDS = (
   "source_function_id",
@@ -70,8 +72,10 @@ FUNCTION_FIELDS = (
 REPLACEABLE_SEED_IMAGE_PATHS = {
   "",
   None,
-  "/assets/icons/vehicle-types/consist-group.svg",
+  f"{VEHICLE_TYPE_ICON_PUBLIC_PREFIX}consist-group.svg",
 }
+SEED_ELECTRIC_ICON_PATH = f"{VEHICLE_TYPE_ICON_PUBLIC_PREFIX}energy-electric.svg"
+SEED_CONSIST_ICON_PATH = f"{VEHICLE_TYPE_ICON_PUBLIC_PREFIX}consist-multiple-unit.svg"
 
 TRIGGER_MODE_TO_BUTTON_TYPE = {
   "toggle": 0,
@@ -102,7 +106,7 @@ INITIAL_TEST_VEHICLES = tuple(
       "custom_sort_order": sort_offset + 1,
       "name": f"{label} 测试车",
       "address": 3,
-      "image_path": "/assets/icons/vehicle-types/energy-electric.svg",
+      "image_path": SEED_ELECTRIC_ICON_PATH,
       "type": 0,
     },
     {
@@ -112,7 +116,7 @@ INITIAL_TEST_VEHICLES = tuple(
       "custom_sort_order": sort_offset + 2,
       "name": f"{label} 测试车 4",
       "address": 4,
-      "image_path": "/assets/icons/vehicle-types/energy-electric.svg",
+      "image_path": SEED_ELECTRIC_ICON_PATH,
       "type": 0,
     },
     {
@@ -122,7 +126,7 @@ INITIAL_TEST_VEHICLES = tuple(
       "custom_sort_order": sort_offset + 3,
       "name": f"{label} 3+4 重联",
       "address": 3,
-      "image_path": "/assets/icons/vehicle-types/consist-multiple-unit.svg",
+      "image_path": SEED_CONSIST_ICON_PATH,
       "type": 3,
       "sync_function_control": True,
       "consist_kind": "consist",
@@ -158,8 +162,9 @@ INITIAL_TEST_CONSISTS = tuple(
 
 
 class VehicleStore:
-  def __init__(self, path: Path):
+  def __init__(self, path: Path, *, controller_registry=None):
     self.path = Path(path)
+    self.controller_registry = controller_registry or default_controller_registry()
     self.path.parent.mkdir(parents=True, exist_ok=True)
     self._initialize()
 
@@ -167,6 +172,73 @@ class VehicleStore:
     with self._connect() as con:
       schema = Path(__file__).with_name("vehicle_schema.sql").read_text(encoding="utf-8")
       con.executescript(schema)
+      self._upsert_controller_default_configs(con)
+
+  def _upsert_controller_default_configs(self, con) -> None:
+    now = self._now()
+    for row in controller_default_config_rows(self.controller_registry):
+      con.execute(
+        """
+        INSERT INTO controller_default_configs (
+          kind,
+          config_file_name,
+          config_json,
+          sort_order,
+          created_at,
+          updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(kind) DO UPDATE SET
+          config_file_name = excluded.config_file_name,
+          config_json = excluded.config_json,
+          sort_order = excluded.sort_order,
+          updated_at = excluded.updated_at
+        """,
+        (
+          row["kind"],
+          row["config_file_name"],
+          json.dumps(row["config"], ensure_ascii=False, sort_keys=True),
+          row["sort_order"],
+          now,
+          now,
+        ),
+      )
+
+  def list_controller_default_configs(self) -> list[dict]:
+    with self._connect() as con:
+      rows = con.execute(
+        """
+        SELECT *
+        FROM controller_default_configs
+        ORDER BY sort_order, kind
+        """
+      ).fetchall()
+      return [self._controller_default_config_from_row(row) for row in rows]
+
+  def controller_default_config_for_kind(self, controller_kind: str) -> dict | None:
+    with self._connect() as con:
+      row = con.execute(
+        """
+        SELECT *
+        FROM controller_default_configs
+        WHERE kind = ?
+        """,
+        (controller_kind,),
+      ).fetchone()
+      if row is None:
+        return None
+      return self._controller_default_config_from_row(row)["config"]
+
+  @staticmethod
+  def _controller_default_config_from_row(row) -> dict:
+    return {
+      "kind": row["kind"],
+      "config_file_name": row["config_file_name"],
+      "config": json.loads(row["config_json"]),
+      "sort_order": row["sort_order"],
+      "created_at": row["created_at"],
+      "updated_at": row["updated_at"],
+    }
 
   def ensure_initial_test_vehicles(self) -> None:
     """Seed the runtime vehicle library with the minimal N/HO/G test fixtures."""
@@ -228,12 +300,12 @@ class VehicleStore:
 
   def list_vehicles(self) -> list[dict]:
     with self._connect() as con:
-      rows = con.execute("SELECT * FROM vehicles ORDER BY custom_sort_order, source_position IS NULL, source_position, name, address").fetchall()
+      rows = con.execute(f"SELECT * FROM vehicles ORDER BY {VEHICLE_LIST_ORDER_BY}").fetchall()
       return [self._vehicle_from_row(con, row) for row in rows]
 
   def list_vehicles_with_details(self) -> list[dict]:
     with self._connect() as con:
-      rows = con.execute("SELECT * FROM vehicles ORDER BY custom_sort_order, source_position IS NULL, source_position, name, address").fetchall()
+      rows = con.execute(f"SELECT * FROM vehicles ORDER BY {VEHICLE_LIST_ORDER_BY}").fetchall()
       vehicles = [self._vehicle_from_row_without_categories(row) for row in rows]
       vehicle_ids = [vehicle["id"] for vehicle in vehicles]
       categories_by_vehicle = self._categories_for_vehicles(con, vehicle_ids)
@@ -442,7 +514,7 @@ class VehicleStore:
     self._insert_import_functions(con, import_result)
     self._insert_import_consists(con, import_result, source_format, source_key, imported_at)
     self._delete_unreferenced_import_categories(con, source_format, source_keys)
-    self._insert_import_record(con, import_result, source_key, imported_at)
+    self._insert_import_record(con, import_result, source_format, source_key, imported_at)
     return import_result.summary
 
   def _import_replace_source_keys(self, import_result, default_source_key: str) -> list[str]:
@@ -524,12 +596,17 @@ class VehicleStore:
     for consist in import_result.consists:
       self._insert_consist(con, self._with_import_source(consist, source_format, source_key), imported_at)
 
-  def _insert_import_record(self, con, import_result, source_key: str, imported_at: str) -> None:
+  def _insert_import_record(self, con, import_result, source_format: str, source_key: str, imported_at: str) -> None:
     import_id = f"{source_key}-import-{uuid.uuid4().hex}"
     con.execute(
-      "INSERT INTO vehicle_imports (id, file_name, summary_json, imported_at) VALUES (?, ?, ?, ?)",
+      """
+      INSERT INTO vehicle_imports (id, source_format, source_key, file_name, summary_json, imported_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      """,
       (
         import_id,
+        source_format,
+        source_key,
         import_result.summary.get("file_name", "import.config"),
         json.dumps(import_result.summary, ensure_ascii=False, sort_keys=True),
         imported_at,
@@ -567,23 +644,10 @@ class VehicleStore:
       )
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       """,
-      (
-        data["id"],
-        data.get("source") or data.get("source_key") or "",
-        data.get("source_format") or "",
-        data.get("source_key") or "",
-        self._text_or_none(data.get("source_category_id")),
-        self._validate_track_mode(data.get("track_mode", "")),
-        self._required_text(data.get("name"), "category name"),
-        data.get("description", ""),
-        int(data.get("sort_order", 0) or 0),
-        now,
-        now,
-      ),
+      self._category_values(data, now),
     )
 
   def _upsert_import_category(self, con, data: dict, now: str) -> None:
-    name = self._required_text(data.get("name"), "category name")
     con.execute(
       """
       INSERT INTO categories (
@@ -601,19 +665,7 @@ class VehicleStore:
         track_mode = excluded.track_mode,
         updated_at = excluded.updated_at
       """,
-      (
-        data["id"],
-        data.get("source") or data.get("source_key") or "",
-        data.get("source_format") or "",
-        data.get("source_key") or "",
-        self._text_or_none(data.get("source_category_id")),
-        self._validate_track_mode(data.get("track_mode", "")),
-        name,
-        data.get("description", ""),
-        int(data.get("sort_order", 0) or 0),
-        now,
-        now,
-      ),
+      self._category_values(data, now),
     )
 
   def _delete_unreferenced_import_categories(self, con, source_format: str, source_keys: list[str]) -> None:
@@ -716,17 +768,7 @@ class VehicleStore:
     return category
 
   def _categories_for_vehicle(self, con, vehicle_id: str) -> list[dict]:
-    rows = con.execute(
-      """
-      SELECT c.*
-      FROM categories c
-      JOIN vehicle_categories vc ON vc.category_id = c.id
-      WHERE vc.vehicle_id = ?
-      ORDER BY c.sort_order, c.name
-      """,
-      (vehicle_id,),
-    ).fetchall()
-    return [self._category_from_row(row) for row in rows]
+    return self._categories_for_vehicles(con, [vehicle_id]).get(vehicle_id, [])
 
   def _categories_for_vehicles(self, con, vehicle_ids: list[str]) -> dict[str, list[dict]]:
     if not vehicle_ids:
@@ -750,16 +792,7 @@ class VehicleStore:
     return categories_by_vehicle
 
   def _functions_for_vehicle(self, con, vehicle_id: str) -> list[dict]:
-    rows = con.execute(
-      """
-      SELECT *
-      FROM vehicle_functions
-      WHERE vehicle_id = ?
-      ORDER BY position, function_number
-      """,
-      (vehicle_id,),
-    ).fetchall()
-    return [self._function_from_row(row) for row in rows]
+    return self._functions_for_vehicles(con, [vehicle_id]).get(vehicle_id, [])
 
   def _functions_for_vehicles(self, con, vehicle_ids: list[str]) -> dict[str, list[dict]]:
     if not vehicle_ids:
@@ -789,16 +822,7 @@ class VehicleStore:
     return function
 
   def _members_for_consist(self, con, consist_id: str) -> list[dict]:
-    member_rows = con.execute(
-      """
-      SELECT *
-      FROM consist_members
-      WHERE consist_id = ?
-      ORDER BY member_order
-      """,
-      (consist_id,),
-    ).fetchall()
-    return [self._consist_member_from_row(member) for member in member_rows]
+    return self._members_for_consists(con, [consist_id]).get(consist_id, [])
 
   def _members_for_consists(self, con, consist_ids: list[str]) -> dict[str, list[dict]]:
     if not consist_ids:
@@ -867,6 +891,21 @@ class VehicleStore:
       updated_at,
     )
 
+  def _category_values(self, data: dict, now: str) -> tuple:
+    return (
+      data["id"],
+      data.get("source") or data.get("source_key") or "",
+      data.get("source_format") or "",
+      data.get("source_key") or "",
+      self._text_or_none(data.get("source_category_id")),
+      self._validate_track_mode(data.get("track_mode", "")),
+      self._required_text(data.get("name"), "category name"),
+      data.get("description", ""),
+      int(data.get("sort_order", 0) or 0),
+      now,
+      now,
+    )
+
   def _validate_image_path(self, value) -> str:
     image_path = str(value or "").strip()
     if not image_path:
@@ -880,7 +919,8 @@ class VehicleStore:
         file_name = image_path[len(prefix):]
         if file_name and "/" not in file_name and file_name not in {".", ".."} and ".." not in file_name:
           return image_path
-    raise ValueError("vehicle image path must be under /data/vehicle-images/ or /assets/icons/vehicle-types/")
+    allowed = " or ".join(ALLOWED_VEHICLE_IMAGE_PATH_PREFIXES)
+    raise ValueError(f"vehicle image path must be under {allowed}")
 
   def _vehicle_update_assignments(self) -> str:
     return ", ".join(f"{column} = ?" for column in VEHICLE_UPDATE_COLUMNS)

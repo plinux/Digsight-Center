@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 import socket
+import tempfile
 import threading
 import time
 from types import SimpleNamespace
@@ -11,7 +12,9 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from server import response
+from server.api import ApiRouter
 import server.main as gateway_main
+from server.app_state import AppStateStore, default_state
 from server.controllers.registry import ControllerRegistry
 from server.importers.base import ImportFormatDescriptor
 from server.importers.registry import ImportRegistry
@@ -37,6 +40,18 @@ class FakeConfigImporter:
     raise NotImplementedError
 
 
+class MappingOnlyConfigImporter:
+  descriptor = ImportFormatDescriptor(
+    format="mapping_only_layout_config",
+    label="Mapping Only Layout Config",
+    extensions=[".mapping-only"],
+    function_icon_mapping_files=["/config/function-icon-mappings/mapping-only.json"],
+  )
+
+  def import_bytes(self, request):
+    raise NotImplementedError
+
+
 class SilentDigsightHandler(DigsightHandler):
   def log_message(self, format, *args):
     return
@@ -45,6 +60,25 @@ class SilentDigsightHandler(DigsightHandler):
 class GatewaySecurityTest(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
+    cls.original_gateway_context = gateway_main.GATEWAY_CONTEXT
+    cls.gateway_temp_dir = tempfile.TemporaryDirectory()
+    cls.gateway_temp_root = Path(cls.gateway_temp_dir.name)
+    cls.gateway_state_store = AppStateStore(cls.gateway_temp_root / "data" / "app-state.json")
+    cls.gateway_vehicle_store = VehicleStore(cls.gateway_temp_root / "data" / "vehicles.sqlite3")
+    cls.gateway_vehicle_store.ensure_initial_test_vehicles()
+    cls.gateway_api_router = ApiRouter(
+      cls.gateway_state_store,
+      cls.gateway_temp_root / "data" / "vehicle-images",
+      vehicle_store=cls.gateway_vehicle_store,
+    )
+    gateway_main.GATEWAY_CONTEXT = SimpleNamespace(
+      project_root=gateway_main.PROJECT_ROOT,
+      state_store=cls.gateway_state_store,
+      vehicle_store=cls.gateway_vehicle_store,
+      api_router=cls.gateway_api_router,
+      started_at=0,
+      hardware_session_lock=threading.Lock(),
+    )
     cls.server = ThreadingHTTPServer(("127.0.0.1", 0), SilentDigsightHandler)
     cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
     cls.thread.start()
@@ -55,6 +89,8 @@ class GatewaySecurityTest(unittest.TestCase):
     cls.server.shutdown()
     cls.server.server_close()
     cls.thread.join(timeout=2)
+    gateway_main.GATEWAY_CONTEXT = cls.original_gateway_context
+    cls.gateway_temp_dir.cleanup()
 
   def fetch(self, path: str):
     try:
@@ -98,6 +134,36 @@ class GatewaySecurityTest(unittest.TestCase):
         return error.code, error.read()
       finally:
         error.close()
+
+  def post_track_power_into(self, result: dict) -> None:
+    result["status"], result["body"] = self.post(
+      "/api/track-power",
+      b'{"powered":true}',
+      JSON_CLIENT_HEADERS,
+    )
+
+  def project_controller_config_path(self) -> Path:
+    config_file_name = gateway_main.default_controller_registry().config_file_name("digsight_controller")
+    return gateway_main.PROJECT_ROOT / "config" / "controllers" / config_file_name
+
+  def runtime_controller_config_path(self) -> Path:
+    config_file_name = gateway_main.default_controller_registry().config_file_name("digsight_controller")
+    return self.gateway_temp_root / "config" / "controllers" / config_file_name
+
+  @contextmanager
+  def gateway_context(self, *, state_store, api_router, vehicle_store=None):
+    original_context = gateway_main.GATEWAY_CONTEXT
+    gateway_main.GATEWAY_CONTEXT = SimpleNamespace(
+      project_root=gateway_main.PROJECT_ROOT,
+      state_store=state_store,
+      vehicle_store=vehicle_store,
+      api_router=api_router,
+      started_at=0,
+    )
+    try:
+      yield
+    finally:
+      gateway_main.GATEWAY_CONTEXT = original_context
 
   def raw_request(self, request_text: str):
     host, port = self.server.server_address
@@ -229,6 +295,14 @@ class GatewaySecurityTest(unittest.TestCase):
       import_registry=registry,
     ))
 
+  def test_static_allow_list_includes_mapping_only_importer_files(self):
+    registry = ImportRegistry(default_format="mapping_only_layout_config")
+    registry.register(MappingOnlyConfigImporter(), default=True)
+    self.assertTrue(is_public_static_path(
+      "/config/function-icon-mappings/mapping-only.json",
+      import_registry=registry,
+    ))
+
   def test_static_handler_uses_active_import_registry_public_files(self):
     class FakeStaticRouter:
       def __init__(self, import_registry):
@@ -238,25 +312,39 @@ class GatewaySecurityTest(unittest.TestCase):
     registry = ImportRegistry(default_format="fake_layout_config")
     registry.register(FakeConfigImporter(), default=True)
     fake_file = gateway_main.PROJECT_ROOT / "config" / "function-icon-mappings" / "fake.json"
-    original_context = gateway_main.GATEWAY_CONTEXT
     try:
       fake_file.write_text('{"ok": true}\n', encoding="utf-8")
-      gateway_main.GATEWAY_CONTEXT = SimpleNamespace(
-        project_root=gateway_main.PROJECT_ROOT,
-        state_store=None,
-        vehicle_store=None,
-        api_router=FakeStaticRouter(registry),
-        started_at=0,
-      )
-      status, body = self.fetch("/config/function-icon-mappings/fake.json")
-      self.assertEqual(status, 200)
-      self.assertEqual(json.loads(body.decode("utf-8")), {"ok": True})
+      with self.gateway_context(state_store=None, api_router=FakeStaticRouter(registry)):
+        status, body = self.fetch("/config/function-icon-mappings/fake.json")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body.decode("utf-8")), {"ok": True})
 
-      status, headers = self.head("/config/function-icon-mappings/fake.json")
-      self.assertEqual(status, 200)
-      self.assertIn("application/json", headers.get("Content-Type", ""))
+        status, headers = self.head("/config/function-icon-mappings/fake.json")
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", headers.get("Content-Type", ""))
     finally:
-      gateway_main.GATEWAY_CONTEXT = original_context
+      fake_file.unlink(missing_ok=True)
+
+  def test_static_handler_uses_active_import_registry_mapping_files(self):
+    class FakeStaticRouter:
+      def __init__(self, import_registry):
+        self.controller_registry = ControllerRegistry()
+        self.import_registry = import_registry
+
+    registry = ImportRegistry(default_format="mapping_only_layout_config")
+    registry.register(MappingOnlyConfigImporter(), default=True)
+    fake_file = gateway_main.PROJECT_ROOT / "config" / "function-icon-mappings" / "mapping-only.json"
+    try:
+      fake_file.write_text('{"mapping": true}\n', encoding="utf-8")
+      with self.gateway_context(state_store=None, api_router=FakeStaticRouter(registry)):
+        status, body = self.fetch("/config/function-icon-mappings/mapping-only.json")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body.decode("utf-8")), {"mapping": True})
+
+        status, headers = self.head("/config/function-icon-mappings/mapping-only.json")
+        self.assertEqual(status, 200)
+        self.assertIn("application/json", headers.get("Content-Type", ""))
+    finally:
       fake_file.unlink(missing_ok=True)
 
   def test_gateway_mutation_route_metadata_is_centralized(self):
@@ -351,7 +439,7 @@ class GatewaySecurityTest(unittest.TestCase):
     self.assertEqual(payload["error"]["type"], "request_too_large")
 
   def test_malformed_json_returns_structured_400(self):
-    status, payload_body = self.post("/api/controller/connect", b"{", JSON_CLIENT_HEADERS)
+    status, payload_body = self.request("PATCH", "/api/controller/settings", b"{", JSON_CLIENT_HEADERS)
     payload = json.loads(payload_body.decode("utf-8"))
     self.assertEqual(status, 400)
     self.assertEqual(payload["error"]["type"], "invalid_json")
@@ -359,7 +447,7 @@ class GatewaySecurityTest(unittest.TestCase):
   def test_json_mutation_rejects_non_object_json_roots(self):
     for body in [b"[]", b"null", b'"text"', b"42"]:
       with self.subTest(body=body):
-        status, payload_body = self.post("/api/controller/connect", body, JSON_CLIENT_HEADERS)
+        status, payload_body = self.request("PATCH", "/api/controller/settings", body, JSON_CLIENT_HEADERS)
         payload = json.loads(payload_body.decode("utf-8"))
         self.assertEqual(status, 400)
         self.assertEqual(payload["error"]["type"], "invalid_json")
@@ -393,6 +481,24 @@ class GatewaySecurityTest(unittest.TestCase):
     self.assertEqual(status, 415)
     self.assertEqual(payload["error"]["type"], "unsupported_media_type")
 
+  def test_live_gateway_mutation_does_not_write_project_controller_config(self):
+    project_config_path = self.project_controller_config_path()
+    before = project_config_path.read_bytes() if project_config_path.exists() else None
+
+    status, body = self.request(
+      "PATCH",
+      "/api/controller/settings",
+      b'{"track_mode":"ho"}',
+      JSON_CLIENT_HEADERS,
+    )
+
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 200)
+    self.assertTrue(payload["ok"])
+    after = project_config_path.read_bytes() if project_config_path.exists() else None
+    self.assertEqual(after, before)
+    self.assertTrue(self.runtime_controller_config_path().exists())
+
   def test_gateway_routes_patch_delete_and_import_mutations_through_state_store(self):
     class FakeStateStore:
       def __init__(self):
@@ -421,17 +527,8 @@ class GatewaySecurityTest(unittest.TestCase):
           "options": options or {},
         }), 200
 
-    original_context = gateway_main.GATEWAY_CONTEXT
     fake_store = FakeStateStore()
-    try:
-      gateway_main.GATEWAY_CONTEXT = SimpleNamespace(
-        project_root=gateway_main.PROJECT_ROOT,
-        state_store=fake_store,
-        vehicle_store=None,
-        api_router=FakeRouter(),
-        started_at=0,
-      )
-
+    with self.gateway_context(state_store=fake_store, api_router=FakeRouter()):
       status, body = self.request("PATCH", "/api/controller/settings", b'{"track_mode":"ho"}', JSON_CLIENT_HEADERS)
       payload = json.loads(body.decode("utf-8"))
       self.assertEqual(status, 200)
@@ -482,8 +579,68 @@ class GatewaySecurityTest(unittest.TestCase):
       self.assertEqual(status, 404)
       self.assertEqual(payload["error"]["type"], "not_found")
       self.assertEqual([persist({}) for persist in fake_store.persist_values], [{"vehicles": []}] * 3)
-    finally:
-      gateway_main.GATEWAY_CONTEXT = original_context
+
+  def test_import_config_route_uses_real_vehicle_store_persistence(self):
+    with tempfile.TemporaryDirectory() as temp_dir_name:
+      temp_dir = Path(temp_dir_name)
+      state_store = AppStateStore(temp_dir / "data" / "app-state.json")
+      vehicle_store = VehicleStore(temp_dir / "data" / "vehicles.sqlite3")
+      router = ApiRouter(
+        state_store,
+        temp_dir / "data" / "vehicle-images",
+        vehicle_store=vehicle_store,
+      )
+      z21_path = write_minimal_z21_archive(temp_dir / "fixtures", file_name="HO.z21")
+
+      with self.gateway_context(state_store=state_store, api_router=router, vehicle_store=vehicle_store):
+        status, body = self.post(
+          "/api/import/config",
+          z21_path.read_bytes(),
+          {
+            **IMPORT_CLIENT_HEADERS,
+            "Content-Type": "application/octet-stream",
+            "X-Import-Format": "z21_layout_config",
+            "X-File-Name": z21_path.name,
+          },
+        )
+
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 200)
+      self.assertTrue(payload["ok"])
+      self.assertEqual(payload["data"]["summary"]["vehicles_imported"], 1)
+      self.assertEqual(payload["data"]["summary"]["track_mode"], "ho")
+      self.assertEqual(vehicle_store.list_vehicles()[0]["name"], "测试车")
+      with vehicle_store._connect() as con:
+        import_rows = con.execute(
+          "SELECT source_format, source_key, file_name FROM vehicle_imports"
+        ).fetchall()
+      self.assertEqual([tuple(row) for row in import_rows], [("z21_layout_config", "z21", "HO.z21")])
+
+  def test_gateway_rejects_malformed_mutation_paths_without_normpath_dispatch(self):
+    class FakeStateStore:
+      def update(self, mutator, *, persist=None):
+        mutator(default_state())
+
+    with self.gateway_context(state_store=FakeStateStore(), api_router=ApiRouter(None)):
+      cases = [
+        ("POST", "/api/vehicles/", b'{"name":"test","address":3}', JSON_CLIENT_HEADERS),
+        ("PATCH", "/api/vehicles/", b'{"name":"test"}', JSON_CLIENT_HEADERS),
+        ("DELETE", "/api/vehicles/", b"", CLIENT_HEADERS),
+        ("POST", "/api/categories/", b'{"name":"test"}', JSON_CLIENT_HEADERS),
+        ("DELETE", "/api/categories/", b"", CLIENT_HEADERS),
+        ("POST", "/api/consists/", b'{"name":"test","members":[]}', JSON_CLIENT_HEADERS),
+        ("PATCH", "/api/consists/", b'{"name":"test"}', JSON_CLIENT_HEADERS),
+        ("DELETE", "/api/consists/", b"", CLIENT_HEADERS),
+        ("POST", "/api/consists/c1/speed/", b'{"speed":1}', JSON_CLIENT_HEADERS),
+        ("DELETE", "/api/categories/category-1/", b"", CLIENT_HEADERS),
+      ]
+      for method, path, body, headers in cases:
+        with self.subTest(method=method, path=path):
+          status, payload_body = self.request(method, path, body, headers)
+          payload = json.loads(payload_body.decode("utf-8"))
+          self.assertEqual(status, 404)
+          self.assertEqual(payload["error"]["type"], "not_found")
+          self.assertEqual(payload["error"]["detail"], path)
 
   def test_controller_settings_apply_to_device_uses_hardware_lock_after_body_read(self):
     class FakeStateStore:
@@ -520,22 +677,13 @@ class GatewaySecurityTest(unittest.TestCase):
           "expected_revision": self.expected_revision,
         }), 200
 
-    original_context = gateway_main.GATEWAY_CONTEXT
     fake_store = FakeStateStore()
     fake_router = FakeRouter()
-    try:
-      gateway_main.GATEWAY_CONTEXT = SimpleNamespace(
-        project_root=gateway_main.PROJECT_ROOT,
-        state_store=fake_store,
-        vehicle_store=None,
-        api_router=fake_router,
-        started_at=0,
-      )
-
+    with self.gateway_context(state_store=fake_store, api_router=fake_router):
       status, body = self.request(
         "PATCH",
         "/api/controller/settings",
-        b'{"apply_to_device":true,"track_profiles":{"ho":{"current_limit_ma":4000}}}',
+        b'{"apply_to_device":true,"track_profiles":{"ho":{"target_current_limit_ma":4000}}}',
         JSON_CLIENT_HEADERS,
       )
       payload = json.loads(body.decode("utf-8"))
@@ -543,9 +691,7 @@ class GatewaySecurityTest(unittest.TestCase):
       self.assertEqual(payload["data"]["expected_revision"], 7)
       self.assertTrue(fake_store.load_snapshot_called)
       self.assertFalse(fake_store.update_called)
-      self.assertEqual(fake_router.body, b'{"apply_to_device":true,"track_profiles":{"ho":{"current_limit_ma":4000}}}')
-    finally:
-      gateway_main.GATEWAY_CONTEXT = original_context
+      self.assertEqual(fake_router.body, b'{"apply_to_device":true,"track_profiles":{"ho":{"target_current_limit_ma":4000}}}')
 
   def test_cv_read_all_cancel_is_not_blocked_by_long_read_all_request(self):
     class FakeStateStore:
@@ -576,7 +722,6 @@ class GatewaySecurityTest(unittest.TestCase):
           return response.success({"path": path, "cancelled": True}), 200
         return response.failure("unexpected_route", "Unexpected route", path), 500
 
-    original_context = gateway_main.GATEWAY_CONTEXT
     fake_store = FakeStateStore()
     fake_router = FakeRouter()
     read_all_result = {}
@@ -588,35 +733,28 @@ class GatewaySecurityTest(unittest.TestCase):
         JSON_CLIENT_HEADERS,
       )
 
-    try:
-      gateway_main.GATEWAY_CONTEXT = SimpleNamespace(
-        project_root=gateway_main.PROJECT_ROOT,
-        state_store=fake_store,
-        vehicle_store=None,
-        api_router=fake_router,
-        started_at=0,
-      )
-      thread = threading.Thread(target=run_read_all, daemon=True)
-      thread.start()
-      self.assertTrue(fake_router.read_all_started.wait(1), "read-all route did not start")
+    with self.gateway_context(state_store=fake_store, api_router=fake_router):
+      try:
+        thread = threading.Thread(target=run_read_all, daemon=True)
+        thread.start()
+        self.assertTrue(fake_router.read_all_started.wait(1), "read-all route did not start")
 
-      started = time.monotonic()
-      status, body = self.post(
-        "/api/cv/read-all/cancel",
-        b'{"session_id":"session-lock-test"}',
-        JSON_CLIENT_HEADERS,
-      )
-      elapsed = time.monotonic() - started
-      payload = json.loads(body.decode("utf-8"))
-      self.assertEqual(status, 200)
-      self.assertTrue(payload["data"]["cancelled"])
-      self.assertLess(elapsed, 0.5)
-      self.assertFalse(fake_store.update_called)
-    finally:
-      fake_router.release_read_all.set()
-      if "thread" in locals():
-        thread.join(1)
-      gateway_main.GATEWAY_CONTEXT = original_context
+        started = time.monotonic()
+        status, body = self.post(
+          "/api/cv/read-all/cancel",
+          b'{"session_id":"session-lock-test"}',
+          JSON_CLIENT_HEADERS,
+        )
+        elapsed = time.monotonic() - started
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["data"]["cancelled"])
+        self.assertLess(elapsed, 0.5)
+        self.assertFalse(fake_store.update_called)
+      finally:
+        fake_router.release_read_all.set()
+        if "thread" in locals():
+          thread.join(1)
 
   def test_cv_read_all_blocks_other_hardware_session_until_finished(self):
     class FakeStateStore:
@@ -649,7 +787,6 @@ class GatewaySecurityTest(unittest.TestCase):
           return response.success({"path": path, "finished": True}), 200
         return response.failure("unexpected_route", "Unexpected route", path), 500
 
-    original_context = gateway_main.GATEWAY_CONTEXT
     fake_router = FakeRouter()
     read_all_result = {}
     track_result = {}
@@ -661,42 +798,28 @@ class GatewaySecurityTest(unittest.TestCase):
         JSON_CLIENT_HEADERS,
       )
 
-    def run_track_power():
-      track_result["status"], track_result["body"] = self.post(
-        "/api/track-power",
-        b'{"powered":true}',
-        JSON_CLIENT_HEADERS,
-      )
+    with self.gateway_context(state_store=FakeStateStore(), api_router=fake_router):
+      try:
+        read_thread = threading.Thread(target=run_read_all, daemon=True)
+        read_thread.start()
+        self.assertTrue(fake_router.read_all_started.wait(1), "read-all route did not start")
 
-    try:
-      gateway_main.GATEWAY_CONTEXT = SimpleNamespace(
-        project_root=gateway_main.PROJECT_ROOT,
-        state_store=FakeStateStore(),
-        vehicle_store=None,
-        api_router=fake_router,
-        started_at=0,
-      )
-      read_thread = threading.Thread(target=run_read_all, daemon=True)
-      read_thread.start()
-      self.assertTrue(fake_router.read_all_started.wait(1), "read-all route did not start")
+        track_thread = threading.Thread(target=self.post_track_power_into, args=(track_result,), daemon=True)
+        track_thread.start()
+        time.sleep(0.2)
+        self.assertFalse(fake_router.track_power_entered.is_set(), "track-power entered while read-all was active")
 
-      track_thread = threading.Thread(target=run_track_power, daemon=True)
-      track_thread.start()
-      time.sleep(0.2)
-      self.assertFalse(fake_router.track_power_entered.is_set(), "track-power entered while read-all was active")
-
-      fake_router.release_read_all.set()
-      read_thread.join(1)
-      track_thread.join(1)
-      self.assertEqual(read_all_result["status"], 200)
-      self.assertEqual(track_result["status"], 200)
-      self.assertTrue(fake_router.track_power_entered.is_set())
-    finally:
-      fake_router.release_read_all.set()
-      for thread in (locals().get("read_thread"), locals().get("track_thread")):
-        if thread:
-          thread.join(1)
-      gateway_main.GATEWAY_CONTEXT = original_context
+        fake_router.release_read_all.set()
+        read_thread.join(1)
+        track_thread.join(1)
+        self.assertEqual(read_all_result["status"], 200)
+        self.assertEqual(track_result["status"], 200)
+        self.assertTrue(fake_router.track_power_entered.is_set())
+      finally:
+        fake_router.release_read_all.set()
+        for thread in (locals().get("read_thread"), locals().get("track_thread")):
+          if thread:
+            thread.join(1)
 
   def test_hardware_mutation_does_not_block_regular_state_update(self):
     class FakeStateStore:
@@ -733,42 +856,27 @@ class GatewaySecurityTest(unittest.TestCase):
           return response.success({"path": path, "created": True}), 200
         return response.failure("unexpected_route", "Unexpected route", path), 500
 
-    original_context = gateway_main.GATEWAY_CONTEXT
     fake_store = FakeStateStore()
     fake_router = FakeRouter()
     track_result = {}
 
-    def run_track_power():
-      track_result["status"], track_result["body"] = self.post(
-        "/api/track-power",
-        b'{"powered":true}',
-        JSON_CLIENT_HEADERS,
-      )
+    with self.gateway_context(state_store=fake_store, api_router=fake_router):
+      try:
+        thread = threading.Thread(target=self.post_track_power_into, args=(track_result,), daemon=True)
+        thread.start()
+        self.assertTrue(fake_router.track_started.wait(1), "track-power route did not start")
 
-    try:
-      gateway_main.GATEWAY_CONTEXT = SimpleNamespace(
-        project_root=gateway_main.PROJECT_ROOT,
-        state_store=fake_store,
-        vehicle_store=None,
-        api_router=fake_router,
-        started_at=0,
-      )
-      thread = threading.Thread(target=run_track_power, daemon=True)
-      thread.start()
-      self.assertTrue(fake_router.track_started.wait(1), "track-power route did not start")
-
-      started = time.monotonic()
-      status, body = self.post("/api/vehicles", b'{"name":"test","address":3}', JSON_CLIENT_HEADERS)
-      elapsed = time.monotonic() - started
-      payload = json.loads(body.decode("utf-8"))
-      self.assertEqual(status, 200)
-      self.assertTrue(payload["data"]["created"])
-      self.assertLess(elapsed, 0.5)
-    finally:
-      fake_router.release_track.set()
-      if "thread" in locals():
-        thread.join(1)
-      gateway_main.GATEWAY_CONTEXT = original_context
+        started = time.monotonic()
+        status, body = self.post("/api/vehicles", b'{"name":"test","address":3}', JSON_CLIENT_HEADERS)
+        elapsed = time.monotonic() - started
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["data"]["created"])
+        self.assertLess(elapsed, 0.5)
+      finally:
+        fake_router.release_track.set()
+        if "thread" in locals():
+          thread.join(1)
 
   def test_hardware_mutation_returns_conflict_when_runtime_changes_before_save(self):
     class FakeStateStore:
@@ -793,21 +901,11 @@ class GatewaySecurityTest(unittest.TestCase):
         }
         return response.success({"path": path}), 200
 
-    original_context = gateway_main.GATEWAY_CONTEXT
-    try:
-      gateway_main.GATEWAY_CONTEXT = SimpleNamespace(
-        project_root=gateway_main.PROJECT_ROOT,
-        state_store=FakeStateStore(),
-        vehicle_store=None,
-        api_router=FakeRouter(),
-        started_at=0,
-      )
+    with self.gateway_context(state_store=FakeStateStore(), api_router=FakeRouter()):
       status, body = self.post("/api/track-power", b'{"powered":true}', JSON_CLIENT_HEADERS)
       payload = json.loads(body.decode("utf-8"))
       self.assertEqual(status, 409)
       self.assertEqual(payload["error"]["type"], "controller_runtime_changed")
-    finally:
-      gateway_main.GATEWAY_CONTEXT = original_context
 
 
 if __name__ == "__main__":

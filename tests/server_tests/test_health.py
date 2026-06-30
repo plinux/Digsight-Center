@@ -2,6 +2,7 @@ import json
 import importlib.util
 import inspect
 from pathlib import Path
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -12,11 +13,20 @@ from server.main import add_no_store_headers, build_health_payload, parse_gatewa
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PROCESS_HELPER_PATH = PROJECT_ROOT / "scripts" / "digsight_web_process.py"
+CHECK_COVERAGE_PATH = PROJECT_ROOT / "scripts" / "check_coverage.py"
 
 
 def load_process_helper():
   spec = importlib.util.spec_from_file_location("digsight_web_process", PROCESS_HELPER_PATH)
   module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  return module
+
+
+def load_check_coverage_script():
+  spec = importlib.util.spec_from_file_location("check_coverage", CHECK_COVERAGE_PATH)
+  module = importlib.util.module_from_spec(spec)
+  sys.modules[spec.name] = module
   spec.loader.exec_module(module)
   return module
 
@@ -188,6 +198,25 @@ class HealthTest(unittest.TestCase):
     self.assertIn("sys.version_info", content)
     self.assertIn("Python 3.10", content)
     self.assertIn("Use --python", content)
+
+  def test_check_coverage_script_checks_python_version_before_coverage_dependency(self):
+    helper = load_check_coverage_script()
+    self.assertFalse(helper.python_version_supported((3, 9, 18)))
+    self.assertTrue(helper.python_version_supported((3, 10, 0)))
+    self.assertIn("Python 3.10", helper.python_version_error("3.9.18"))
+
+  def test_check_coverage_uses_local_protocol_package_paths(self):
+    helper = load_check_coverage_script()
+    entries = helper.local_package_pythonpath_entries()
+
+    self.assertEqual(entries[0], str(PROJECT_ROOT))
+    self.assertIn(str(PROJECT_ROOT / "packages" / "train-dcc" / "src"), entries)
+    self.assertIn(str(PROJECT_ROOT / "packages" / "digsight-dxdcnet" / "src"), entries)
+
+    env = helper.coverage_environment({"PYTHONPATH": "existing-path"})
+    pythonpath_entries = env["PYTHONPATH"].split(helper.os.pathsep)
+    self.assertEqual(pythonpath_entries[:3], entries)
+    self.assertEqual(pythonpath_entries[3], "existing-path")
 
   def test_gateway_main_constructs_server_and_prints_lan_hint(self):
     calls = []

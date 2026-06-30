@@ -1,13 +1,15 @@
 import json
 import inspect
+import re
+from pathlib import Path
+import tempfile
 import unittest
 
 from server import models
-from server.api import ApiRouter, SCREEN_DIRECTION_LABELS
+from server.api import ApiRouter
 from server.api_support.controller import ControllerApiSupport
-from server.app_state import default_state
-from server.controllers.base import ControllerCapabilities, ControllerTransportDefaults
-from server.controllers.registry import ControllerRegistry
+from server.app_state import AppStateStore, default_state
+from server.controllers.registry import ControllerRegistry, default_controller_registry
 from digsight_dxdcnet.constants import (
   CMD_DEVICE_STATUS,
   CMD_MAC_ADDRESS,
@@ -18,47 +20,8 @@ from digsight_dxdcnet.constants import (
   DEVICE_TYPE_SPECIAL,
 )
 from digsight_dxdcnet.frames import build_udp_frame
-from tests.server_tests.controller_test_env import controller_ip_payload, controller_test_ip
-
-
-class FakeRequestMappedUdpTransport:
-  def __init__(self, responses_by_request):
-    self.responses_by_request = responses_by_request
-    self.requests = []
-
-  def exchange(self, host, port, payload, local_port=0, max_packets=32, stop_when=None):
-    self.requests.append({
-      "host": host,
-      "port": port,
-      "payload": payload,
-      "local_port": local_port,
-      "max_packets": max_packets,
-      "stop_when": bool(stop_when),
-    })
-    responses = []
-    for response in self.responses_by_request.get(payload, [])[:max_packets]:
-      responses.append(response)
-      if stop_when and stop_when(response):
-        break
-    return responses
-
-
-class CustomDefaultsControllerAdapter:
-  kind = "custom_defaults_controller"
-  label = "Custom Defaults Controller"
-  config_file_name = "custom_defaults_controller.json"
-  capabilities = ControllerCapabilities(
-    track_power=False,
-    read_info=False,
-    cv_programming=False,
-    loco_control=False,
-    controller_settings=False,
-  )
-  transport_defaults = ControllerTransportDefaults(
-    udp_port=21105,
-    local_udp_port=0,
-    checksum_algorithm="none",
-  )
+from tests.server_tests.controller_test_env import CustomDefaultsControllerAdapter, controller_ip_payload, controller_test_ip
+from tests.server_tests.fake_udp import FakeRequestMappedUdpTransport
 
 
 class ControllerSettingsTest(unittest.TestCase):
@@ -68,9 +31,23 @@ class ControllerSettingsTest(unittest.TestCase):
 
     self.assertNotIn("def _parse_controller_settings_request", router_source)
     self.assertIn("def _parse_controller_settings_request", controller_source)
+    self.assertIn("def _next_controller_kind_and_adapter", controller_source)
+    self.assertIn("def _parse_transport_settings", controller_source)
+    self.assertIn("def _parse_controller_mode_settings", controller_source)
+    self.assertIn("def _parse_track_profile_settings", controller_source)
     self.assertIn("def _build_controller_settings_candidate", controller_source)
     self.assertIn("def _apply_controller_settings_to_device", controller_source)
     self.assertIn("def _controller_settings_response_payload", controller_source)
+
+  def test_custom_defaults_controller_adapter_fixture_is_shared(self):
+    helper_source = Path("tests/server_tests/controller_test_env.py").read_text(encoding="utf-8")
+    app_state_source = Path("tests/server_tests/test_app_state.py").read_text(encoding="utf-8")
+    settings_source = Path("tests/server_tests/test_controller_settings.py").read_text(encoding="utf-8")
+    fixture_pattern = re.compile(r"^class CustomDefaultsControllerAdapter", re.MULTILINE)
+
+    self.assertRegex(helper_source, fixture_pattern)
+    self.assertNotRegex(app_state_source, fixture_pattern)
+    self.assertNotRegex(settings_source, fixture_pattern)
 
   def test_controller_info_param_spec_appends_warning_on_param_mismatch(self):
     from server.controllers.dxdcnet_info_helpers import apply_parameter_spec
@@ -91,7 +68,7 @@ class ControllerSettingsTest(unittest.TestCase):
     self.assertEqual(controller["device_info"], {})
 
   def test_screen_direction_labels_follow_clockwise_app_sequence(self):
-    self.assertEqual(SCREEN_DIRECTION_LABELS, {
+    self.assertEqual(models.SCREEN_DIRECTION_LABELS, {
       0x00: "左",
       0x01: "上",
       0x02: "右",
@@ -104,12 +81,14 @@ class ControllerSettingsTest(unittest.TestCase):
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 200)
     self.assertEqual(payload["data"]["ip"], models.CONTROLLER_DEFAULT_IP)
-    self.assertEqual(payload["data"]["connection"]["reachable"], True)
+    self.assertEqual(payload["data"]["connection"]["reachable"], False)
     self.assertEqual(payload["data"]["connection"]["controller_reachable"], False)
-    self.assertEqual(payload["data"]["connection"]["gateway_ready"], True)
+    self.assertEqual(payload["data"]["connection"]["gateway_ready"], False)
     self.assertEqual(payload["data"]["controller_kind"], "digsight_controller")
-    self.assertEqual(payload["data"]["controller_label"], "动芯 DXDCNet")
+    self.assertEqual(payload["data"]["controller_label"], "动芯 拾Pro")
+    self.assertEqual(payload["data"]["controller_protocol"], "DXDCNet")
     self.assertTrue(payload["data"]["controller_capabilities"]["track_power"])
+    self.assertTrue(payload["data"]["controller_capabilities"]["dc_control"])
     self.assertTrue(payload["data"]["controller_capabilities"]["read_info"])
     self.assertIn("n", payload["data"]["track_profiles"])
     self.assertIn("ho", payload["data"]["track_profiles"])
@@ -117,6 +96,8 @@ class ControllerSettingsTest(unittest.TestCase):
     self.assertIn("dc", payload["data"]["track_profiles"])
     self.assertFalse(payload["data"]["safe_for_cv"])
     self.assertEqual(payload["data"]["cv_safety_warnings"], ["programming_track_status_unconfirmed"])
+    self.assertEqual(payload["data"]["read_capability"]["ready"], False)
+    self.assertEqual(payload["data"]["read_capability"]["warnings"], ["controller_ip_unconfigured"])
 
   def test_default_state_tracks_controller_safety_snapshot(self):
     state = default_state()
@@ -198,22 +179,23 @@ class ControllerSettingsTest(unittest.TestCase):
     self.assertEqual(payload["data"]["connection"]["short_circuit"], False)
     self.assertEqual(payload["data"]["booster_status"]["power_on"], False)
 
-  def test_controller_info_requires_checksum_before_udp_ready(self):
+  def test_controller_info_requires_checksum_before_readiness(self):
     state = default_state()
+    state["controller"]["ip"] = "192.0.2.10"
     state["controller"]["udp_port"] = 21105
     state["controller"]["udp_checksum_algorithm"] = "unconfirmed"
     body, status = ApiRouter(None).handle_json("GET", "/api/controller/info", b"", state)
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 200)
-    self.assertEqual(payload["data"]["read_capability"]["dxdcnet_udp_ready"], False)
+    self.assertEqual(payload["data"]["read_capability"]["ready"], False)
     self.assertIn("udp_checksum_algorithm_unconfirmed", payload["data"]["read_capability"]["warnings"])
 
   def test_controller_settings_saves_local_safe_profile(self):
     state = default_state()
     request = {
       "track_profiles": {
-        "n": {"voltage_v": 11.5, "current_limit_ma": 200},
-        "ho": {"voltage_v": 15.0, "current_limit_ma": 240},
+        "n": {"target_voltage_v": 11.5, "target_current_limit_ma": 200},
+        "ho": {"target_voltage_v": 15.0, "target_current_limit_ma": 240},
       }
     }
     body, status = ApiRouter(None).handle_json(
@@ -225,13 +207,15 @@ class ControllerSettingsTest(unittest.TestCase):
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 200)
     self.assertFalse(payload["data"]["applied_to_device"])
-    self.assertEqual(state["controller"]["track_profiles"]["n"]["current_limit_ma"], 200)
+    self.assertEqual(state["controller"]["track_profiles"]["n"]["target_current_limit_ma"], 200)
 
   def test_controller_settings_normalizes_existing_transport_config(self):
     state = default_state()
-    state["controller"]["udp_port"] = 12001
-    state["controller"]["local_udp_port"] = 0
-    state["controller"]["udp_checksum_algorithm"] = "xor"
+    state["controller"]["transport"].update({
+      "udp_port": 12001,
+      "local_udp_port": 0,
+      "udp_checksum_algorithm": "xor",
+    })
     body, status = ApiRouter(None).handle_json(
       "PATCH",
       "/api/controller/settings",
@@ -240,18 +224,15 @@ class ControllerSettingsTest(unittest.TestCase):
     )
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 200)
-    self.assertEqual(payload["data"]["udp_port"], 12001)
-    self.assertEqual(payload["data"]["local_udp_port"], 6667)
-    self.assertEqual(payload["data"]["udp_checksum_algorithm"], "xor")
+    self.assertEqual(payload["data"]["transport"]["udp_port"], 12001)
+    self.assertEqual(payload["data"]["transport"]["local_udp_port"], 6667)
+    self.assertEqual(payload["data"]["transport"]["udp_checksum_algorithm"], "xor")
     self.assertEqual(state["controller"]["udp_port"], 12001)
     self.assertEqual(state["controller"]["local_udp_port"], 6667)
     self.assertEqual(state["controller"]["udp_checksum_algorithm"], "xor")
 
   def test_controller_settings_applies_current_limit_to_controller_and_verifies_readback(self):
-    state = default_state()
-    state["controller"]["udp_port"] = 12000
-    state["controller"]["local_udp_port"] = 6667
-    state["controller"]["udp_checksum_algorithm"] = "xor"
+    state = self._state_with_confirmed_udp()
     requests = {
       bytes.fromhex("ff ff 18 01 40 00 00 82 64 bf"): [],
       bytes.fromhex("ff ff 17 01 41 00 00 82 d5"): [
@@ -266,11 +247,11 @@ class ControllerSettingsTest(unittest.TestCase):
     request = {
       "apply_to_device": True,
       "track_profiles": {
-        "ho": {"voltage_v": 15.2, "current_limit_ma": 4000},
+        "ho": {"target_voltage_v": 15.2, "target_current_limit_ma": 4000},
       },
     }
     transport = FakeRequestMappedUdpTransport(requests)
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "PATCH",
       "/api/controller/settings",
       json.dumps(request).encode("utf-8"),
@@ -282,16 +263,29 @@ class ControllerSettingsTest(unittest.TestCase):
     self.assertEqual(payload["data"]["device_results"][0]["mode"], "ho")
     self.assertEqual(payload["data"]["device_results"][0]["param_address"], 0x82)
     self.assertEqual(payload["data"]["device_results"][0]["raw_value"], 0x64)
-    self.assertEqual(state["controller"]["track_profiles"]["ho"]["current_limit_ma"], 4000)
+    self.assertEqual(payload["data"]["device_results"][0]["target_current_limit_ma"], 4000)
+    self.assertEqual(state["controller"]["track_profiles"]["ho"]["target_current_limit_ma"], 4000)
     self.assertEqual([entry["payload"] for entry in transport.requests], [
       bytes.fromhex("ff ff 18 01 40 00 00 82 64 bf"),
       bytes.fromhex("ff ff 17 01 41 00 00 82 d5"),
     ])
 
-  def test_controller_settings_rejects_controller_write_when_readback_mismatches(self):
+  def test_controller_settings_rejects_non_boolean_apply_to_device(self):
     state = default_state()
-    state["controller"]["udp_port"] = 12000
-    state["controller"]["udp_checksum_algorithm"] = "xor"
+    body, status = ApiRouter(None).handle_json(
+      "PATCH",
+      "/api/controller/settings",
+      b'{"apply_to_device":"true"}',
+      state,
+    )
+    payload = json.loads(body.decode("utf-8"))
+
+    self.assertEqual(status, 400)
+    self.assertEqual(payload["error"]["type"], "invalid_controller_settings")
+    self.assertIn("apply_to_device", payload["error"]["detail"])
+
+  def test_controller_settings_rejects_controller_write_when_readback_mismatches(self):
+    state = self._state_with_confirmed_udp()
     state["controller"]["track_mode"] = "n"
     requests = {
       bytes.fromhex("ff ff 18 01 40 00 00 82 64 bf"): [],
@@ -308,10 +302,10 @@ class ControllerSettingsTest(unittest.TestCase):
       "apply_to_device": True,
       "track_mode": "ho",
       "track_profiles": {
-        "ho": {"voltage_v": 15.2, "current_limit_ma": 4000},
+        "ho": {"target_voltage_v": 15.2, "target_current_limit_ma": 4000},
       },
     }
-    body, status = ApiRouter(None, udp_transport=FakeRequestMappedUdpTransport(requests)).handle_json(
+    body, status = ApiRouter(None, controller_transport=FakeRequestMappedUdpTransport(requests)).handle_json(
       "PATCH",
       "/api/controller/settings",
       json.dumps(request).encode("utf-8"),
@@ -320,7 +314,7 @@ class ControllerSettingsTest(unittest.TestCase):
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 502)
     self.assertEqual(payload["error"]["type"], "controller_parameter_write_failed")
-    self.assertNotEqual(state["controller"]["track_profiles"]["ho"]["current_limit_ma"], 4000)
+    self.assertNotEqual(state["controller"]["track_profiles"]["ho"]["target_current_limit_ma"], 4000)
     self.assertEqual(state["controller"]["track_mode"], "n")
 
   def test_controller_settings_saves_operation_mode_and_clears_safety_cache(self):
@@ -348,6 +342,7 @@ class ControllerSettingsTest(unittest.TestCase):
 
   def test_track_power_status_missing_clears_cached_safety_state(self):
     state = default_state()
+    state["controller"]["ip"] = "192.0.2.10"
     state["controller"]["controller_reachable"] = True
     state["controller"]["booster_status"] = {
       "source": "dxdcnet_status_0x23",
@@ -370,7 +365,7 @@ class ControllerSettingsTest(unittest.TestCase):
       "booster_status_fresh": True,
       "programming_track_status_fresh": True,
     }
-    body, status = ApiRouter(None, udp_transport=FakeRequestMappedUdpTransport({})).handle_json(
+    body, status = ApiRouter(None, controller_transport=FakeRequestMappedUdpTransport({})).handle_json(
       "POST",
       "/api/track-power",
       b'{"powered":true}',
@@ -439,7 +434,7 @@ class ControllerSettingsTest(unittest.TestCase):
     self.assertEqual(payload["data"]["kind"], "custom_defaults_controller")
     self.assertEqual(state["controller"]["kind"], "custom_defaults_controller")
 
-  def test_controller_settings_uses_adapter_transport_defaults_when_kind_changes(self):
+  def test_controller_settings_uses_adapter_transport_descriptor_when_kind_changes(self):
     registry = ControllerRegistry()
     registry.register(CustomDefaultsControllerAdapter())
     state = default_state()
@@ -451,11 +446,211 @@ class ControllerSettingsTest(unittest.TestCase):
     )
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 200)
-    self.assertEqual(payload["data"]["udp_port"], 21105)
-    self.assertEqual(payload["data"]["local_udp_port"], 0)
-    self.assertEqual(payload["data"]["udp_checksum_algorithm"], "none")
+    self.assertEqual(payload["data"]["transport"]["udp_port"], 21105)
+    self.assertEqual(payload["data"]["transport"]["local_udp_port"], 0)
+    self.assertEqual(payload["data"]["transport"]["udp_checksum_algorithm"], "none")
 
-  def test_controller_connect_uses_adapter_transport_defaults(self):
+  def test_controller_settings_rebuilds_config_identity_from_target_kind_defaults(self):
+    registry = default_controller_registry()
+    registry.register(CustomDefaultsControllerAdapter())
+    with tempfile.TemporaryDirectory() as temp_dir:
+      root = Path(temp_dir)
+      store = AppStateStore(root / "data" / "app-state.json", controller_registry=registry)
+      state = store.load()
+      state["controller"]["display_name"] = "旧控制器显示名"
+      state["controller"]["protocol"] = "OldProtocol"
+      store.save(state)
+
+      body, status = ApiRouter(store, controller_registry=registry).handle_json(
+        "PATCH",
+        "/api/controller/settings",
+        b'{"kind":"custom_defaults_controller"}',
+        state,
+      )
+
+      payload = json.loads(body.decode("utf-8"))
+      custom_config = json.loads(
+        (root / "config" / "controllers" / "custom-controller-settings.json").read_text(encoding="utf-8")
+      )
+      self.assertEqual(status, 200)
+      self.assertTrue(payload["ok"])
+      self.assertEqual(payload["data"]["kind"], "custom_defaults_controller")
+      self.assertEqual(state["controller"]["display_name"], "Custom Defaults Controller")
+      self.assertEqual(state["controller"]["protocol"], "CustomProtocol")
+      self.assertEqual(custom_config["display_name"], "Custom Defaults Controller")
+      self.assertEqual(custom_config["protocol"], "CustomProtocol")
+
+  def test_controller_settings_rejects_invalid_ip_from_target_kind_config(self):
+    registry = default_controller_registry()
+    registry.register(CustomDefaultsControllerAdapter())
+    with tempfile.TemporaryDirectory() as temp_dir:
+      root = Path(temp_dir)
+      config_dir = root / "config" / "controllers"
+      config_dir.mkdir(parents=True)
+      (config_dir / "custom-controller-settings.json").write_text(json.dumps({
+        "display_name": "Custom Defaults Controller",
+        "protocol": "CustomProtocol",
+        "ip": "not-an-ip",
+        "transport": {
+          "kind": "udp",
+          "udp_port": 21105,
+          "local_udp_port": 0,
+          "udp_checksum_algorithm": "none",
+        },
+      }), encoding="utf-8")
+      store = AppStateStore(root / "data" / "app-state.json", controller_registry=registry)
+      state = store.load()
+
+      body, status = ApiRouter(store, controller_registry=registry).handle_json(
+        "PATCH",
+        "/api/controller/settings",
+        b'{"kind":"custom_defaults_controller"}',
+        state,
+      )
+
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 400)
+      self.assertEqual(payload["error"]["type"], "invalid_controller_settings")
+      self.assertEqual(state["controller"]["kind"], "digsight_controller")
+
+  def test_controller_settings_uses_existing_ip_when_target_kind_config_ip_is_empty(self):
+    registry = default_controller_registry()
+    registry.register(CustomDefaultsControllerAdapter())
+    with tempfile.TemporaryDirectory() as temp_dir:
+      root = Path(temp_dir)
+      config_dir = root / "config" / "controllers"
+      config_dir.mkdir(parents=True)
+      (config_dir / "custom-controller-settings.json").write_text(json.dumps({
+        "display_name": "Custom Defaults Controller",
+        "protocol": "CustomProtocol",
+        "ip": "",
+        "transport": {
+          "kind": "udp",
+          "udp_port": 21105,
+          "local_udp_port": 0,
+          "udp_checksum_algorithm": "none",
+        },
+      }), encoding="utf-8")
+      store = AppStateStore(root / "data" / "app-state.json", controller_registry=registry)
+      state = store.load()
+      state["controller"]["ip"] = "192.0.2.77"
+
+      body, status = ApiRouter(store, controller_registry=registry).handle_json(
+        "PATCH",
+        "/api/controller/settings",
+        b'{"kind":"custom_defaults_controller"}',
+        state,
+      )
+
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 200)
+      self.assertEqual(payload["data"]["ip"], "192.0.2.77")
+      self.assertEqual(state["controller"]["kind"], "custom_defaults_controller")
+      self.assertEqual(state["controller"]["ip"], "192.0.2.77")
+
+  def test_controller_settings_normalizes_target_kind_config_ports_above_udp_range(self):
+    registry = default_controller_registry()
+    registry.register(CustomDefaultsControllerAdapter())
+    with tempfile.TemporaryDirectory() as temp_dir:
+      root = Path(temp_dir)
+      config_dir = root / "config" / "controllers"
+      config_dir.mkdir(parents=True)
+      (config_dir / "custom-controller-settings.json").write_text(json.dumps({
+        "display_name": "Custom Defaults Controller",
+        "protocol": "CustomProtocol",
+        "ip": "192.0.2.10",
+        "transport": {
+          "kind": "udp",
+          "udp_port": 99999,
+          "local_udp_port": 99999,
+          "udp_checksum_algorithm": "none",
+        },
+      }), encoding="utf-8")
+      store = AppStateStore(root / "data" / "app-state.json", controller_registry=registry)
+      state = store.load()
+
+      body, status = ApiRouter(store, controller_registry=registry).handle_json(
+        "PATCH",
+        "/api/controller/settings",
+        b'{"kind":"custom_defaults_controller"}',
+        state,
+      )
+
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 200)
+      self.assertEqual(payload["data"]["transport"]["udp_port"], 21105)
+      self.assertEqual(payload["data"]["transport"]["local_udp_port"], 0)
+      self.assertEqual(state["controller"]["udp_port"], 21105)
+      self.assertEqual(state["controller"]["local_udp_port"], 0)
+
+  def test_controller_settings_reports_malformed_target_kind_config_without_rewrite(self):
+    registry = default_controller_registry()
+    registry.register(CustomDefaultsControllerAdapter())
+    with tempfile.TemporaryDirectory() as temp_dir:
+      root = Path(temp_dir)
+      config_dir = root / "config" / "controllers"
+      config_dir.mkdir(parents=True)
+      custom_config_path = config_dir / "custom-controller-settings.json"
+      malformed_config = "{not json"
+      custom_config_path.write_text(malformed_config, encoding="utf-8")
+      store = AppStateStore(root / "data" / "app-state.json", controller_registry=registry)
+      state = store.load()
+      self.assertEqual(state["controller"]["kind"], "digsight_controller")
+      self.assertIsNone(state.get("last_error"))
+
+      body, status = ApiRouter(store, controller_registry=registry).handle_json(
+        "PATCH",
+        "/api/controller/settings",
+        b'{"kind":"custom_defaults_controller"}',
+        state,
+      )
+
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 409)
+      self.assertFalse(payload["ok"])
+      self.assertEqual(payload["error"]["type"], "controller_config_invalid")
+      self.assertEqual(payload["debug"]["controller_kind"], "custom_defaults_controller")
+      self.assertEqual(payload["debug"]["resettable_files"], ["config/controllers/custom-controller-settings.json"])
+      self.assertEqual(state["controller"]["kind"], "digsight_controller")
+      self.assertEqual(state["last_error"]["type"], "controller_config_invalid")
+      self.assertEqual(state["last_error"]["controller_kind"], "custom_defaults_controller")
+      self.assertEqual(custom_config_path.read_text(encoding="utf-8"), malformed_config)
+      reloaded = store.load()
+      self.assertEqual(reloaded["last_error"]["type"], "controller_config_invalid")
+      self.assertEqual(reloaded["last_error"]["controller_kind"], "custom_defaults_controller")
+      self.assertEqual(custom_config_path.read_text(encoding="utf-8"), malformed_config)
+
+  def test_controller_settings_clears_stale_config_error_when_kind_changes_without_requested_ip(self):
+    registry = default_controller_registry()
+    registry.register(CustomDefaultsControllerAdapter())
+    with tempfile.TemporaryDirectory() as temp_dir:
+      root = Path(temp_dir)
+      config_dir = root / "config" / "controllers"
+      config_dir.mkdir(parents=True)
+      (config_dir / registry.config_file_name("digsight_controller")).write_text("not json", encoding="utf-8")
+      custom_config_path = config_dir / "custom-controller-settings.json"
+      store = AppStateStore(root / "data" / "app-state.json", controller_registry=registry)
+      state = store.load()
+      self.assertEqual(state["last_error"]["type"], "controller_config_invalid")
+
+      body, status = ApiRouter(store, controller_registry=registry).handle_json(
+        "PATCH",
+        "/api/controller/settings",
+        b'{"kind":"custom_defaults_controller"}',
+        state,
+      )
+
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 200)
+      self.assertTrue(payload["ok"])
+      self.assertEqual(state["controller"]["kind"], "custom_defaults_controller")
+      self.assertNotEqual((state.get("last_error") or {}).get("type"), "controller_config_invalid")
+      self.assertTrue(custom_config_path.exists())
+      custom_config = json.loads(custom_config_path.read_text(encoding="utf-8"))
+      self.assertEqual(custom_config["display_name"], "Custom Defaults Controller")
+      self.assertEqual(custom_config["protocol"], "CustomProtocol")
+
+  def test_controller_settings_uses_adapter_transport_descriptor(self):
     registry = ControllerRegistry()
     registry.register(CustomDefaultsControllerAdapter())
     state = default_state()
@@ -464,17 +659,99 @@ class ControllerSettingsTest(unittest.TestCase):
       "ip": "192.0.2.10",
     }
     body, status = ApiRouter(None, controller_registry=registry).handle_json(
-      "POST",
-      "/api/controller/connect",
+      "PATCH",
+      "/api/controller/settings",
       json.dumps(request).encode("utf-8"),
       state,
     )
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 200)
-    self.assertEqual(payload["data"]["udp_port"], 21105)
-    self.assertEqual(payload["data"]["local_udp_port"], 0)
-    self.assertEqual(payload["data"]["udp_checksum_algorithm"], "none")
+    self.assertEqual(payload["data"]["transport"]["udp_port"], 21105)
+    self.assertEqual(payload["data"]["transport"]["local_udp_port"], 0)
+    self.assertEqual(payload["data"]["transport"]["udp_checksum_algorithm"], "none")
     self.assertEqual(state["controller"]["kind"], "custom_defaults_controller")
+
+  def test_controller_settings_rebuilds_config_identity_and_keeps_requested_ip_when_kind_changes(self):
+    registry = default_controller_registry()
+    registry.register(CustomDefaultsControllerAdapter())
+    with tempfile.TemporaryDirectory() as temp_dir:
+      root = Path(temp_dir)
+      store = AppStateStore(root / "data" / "app-state.json", controller_registry=registry)
+      state = store.load()
+      state["controller"]["display_name"] = "旧控制器显示名"
+      state["controller"]["protocol"] = "OldProtocol"
+      store.save(state)
+
+      body, status = ApiRouter(store, controller_registry=registry).handle_json(
+        "PATCH",
+        "/api/controller/settings",
+        json.dumps({"kind": "custom_defaults_controller", "ip": "192.0.2.10"}).encode("utf-8"),
+        state,
+      )
+
+      payload = json.loads(body.decode("utf-8"))
+      custom_config = json.loads(
+        (root / "config" / "controllers" / "custom-controller-settings.json").read_text(encoding="utf-8")
+      )
+      self.assertEqual(status, 200)
+      self.assertTrue(payload["ok"])
+      self.assertEqual(state["controller"]["kind"], "custom_defaults_controller")
+      self.assertEqual(state["controller"]["display_name"], "Custom Defaults Controller")
+      self.assertEqual(state["controller"]["protocol"], "CustomProtocol")
+      self.assertEqual(custom_config["display_name"], "Custom Defaults Controller")
+      self.assertEqual(custom_config["protocol"], "CustomProtocol")
+
+  def test_controller_settings_clears_stale_config_error_when_kind_changes_with_requested_ip(self):
+    registry = default_controller_registry()
+    registry.register(CustomDefaultsControllerAdapter())
+    with tempfile.TemporaryDirectory() as temp_dir:
+      root = Path(temp_dir)
+      config_dir = root / "config" / "controllers"
+      config_dir.mkdir(parents=True)
+      (config_dir / registry.config_file_name("digsight_controller")).write_text("not json", encoding="utf-8")
+      custom_config_path = config_dir / "custom-controller-settings.json"
+      store = AppStateStore(root / "data" / "app-state.json", controller_registry=registry)
+      state = store.load()
+      self.assertEqual(state["last_error"]["type"], "controller_config_invalid")
+
+      body, status = ApiRouter(store, controller_registry=registry).handle_json(
+        "PATCH",
+        "/api/controller/settings",
+        json.dumps({"kind": "custom_defaults_controller", "ip": "192.0.2.10"}).encode("utf-8"),
+        state,
+      )
+
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 200)
+      self.assertTrue(payload["ok"])
+      self.assertEqual(state["controller"]["kind"], "custom_defaults_controller")
+      self.assertNotEqual((state.get("last_error") or {}).get("type"), "controller_config_invalid")
+      self.assertTrue(custom_config_path.exists())
+      custom_config = json.loads(custom_config_path.read_text(encoding="utf-8"))
+      self.assertEqual(custom_config["display_name"], "Custom Defaults Controller")
+      self.assertEqual(custom_config["protocol"], "CustomProtocol")
+
+  def test_controller_reset_config_rejects_non_current_kind(self):
+    registry = default_controller_registry()
+    registry.register(CustomDefaultsControllerAdapter())
+    with tempfile.TemporaryDirectory() as temp_dir:
+      root = Path(temp_dir)
+      custom_config_path = root / "config" / "controllers" / "custom-controller-settings.json"
+      store = AppStateStore(root / "data" / "app-state.json", controller_registry=registry)
+      state = store.load()
+      self.assertEqual(state["controller"]["kind"], "digsight_controller")
+
+      body, status = ApiRouter(store, controller_registry=registry).handle_json(
+        "POST",
+        "/api/controller/reset-config",
+        b'{"kind":"custom_defaults_controller"}',
+        state,
+      )
+
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 409)
+      self.assertEqual(payload["error"]["type"], "controller_config_reset_kind_mismatch")
+      self.assertFalse(custom_config_path.exists())
 
   def test_controller_settings_rejects_kind_missing_from_router_registry(self):
     state = default_state()
@@ -496,13 +773,13 @@ class ControllerSettingsTest(unittest.TestCase):
     request = {
       "apply_to_device": True,
       "track_profiles": {
-        "ho": {"voltage_v": 15.2, "current_limit_ma": 4000},
+        "ho": {"target_voltage_v": 15.2, "target_current_limit_ma": 4000},
       },
     }
     body, status = ApiRouter(
       None,
       controller_registry=registry,
-      udp_transport=FakeRequestMappedUdpTransport({}),
+      controller_transport=FakeRequestMappedUdpTransport({}),
     ).handle_json(
       "PATCH",
       "/api/controller/settings",
@@ -530,7 +807,7 @@ class ControllerSettingsTest(unittest.TestCase):
 
   def test_controller_settings_rejects_unsafe_n_voltage(self):
     state = default_state()
-    request = {"track_profiles": {"n": {"voltage_v": 13.0, "current_limit_ma": 200}}}
+    request = {"track_profiles": {"n": {"target_voltage_v": 13.0, "target_current_limit_ma": 200}}}
     body, status = ApiRouter(None).handle_json(
       "PATCH",
       "/api/controller/settings",
@@ -543,7 +820,7 @@ class ControllerSettingsTest(unittest.TestCase):
 
   def test_controller_settings_accepts_dc_voltage_profile_without_real_dc_output(self):
     state = default_state()
-    request = {"track_profiles": {"dc": {"voltage_v": 13.0, "current_limit_ma": 2000}}}
+    request = {"track_profiles": {"dc": {"target_voltage_v": 13.0, "target_current_limit_ma": 2000}}}
     body, status = ApiRouter(None).handle_json(
       "PATCH",
       "/api/controller/settings",
@@ -552,11 +829,12 @@ class ControllerSettingsTest(unittest.TestCase):
     )
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 200)
-    self.assertEqual(payload["data"]["track_profiles"]["dc"]["voltage_v"], 13.0)
-    self.assertEqual(state["controller"]["track_profiles"]["dc"]["voltage_v"], 13.0)
+    self.assertEqual(payload["data"]["track_profiles"]["dc"]["target_voltage_v"], 13.0)
+    self.assertEqual(state["controller"]["track_profiles"]["dc"]["target_voltage_v"], 13.0)
 
   def test_controller_read_info_requires_confirmed_udp_and_checksum(self):
     state = default_state()
+    state["controller"]["ip"] = "192.0.2.10"
     state["controller"]["udp_port"] = 0
     state["controller"]["udp_checksum_algorithm"] = "unconfirmed"
     body, status = ApiRouter(None).handle_json("POST", "/api/controller/read-info", b"{}", state)
@@ -568,21 +846,18 @@ class ControllerSettingsTest(unittest.TestCase):
 
   def test_controller_read_info_requires_confirmed_checksum_when_port_is_set(self):
     state = default_state()
+    state["controller"]["ip"] = "192.0.2.10"
     state["controller"]["udp_port"] = 21105
     state["controller"]["udp_checksum_algorithm"] = "unconfirmed"
     body, status = ApiRouter(None).handle_json("POST", "/api/controller/read-info", b"{}", state)
     payload = json.loads(body.decode("utf-8"))
     self.assertEqual(status, 409)
     self.assertEqual(payload["error"]["type"], "protocol_not_ready")
-    self.assertEqual(payload["error"]["detail"], "UDP checksum algorithm is unconfirmed")
+    self.assertEqual(payload["error"]["detail"], "控制器 UDP 校验算法未确认")
     self.assertEqual(payload["debug"]["warnings"], ["udp_checksum_algorithm_unconfirmed"])
 
-  def test_controller_read_info_reads_version_status_and_current_limit(self):
-    state = default_state()
-    state["controller"]["udp_port"] = 12000
-    state["controller"]["local_udp_port"] = 6667
-    state["controller"]["udp_checksum_algorithm"] = "xor"
-    requests = {
+  def _controller_read_info_success_requests(self):
+    return {
       bytes.fromhex("ff ff 16 01 22 00 00 35"): [
         build_udp_frame(
           device_type=DEVICE_TYPE_COMMAND_STATION,
@@ -694,8 +969,20 @@ class ControllerSettingsTest(unittest.TestCase):
         )
       ],
     }
+
+  def _state_with_confirmed_udp(self):
+    state = default_state()
+    state["controller"]["ip"] = "192.0.2.10"
+    state["controller"]["udp_port"] = 12000
+    state["controller"]["local_udp_port"] = 6667
+    state["controller"]["udp_checksum_algorithm"] = "xor"
+    return state
+
+  def test_controller_read_info_reads_version_status_and_current_limit(self):
+    state = self._state_with_confirmed_udp()
+    requests = self._controller_read_info_success_requests()
     transport = FakeRequestMappedUdpTransport(requests)
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/controller/read-info",
       b"{}",
@@ -720,10 +1007,10 @@ class ControllerSettingsTest(unittest.TestCase):
     self.assertEqual(state["controller"]["device_info"]["screen_brightness"], 128)
     self.assertEqual(state["controller"]["device_info"]["screen_direction_raw"], 2)
     self.assertEqual(state["controller"]["device_info"]["screen_direction_label"], "右")
-    self.assertEqual(state["controller"]["track_profiles"]["n"]["current_limit_ma"], 400)
-    self.assertEqual(state["controller"]["track_profiles"]["ho"]["current_limit_ma"], 4000)
-    self.assertEqual(state["controller"]["track_profiles"]["g"]["current_limit_ma"], 7000)
-    self.assertEqual(state["controller"]["track_profiles"]["dc"]["current_limit_ma"], 2000)
+    self.assertEqual(state["controller"]["track_profiles"]["n"]["target_current_limit_ma"], 400)
+    self.assertEqual(state["controller"]["track_profiles"]["ho"]["target_current_limit_ma"], 4000)
+    self.assertEqual(state["controller"]["track_profiles"]["g"]["target_current_limit_ma"], 7000)
+    self.assertEqual(state["controller"]["track_profiles"]["dc"]["target_current_limit_ma"], 2000)
     self.assertEqual(state["controller"]["programming_track_status"]["source"], "dxdcnet_status_0x23")
     self.assertEqual(state["controller"]["programming_track_status"]["output_value"], 0x78)
     self.assertFalse(state["controller"]["programming_track_status"]["current_limit_confirmed"])
@@ -740,9 +1027,7 @@ class ControllerSettingsTest(unittest.TestCase):
     self.assertLessEqual(timeouts["current_limit_dc"], 0.25)
 
   def test_controller_read_info_blocks_cv_safety_when_booster_reports_dc(self):
-    state = default_state()
-    state["controller"]["udp_port"] = 12000
-    state["controller"]["udp_checksum_algorithm"] = "xor"
+    state = self._state_with_confirmed_udp()
     requests = {
       bytes.fromhex("ff ff 16 01 22 00 00 35"): [
         build_udp_frame(
@@ -777,7 +1062,7 @@ class ControllerSettingsTest(unittest.TestCase):
         )
       ],
     }
-    body, status = ApiRouter(None, udp_transport=FakeRequestMappedUdpTransport(requests)).handle_json(
+    body, status = ApiRouter(None, controller_transport=FakeRequestMappedUdpTransport(requests)).handle_json(
       "POST",
       "/api/controller/read-info",
       b"{}",
@@ -790,9 +1075,7 @@ class ControllerSettingsTest(unittest.TestCase):
     self.assertIn("booster_dc_mode_reported", payload["data"]["warnings"])
 
   def test_controller_read_info_missing_booster_clears_cached_track_status(self):
-    state = default_state()
-    state["controller"]["udp_port"] = 12000
-    state["controller"]["udp_checksum_algorithm"] = "xor"
+    state = self._state_with_confirmed_udp()
     state["controller"]["booster_status"] = {
       "source": "dxdcnet_status_0x23",
       "power_on": True,
@@ -819,7 +1102,7 @@ class ControllerSettingsTest(unittest.TestCase):
         )
       ],
     }
-    body, status = ApiRouter(None, udp_transport=FakeRequestMappedUdpTransport(requests)).handle_json(
+    body, status = ApiRouter(None, controller_transport=FakeRequestMappedUdpTransport(requests)).handle_json(
       "POST",
       "/api/controller/read-info",
       b"{}",

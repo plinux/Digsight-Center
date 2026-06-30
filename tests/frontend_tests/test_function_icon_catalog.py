@@ -151,6 +151,25 @@ class FunctionIconCatalogTest(unittest.TestCase):
       self.assertTrue(meta["label"])
       self.assertTrue((Path(".") / meta["path"]).exists(), icon_key)
 
+  def test_frontend_loads_importer_icon_mappings_from_capabilities(self):
+    catalog_source = Path("assets/js/function-icon-catalog.js").read_text(encoding="utf-8")
+    bootstrap_source = Path("assets/js/app-bootstrap.js").read_text(encoding="utf-8")
+
+    self.assertIn("function_icon_mapping_files", catalog_source)
+    self.assertIn("capabilities?.import_formats", catalog_source)
+    self.assertIn("loadFunctionIconCatalog(appState.capabilities)", bootstrap_source)
+    self.assertNotIn('fetchImpl("/config/function-icon-mappings/z21.json"', catalog_source)
+
+  def test_frontend_removes_dead_vehicle_editor_option_helpers(self):
+    app_source = Path("assets/js/app.js").read_text(encoding="utf-8")
+    editor_source = Path("assets/js/vehicle-editor-view.js").read_text(encoding="utf-8")
+
+    self.assertNotIn("function selectedVehicle()", app_source)
+    self.assertNotIn("buildCvProgrammingVehicleHandlers(vehicle)", app_source)
+    self.assertNotIn("function energyTypeOptions()", editor_source)
+    self.assertNotIn("function carSubtypeOptions()", editor_source)
+    self.assertNotIn("function vehicleKindOptionMeta(", editor_source)
+
 
 if __name__ == "__main__":
   unittest.main()

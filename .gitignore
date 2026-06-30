@@ -17,3 +17,4 @@ data/*.sqlite3
 data/*.sqlite3-*
 data/vehicle-images/*
 !data/vehicle-images/.gitkeep
+config/controllers/*.json

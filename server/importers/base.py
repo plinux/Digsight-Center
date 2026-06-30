@@ -13,6 +13,7 @@ class ImportFormatDescriptor:
   label: str
   extensions: list[str] = field(default_factory=list)
   public_files: list[str] = field(default_factory=list)
+  function_icon_mapping_files: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

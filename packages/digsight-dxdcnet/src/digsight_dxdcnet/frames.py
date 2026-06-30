@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from typing import List
 
+from digsight_dxdcnet._validation import validate_int_range
 from digsight_dxdcnet.constants import WARNING_CHECKSUM_INVALID, WARNING_LENGTH_MISMATCH
 
 
@@ -80,9 +81,9 @@ def encode_udp_frame(frame: DXDCNetFrame) -> bytes:
 
 
 def build_udp_frame(device_type: int, source_id: int, command: int, payload: bytes) -> bytes:
-  device_type = _validate_frame_field("device_type", device_type, 0x0F)
-  source_id = _validate_frame_field("source_id", source_id, 0x7F)
-  command = _validate_frame_field("command", command, 0xFF)
+  device_type = validate_int_range("device_type", device_type, 0, 0x0F)
+  source_id = validate_int_range("source_id", source_id, 0, 0x7F)
+  command = validate_int_range("command", command, 0, 0xFF)
   payload = bytes(payload)
   length = 4 + len(payload)
   if length > 0x0F:
@@ -95,13 +96,3 @@ def build_udp_frame(device_type: int, source_id: int, command: int, payload: byt
     command,
   ]) + payload
   return raw_without_checksum + bytes([calculate_udp_checksum(raw_without_checksum)])
-
-
-def _validate_frame_field(name: str, value: int, maximum: int) -> int:
-  try:
-    numeric_value = int(value)
-  except (TypeError, ValueError) as exc:
-    raise ValueError(f"{name} must be an integer in 0..0x{maximum:02x}") from exc
-  if numeric_value < 0 or numeric_value > maximum:
-    raise ValueError(f"{name} must be in 0..0x{maximum:02x}")
-  return numeric_value

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 
+from digsight_dxdcnet._validation import validate_byte, validate_int_range
 from digsight_dxdcnet.constants import (
   CMD_PROGRAM_TRACK_ACK,
   CMD_PROGRAM_TRACK_STANDARD,
@@ -15,14 +16,6 @@ from digsight_dxdcnet.constants import (
   PROGRAMMER_OP_NORMAL,
 )
 from digsight_dxdcnet.frames import DXDCNetFrame, build_udp_frame
-
-
-def _validate_range(name: str, value: int, minimum: int, maximum: int) -> int:
-  if not isinstance(value, int):
-    raise ValueError(f"{name} must be an integer")
-  if value < minimum or value > maximum:
-    raise ValueError(f"{name} must be in {minimum}..{maximum}")
-  return value
 
 
 @dataclass(frozen=True)
@@ -91,10 +84,10 @@ def build_programmer_frame(
   value: int,
   pom_address: int | None = None,
 ) -> bytes:
-  client_id = _validate_range("client_id", client_id, 0, 0x7F)
-  mode = _validate_range("mode", mode, 0, 0x07)
-  op = _validate_range("op", op, 0, 0x07)
-  value = _validate_range("value", value, 0, 0xFF)
+  client_id = validate_int_range("client_id", client_id, 0, 0x7F)
+  mode = validate_int_range("mode", mode, 0, 0x07)
+  op = validate_int_range("op", op, 0, 0x07)
+  value = validate_byte("value", value)
   if register < 0 or register > 1023:
     raise ValueError("Programmer register must be in 0..1023")
   is_main_track_pom = op in {PROGRAMMER_OP_MAIN_LOCO_POM, PROGRAMMER_OP_MAIN_ACCESSORY_POM}

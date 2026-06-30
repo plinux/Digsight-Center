@@ -1,3 +1,4 @@
+import ast
 import json
 import subprocess
 import tempfile
@@ -13,7 +14,7 @@ def assert_controller_config_safe_for_public_repo(testcase: unittest.TestCase, p
   testcase.assertEqual(
     data.get("ip"),
     PUBLIC_CONTROLLER_IP_PLACEHOLDER,
-    f"tracked controller config must keep placeholder IP in {path}",
+    f"public controller config sample must keep placeholder IP in {path}",
   )
 
 
@@ -26,13 +27,10 @@ class PublicRepoHygieneTest(unittest.TestCase):
       with self.assertRaises(AssertionError):
         assert_controller_config_safe_for_public_repo(self, path)
 
-  def test_tracked_controller_configs_keep_placeholder_ip(self):
+  def test_controller_configs_are_runtime_generated_not_tracked(self):
     result = subprocess.run(["git", "ls-files", "config/controllers/*.json"], check=True, text=True, capture_output=True)
     config_files = [Path(file_name) for file_name in result.stdout.splitlines()]
-    self.assertTrue(config_files)
-    for path in config_files:
-      with self.subTest(path=str(path)):
-        assert_controller_config_safe_for_public_repo(self, path)
+    self.assertEqual(config_files, [])
 
   def test_root_protocol_package_shims_are_not_tracked(self):
     result = subprocess.run(["git", "ls-files", "train_dcc", "digsight_dxdcnet"], check=True, text=True, capture_output=True)
@@ -64,6 +62,27 @@ class PublicRepoHygieneTest(unittest.TestCase):
         continue
       text = path.read_text(encoding="utf-8", errors="ignore")
       self.assertNotIn(blocked_controller_ip, text, f"real fixture controller IP leaked in {file_name}")
+
+  def test_unittest_test_methods_have_unique_names_per_class(self):
+    result = subprocess.run(["git", "ls-files", "tests"], check=True, text=True, capture_output=True)
+    duplicates = []
+    for file_name in result.stdout.splitlines():
+      path = Path(file_name)
+      if path.suffix != ".py":
+        continue
+      tree = ast.parse(path.read_text(encoding="utf-8"), filename=file_name)
+      for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+          continue
+        seen = {}
+        for child in node.body:
+          if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) or not child.name.startswith("test_"):
+            continue
+          previous_line = seen.get(child.name)
+          if previous_line is not None:
+            duplicates.append(f"{file_name}:{child.lineno}: {node.name}.{child.name} duplicates line {previous_line}")
+          seen[child.name] = child.lineno
+    self.assertEqual(duplicates, [])
 
 
 if __name__ == "__main__":

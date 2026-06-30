@@ -27,7 +27,10 @@ def json_body(body: bytes) -> dict:
 
 
 def resource_id(route: str) -> str:
-  return route.rsplit("/", 1)[-1]
+  value = route.rsplit("/", 1)[-1]
+  if not value:
+    raise ValueError("resource id must not be empty")
+  return value
 
 
 def success(data, status: int = 200):

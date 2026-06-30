@@ -28,6 +28,7 @@ export const appState = {
   functions: [],
   categories: [],
   consists: [],
+  lastError: null,
   selectedVehicleId: "",
   editingVehicleId: "",
   editingVehicleDraft: null,
@@ -39,12 +40,6 @@ export const appState = {
   cabs: {
     left: createCabState(),
     right: createCabState()
-  },
-  control: {
-    vehicleId: "",
-    speed: 0,
-    direction: "forward",
-    functions: {}
   },
   dcControl: {
     voltageV: 0,
@@ -63,6 +58,7 @@ export function replaceState(nextState) {
   appState.functions = nextState.functions || [];
   appState.categories = nextState.categories || [];
   appState.consists = nextState.consists || [];
+  appState.lastError = nextState.last_error || null;
   ensureCabVehicles();
 }
 
@@ -101,9 +97,4 @@ function ensureCabVehicles() {
     appState.cabs.right.vehicleId = appState.vehicles[1].id;
   }
   appState.selectedVehicleId = appState.cabs[appState.activeCabId]?.vehicleId || appState.cabs.left.vehicleId || "";
-  const activeCab = appState.cabs[appState.activeCabId] || appState.cabs.left;
-  appState.control.vehicleId = appState.selectedVehicleId;
-  appState.control.speed = activeCab.speed;
-  appState.control.direction = activeCab.direction;
-  appState.control.functions = activeCab.functions;
 }

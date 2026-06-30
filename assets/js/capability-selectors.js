@@ -11,6 +11,16 @@ function appendEmptyOption(select, label) {
   select.disabled = true;
 }
 
+function selectedDescriptorValue(options, key, currentValue, defaultValue) {
+  if (options.some((item) => item[key] === currentValue)) {
+    return currentValue;
+  }
+  if (options.some((item) => item[key] === defaultValue)) {
+    return defaultValue;
+  }
+  return options[0][key];
+}
+
 export function renderControllerKindOptions(elements, capabilities = {}) {
   const options = asArray(capabilities.controllers);
   if (!options.length) {
@@ -18,20 +28,20 @@ export function renderControllerKindOptions(elements, capabilities = {}) {
     return;
   }
 
-  const defaultKind = options.some((item) => item.kind === capabilities.default_controller_kind)
-    ? capabilities.default_controller_kind
-    : options[0].kind;
   const currentValue = elements.controllerKindSelect.value;
   elements.controllerKindSelect.disabled = false;
   elements.controllerKindSelect.replaceChildren(...options.map((item) => {
     const option = document.createElement("option");
     option.value = item.kind;
-    option.textContent = item.label;
+    option.textContent = item.display_name || item.label || item.kind;
     return option;
   }));
-  elements.controllerKindSelect.value = options.some((item) => item.kind === currentValue)
-    ? currentValue
-    : defaultKind;
+  elements.controllerKindSelect.value = selectedDescriptorValue(
+    options,
+    "kind",
+    currentValue,
+    capabilities.default_controller_kind,
+  );
 }
 
 export function renderImportFormatOptions(elements, capabilities = {}) {
@@ -42,9 +52,6 @@ export function renderImportFormatOptions(elements, capabilities = {}) {
     return;
   }
 
-  const defaultFormat = options.some((item) => item.format === capabilities.default_import_format)
-    ? capabilities.default_import_format
-    : options[0].format;
   const currentValue = elements.importFormatSelect.value;
   elements.importFormatSelect.disabled = false;
   elements.importFormatSelect.replaceChildren(...options.map((item) => {
@@ -53,9 +60,12 @@ export function renderImportFormatOptions(elements, capabilities = {}) {
     option.textContent = item.label;
     return option;
   }));
-  elements.importFormatSelect.value = options.some((item) => item.format === currentValue)
-    ? currentValue
-    : defaultFormat;
+  elements.importFormatSelect.value = selectedDescriptorValue(
+    options,
+    "format",
+    currentValue,
+    capabilities.default_import_format,
+  );
   const selected = options.find((item) => item.format === elements.importFormatSelect.value);
   elements.importConfigFileInput.accept = selected?.extensions?.length ? selected.extensions.join(",") : "";
 }

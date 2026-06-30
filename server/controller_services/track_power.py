@@ -3,7 +3,7 @@
 from datetime import datetime
 
 from server import models
-from server.controllers.base import ControllerOperationNotSupported, TrackOutputRequest
+from server.controllers.base import ControllerOperationNotSupported, ControllerProtocolNotSupported, TrackOutputRequest
 from server.controller_services.results import ServiceResult
 
 
@@ -108,6 +108,8 @@ class TrackPowerService:
       )
     except ControllerOperationNotSupported as exc:
       return self.operation_not_supported_response(exc)
+    except ControllerProtocolNotSupported as exc:
+      return self.protocol_not_supported_response(exc)
     except TimeoutError as exc:
       support.mark_controller_unreachable(state, "track_power_timeout")
       return ServiceResult.failure(
@@ -205,7 +207,7 @@ class TrackPowerService:
   ):
     adapter = self.ensure_supported(controller, "track_power", "track_power")
     return adapter.send_track_output_request(
-      self.controller_session,
+      self.controller_session_for(controller),
       controller,
       TrackOutputRequest(
         powered=powered,
@@ -214,7 +216,7 @@ class TrackPowerService:
         dc_direction_positive=dc_direction_positive,
         timeout_seconds=float(controller.get("track_power_timeout_seconds", 1.5)),
       ),
-      transport=self.udp_transport,
+      transport=self.controller_transport,
     )
 
   def _track_output_success_payload(
@@ -274,7 +276,9 @@ def validate_dc_direction(value) -> str:
 def validate_dc_voltage(controller: dict, value) -> float:
   profiles = controller.get("track_profiles", models.default_track_profiles())
   profile = profiles.get(models.TRACK_MODE_DC, models.default_track_profiles()[models.TRACK_MODE_DC])
-  max_voltage = float(profile.get("max_voltage_v") or models.default_track_profiles()[models.TRACK_MODE_DC]["max_voltage_v"])
+  max_voltage = float(
+    profile.get("max_target_voltage_v") or models.default_track_profiles()[models.TRACK_MODE_DC]["max_target_voltage_v"]
+  )
   voltage = float(value)
   if voltage < 0 or voltage > max_voltage:
     raise ValueError(f"DC voltage must be 0..{max_voltage} V")
@@ -289,6 +293,8 @@ def track_output_value(track_mode: str, profile: dict, powered: bool) -> int:
   if not powered:
     return 0
   if track_mode == models.TRACK_MODE_DC:
-    voltage = float(profile.get("voltage_v") or models.default_track_profiles()[models.TRACK_MODE_DC]["voltage_v"])
+    voltage = float(
+      profile.get("target_voltage_v") or models.default_track_profiles()[models.TRACK_MODE_DC]["target_voltage_v"]
+    )
     return dc_output_value(voltage)
   return max(0, min(255, int(profile.get("output_value", 0))))

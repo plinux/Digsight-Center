@@ -21,6 +21,7 @@ class Z21ConfigImporter:
     label="Z21 .z21",
     extensions=[".z21"],
     public_files=["/config/function-icon-mappings/z21.json"],
+    function_icon_mapping_files=["/config/function-icon-mappings/z21.json"],
   )
 
   def __init__(self, image_dir: Path | str):

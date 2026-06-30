@@ -4,6 +4,7 @@ from pathlib import Path
 import sqlite3
 from contextlib import contextmanager
 import inspect
+import json
 
 from server.vehicle_store import VehicleStore
 
@@ -78,6 +79,36 @@ class VehicleStoreCoreTest(unittest.TestCase):
         self.assertTrue(all(function["trigger_mode"] == "toggle" for function in functions))
         self.assertTrue(all(function["show_function_number"] for function in functions))
         self.assertTrue(all(function["is_configured"] for function in functions))
+
+  def test_vehicle_store_seeds_controller_default_configs(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      store = VehicleStore(Path(temp_dir) / "vehicles.sqlite3")
+
+      configs = store.list_controller_default_configs()
+
+      configs_by_kind = {config["kind"]: config for config in configs}
+      self.assertIn("digsight_controller", configs_by_kind)
+      digsight_config = configs_by_kind["digsight_controller"]
+      self.assertEqual(digsight_config["config_file_name"], "Digsight_D9000.json")
+      self.assertEqual(digsight_config["sort_order"], 0)
+      payload = digsight_config["config"]
+      self.assertEqual(payload["display_name"], "动芯 拾Pro")
+      self.assertEqual(payload["protocol"], "DXDCNet")
+      self.assertEqual(payload["ip"], "0.0.0.0")
+      self.assertEqual(payload["transport"]["udp_port"], 12000)
+      self.assertEqual(payload["transport"]["local_udp_port"], 6667)
+      self.assertEqual(payload["transport"]["udp_checksum_algorithm"], "xor")
+      self.assertEqual(set(payload["track_profiles"].keys()), {"n", "ho", "g", "dc"})
+
+      con = sqlite3.connect(store.path)
+      try:
+        raw_json = con.execute(
+          "SELECT config_json FROM controller_default_configs WHERE kind = ?",
+          ("digsight_controller",),
+        ).fetchone()[0]
+      finally:
+        con.close()
+      self.assertEqual(json.loads(raw_json), payload)
 
   def test_initial_test_vehicle_seed_backfills_missing_fixtures_for_seed_only_library(self):
     with tempfile.TemporaryDirectory() as temp_dir:

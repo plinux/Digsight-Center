@@ -7,7 +7,9 @@ from server.api import ApiRouter
 from server.api_support.controller import ControllerApiSupport
 from server.api_support.context import ApiSupportContext
 from server.api_support.controller_service import ControllerServicePorts, ControllerServiceSupport
+from server.app_state import default_state
 from server.controller_service import ControllerService
+from server.controller_sessions import ControllerSessionRegistry, default_controller_session_registry
 from server.controller_services.results import ServiceResult
 from server.controller_services.cv_programming import CvProgrammingService
 from server.controller_services.loco_control import LocoCommandService
@@ -22,6 +24,8 @@ from server.models import CONTROLLER_KIND_DIGSIGHT
 class LocoCommandKindFakeAdapter:
   kind = "fake_controller"
   label = "Fake Controller"
+  default_display_name = "Fake Controller"
+  protocol = "FakeProtocol"
   config_file_name = "fake_controller.json"
   capabilities = SimpleNamespace(
     track_power=False,
@@ -36,6 +40,9 @@ class LocoCommandKindFakeAdapter:
     self.speed_calls = 0
     self.function_calls = 0
     self.control_calls = 0
+
+  def controller_client_id(self, controller):
+    return int(controller.get("client_id", 1))
 
   def request_loco_control_grant(self, *args, **kwargs):
     self.control_calls += 1
@@ -70,6 +77,102 @@ class LocoCommandKindSupport:
 
 
 class ControllerServiceBoundaryTest(unittest.TestCase):
+  def fake_controller_session_registry(self, session=None):
+    registry = ControllerSessionRegistry()
+    registry.register("fake_controller", "FakeProtocol", lambda _transport, _context: session or object())
+    return registry
+
+  def controller_state_with_unsupported_protocol(self):
+    state = default_state()
+    controller = state["controller"]
+    controller["protocol"] = "ECoS"
+    controller["ip"] = "192.0.2.10"
+    controller["udp_port"] = 12000
+    controller["local_udp_port"] = 6667
+    controller["udp_checksum_algorithm"] = "xor"
+    controller["controller_reachable"] = True
+    controller["last_probe_ok"] = True
+    controller["last_controller_seen_at"] = "2026-06-28T00:00:00+08:00"
+    controller["booster_status"] = {
+      "source": "dxdcnet_status_0x23",
+      "power_on": True,
+      "dcc_mode": True,
+      "track_mode": "n",
+    }
+    controller["programming_track_status"] = {
+      "source": "dxdcnet_status_0x23",
+      "track_mode": "n",
+      "dcc_mode": True,
+      "programming_track_busy": False,
+      "programming_track_current_ma": 60,
+      "output_value": 0x78,
+      "current_limit_ma": 200,
+    }
+    controller["safety_snapshot"]["booster_status_fresh"] = True
+    controller["safety_snapshot"]["programming_track_status_fresh"] = True
+    state["vehicles"].append({
+      "id": "v3",
+      "name": "N 测试车",
+      "address": 3,
+      "track_mode": "n",
+      "type": 0,
+    })
+    return state
+
+  def assert_controller_protocol_not_supported(self, route, body):
+    response_body, status = ApiRouter(None).handle_json(
+      "PATCH" if route == "/api/controller/settings" else "POST",
+      route,
+      json.dumps(body).encode("utf-8"),
+      self.controller_state_with_unsupported_protocol(),
+    )
+    payload = json.loads(response_body.decode("utf-8"))
+    self.assertEqual(status, 409)
+    self.assertFalse(payload["ok"])
+    self.assertEqual(payload["error"]["type"], "controller_protocol_not_supported")
+    self.assertEqual(payload["error"]["message"], "当前控制器配置了不支持的协议")
+    self.assertEqual(payload["debug"]["controller_kind"], "digsight_controller")
+    self.assertEqual(payload["debug"]["protocol"], "ECoS")
+    self.assertEqual(payload["debug"]["supported_protocols"], ["DXDCNet"])
+
+  def test_controller_read_info_reports_unsupported_protocol(self):
+    self.assert_controller_protocol_not_supported("/api/controller/read-info", {})
+
+  def test_track_power_reports_unsupported_protocol_before_transport(self):
+    self.assert_controller_protocol_not_supported("/api/track-power", {"powered": True})
+
+  def test_cv_read_reports_unsupported_protocol_before_transport(self):
+    self.assert_controller_protocol_not_supported("/api/cv/read", {"cv": 1})
+
+  def test_cv_write_reports_unsupported_protocol_before_transport(self):
+    self.assert_controller_protocol_not_supported("/api/cv/write", {"cv": 1, "value": 3, "confirmed": True})
+
+  def test_chip_info_read_reports_unsupported_protocol_before_transport(self):
+    self.assert_controller_protocol_not_supported("/api/chip-info/read", {})
+
+  def test_address_read_reports_unsupported_protocol_before_transport(self):
+    self.assert_controller_protocol_not_supported("/api/address/read", {})
+
+  def test_address_write_reports_unsupported_protocol_before_transport(self):
+    self.assert_controller_protocol_not_supported("/api/address/write", {"address": 12, "confirmed": True})
+
+  def test_loco_speed_reports_unsupported_protocol_before_transport(self):
+    self.assert_controller_protocol_not_supported(
+      "/api/loco/speed",
+      {"vehicle_id": "v3", "speed": 10, "direction": "forward"},
+    )
+
+  def test_controller_settings_apply_to_device_reports_unsupported_protocol(self):
+    self.assert_controller_protocol_not_supported(
+      "/api/controller/settings",
+      {
+        "apply_to_device": True,
+        "track_profiles": {
+          "n": {"target_voltage_v": 12.0, "target_current_limit_ma": 2000},
+        },
+      },
+    )
+
   def test_api_router_is_http_facade_only(self):
     router_source = inspect.getsource(ApiRouter)
     forbidden_names = (
@@ -206,8 +309,8 @@ class ControllerServiceBoundaryTest(unittest.TestCase):
     service = ControllerService(
       service_support=LocoCommandKindSupport(),
       controller_registry=default_controller_registry(),
-      controller_session=object(),
-      udp_transport=object(),
+      controller_session_registry=default_controller_session_registry(controller_transport=object()),
+      controller_transport=object(),
     )
 
     failure = service.digital_operation_mode_failure({"track_mode": "dc"}, "车辆控制")
@@ -238,12 +341,25 @@ class ControllerServiceBoundaryTest(unittest.TestCase):
       "def _consist_member_targets(",
       "def _consist_target_direction(",
       "def _vehicle_loco_target(",
-      "def _handle_consist_speed(",
+      "def _handle_consist_operation(",
       "def _exchange_dxdcnet(",
       "parse_booster_status",
     ]
     for term in forbidden_terms:
       self.assertNotIn(term, router_source)
+
+  def test_digsight_loco_feedback_uses_shared_helpers(self):
+    source = inspect.getsource(DigsightDXDCNetControllerAdapter)
+    router_source = inspect.getsource(ApiRouter)
+    self.assertIn("def _build_loco_feedback_matcher(", source)
+    self.assertIn("def _first_loco_feedback(", source)
+    for old_helper in [
+      "_build_loco_speed_feedback_matcher",
+      "_build_loco_function_feedback_matcher",
+      "_first_loco_speed_feedback",
+      "_first_loco_function_feedback",
+    ]:
+      self.assertNotIn(f"def {old_helper}(", source)
     self.assertNotIn("build_status_request_frame(", router_source)
     self.assertNotIn("build_version_request_frame(", router_source)
     self.assertNotIn("build_parameter_read_frame(", router_source)
@@ -254,14 +370,22 @@ class ControllerServiceBoundaryTest(unittest.TestCase):
     service = ControllerService(
       service_support=object(),
       controller_registry=default_controller_registry(),
-      controller_session=object(),
-      udp_transport=object(),
+      controller_session_registry=default_controller_session_registry(controller_transport=object()),
+      controller_transport=object(),
     )
 
     adapter = service.adapter_for({})
 
     self.assertEqual(adapter.kind, "digsight_controller")
     self.assertTrue(adapter.capabilities.track_power)
+
+  def test_controller_service_delegates_client_id_policy_to_adapter(self):
+    service_source = inspect.getsource(ControllerService)
+    adapter_source = inspect.getsource(DigsightDXDCNetControllerAdapter)
+    self.assertIn("return self.adapter_for(controller).controller_client_id(controller)", service_source)
+    self.assertNotIn("DXDCNet client id must be in 0..127", service_source)
+    self.assertIn("def controller_client_id(self, controller: dict) -> int:", adapter_source)
+    self.assertIn("DXDCNet client id must be in 0..127", adapter_source)
 
   def test_controller_service_support_defines_narrow_router_boundary(self):
     support_source = inspect.getsource(ControllerServiceSupport)
@@ -396,12 +520,18 @@ class ControllerServiceBoundaryTest(unittest.TestCase):
     self.assertEqual(no_ack.error_type, "cv_write_no_ack")
     self.assertEqual(no_ack.debug["value"], 5)
 
+  def test_controller_service_cv_write_send_failures_share_helper(self):
+    source = inspect.getsource(CvProgrammingService._send_cv_write_attempt)
+    self.assertIn("_cv_write_send_failure_response(", source)
+    self.assertNotIn('"cv_write_timeout",\n        "写入 CV 超时"', source)
+    self.assertNotIn('"cv_write_transport_error",\n        "写入 CV 通信失败"', source)
+
   def test_controller_service_default_adapter_kind_stays_digsight(self):
     service = ControllerService(
       service_support=object(),
       controller_registry=default_controller_registry(),
-      controller_session=object(),
-      udp_transport=object(),
+      controller_session_registry=default_controller_session_registry(controller_transport=object()),
+      controller_transport=object(),
     )
 
     self.assertEqual(service.adapter_for({}).kind, CONTROLLER_KIND_DIGSIGHT)
@@ -414,6 +544,7 @@ class ControllerServiceBoundaryTest(unittest.TestCase):
     ])
     self.assertNotIn("dxdcnet_session", sources)
     self.assertNotIn("default_dxdcnet_session", sources)
+    self.assertNotIn("udp_transport", sources)
 
   def test_api_support_uses_adapter_status_hooks(self):
     from pathlib import Path
@@ -447,8 +578,8 @@ class ControllerServiceBoundaryTest(unittest.TestCase):
     service = ControllerService(
       service_support=LocoCommandKindSupport(),
       controller_registry=registry,
-      controller_session=object(),
-      udp_transport=object(),
+      controller_session_registry=self.fake_controller_session_registry(),
+      controller_transport=object(),
     )
     state = {"controller": {"kind": adapter.kind}}
 

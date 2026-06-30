@@ -96,9 +96,20 @@ CREATE TABLE IF NOT EXISTS consist_members (
 
 CREATE TABLE IF NOT EXISTS vehicle_imports (
   id TEXT PRIMARY KEY,
+  source_format TEXT NOT NULL,
+  source_key TEXT NOT NULL,
   file_name TEXT NOT NULL,
   summary_json TEXT NOT NULL,
   imported_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS controller_default_configs (
+  kind TEXT PRIMARY KEY,
+  config_file_name TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_vehicle_functions_vehicle_id ON vehicle_functions(vehicle_id);

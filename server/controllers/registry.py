@@ -1,7 +1,9 @@
 """Controller adapter registry."""
 
-from server import models
+from server.controllers.base import controller_display_name, controller_protocol
 from server.controllers.digsight import DigsightDXDCNetControllerAdapter
+from server.descriptor_paths import validate_descriptor_file_name
+from server.public_paths import CONTROLLER_CONFIG_PUBLIC_PREFIX, CONTROLLER_CONFIG_RELATIVE_PREFIX
 
 
 class ControllerRegistry:
@@ -30,28 +32,50 @@ class ControllerRegistry:
       raise ValueError(f"Default controller is not registered: {self._default_kind}")
     return self._default_kind
 
-  def descriptors(self) -> list[dict]:
-    return [self._descriptor(adapter) for adapter in sorted(self._adapters.values(), key=self._descriptor_sort_key)]
+  def kinds(self) -> list[str]:
+    return [adapter.kind for adapter in self._sorted_adapters()]
+
+  def adapters(self) -> list:
+    return self._sorted_adapters()
+
+  def descriptors(self, controller_configs: dict | None = None) -> list[dict]:
+    configs = controller_configs or {}
+    return [
+      self._descriptor(adapter, configs.get(adapter.kind))
+      for adapter in self._sorted_adapters()
+    ]
 
   def config_file_name(self, kind: str) -> str:
     adapter = self.get(kind)
-    return adapter.config_file_name
+    return validate_descriptor_file_name(adapter.config_file_name, "controller config_file_name")
 
   def config_file_names(self) -> list[str]:
-    return [self.config_file_name(adapter.kind) for adapter in sorted(self._adapters.values(), key=self._descriptor_sort_key)]
+    return [self.config_file_name(adapter.kind) for adapter in self._sorted_adapters()]
+
+  def _sorted_adapters(self) -> list:
+    return sorted(self._adapters.values(), key=self._descriptor_sort_key)
 
   def _descriptor_sort_key(self, adapter):
     default_rank = 0 if adapter.kind == self._default_kind else 1
     return (default_rank, adapter.label, adapter.kind)
 
-  def _descriptor(self, adapter) -> dict:
+  def _descriptor(self, adapter, config: dict | None = None) -> dict:
+    display_name = controller_display_name(adapter, config)
+    protocol = controller_protocol(adapter, config)
+    config_file_name = validate_descriptor_file_name(adapter.config_file_name, "controller config_file_name")
+    transport_descriptor = adapter.transport_descriptor.to_dict()
     return {
       "kind": adapter.kind,
-      "label": adapter.label,
+      "label": display_name,
+      "display_name": display_name,
+      "protocol": protocol,
       "default_ip": getattr(adapter, "default_ip", ""),
-      "config_file_name": self.config_file_name(adapter.kind),
+      "config_file_name": config_file_name,
+      "config_file": f"{CONTROLLER_CONFIG_RELATIVE_PREFIX}{config_file_name}",
+      "config_public_path": f"{CONTROLLER_CONFIG_PUBLIC_PREFIX}{config_file_name}",
       "capabilities": adapter.capabilities.to_dict(),
-      "transport_defaults": adapter.transport_defaults.to_dict(),
+      "transport_descriptor": transport_descriptor,
+      "endpoint_readiness": transport_descriptor["endpoint_readiness"],
     }
 
 

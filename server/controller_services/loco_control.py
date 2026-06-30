@@ -2,6 +2,7 @@
 
 from server.controllers.base import (
   ControllerOperationNotSupported,
+  ControllerProtocolNotSupported,
   LocoControlGrantRequest,
   LocoFunctionRequest,
   LocoSpeedRequest,
@@ -76,6 +77,8 @@ class LocoCommandService:
           status=504,
           debug={"request_hex": "", "vehicle_id": target.get("vehicle_id")},
         )
+      except ControllerProtocolNotSupported as exc:
+        return None, self.protocol_not_supported_response(exc)
       except (OSError, ValueError) as exc:
         support.mark_controller_unreachable(state, "loco_control_transport_error")
         return None, ServiceResult.failure(
@@ -106,10 +109,10 @@ class LocoCommandService:
     loco_command_kind: str,
   ):
     control_grant = adapter.request_loco_control_grant(
-      self.controller_session,
+      self.controller_session_for(controller),
       controller,
       LocoControlGrantRequest(address=address, client_id=command_request.client_id),
-      transport=self.udp_transport,
+      transport=self.controller_transport,
     )
     denied = self._loco_control_denied_response(control_grant, target)
     if denied:
@@ -155,16 +158,16 @@ class LocoCommandService:
   def _send_loco_command(self, adapter, controller: dict, command_request, loco_command_kind: str):
     if loco_command_kind == "speed":
       return adapter.send_loco_speed_request(
-        self.controller_session,
+        self.controller_session_for(controller),
         controller,
         command_request,
-        transport=self.udp_transport,
+        transport=self.controller_transport,
       )
     return adapter.send_loco_function_request(
-      self.controller_session,
+      self.controller_session_for(controller),
       controller,
       command_request,
-      transport=self.udp_transport,
+      transport=self.controller_transport,
     )
 
   def _loco_control_denied_response(self, control_grant, target: dict):

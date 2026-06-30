@@ -15,8 +15,7 @@ class ApiSupportContext:
   import_registry: Any
   cv_read_sessions: Any
   image_dir: Path
-  controller_session: Any
-  udp_transport: Any
+  controller_transport: Any
 
   def save(self, state: dict) -> None:
     if not self.state_store:

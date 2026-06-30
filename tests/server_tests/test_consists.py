@@ -9,34 +9,11 @@ from digsight_dxdcnet.constants import CMD_LOCO_CONTROL_ACK, CMD_LOCO_SPEED, DEV
 from digsight_dxdcnet.frames import build_udp_frame
 from digsight_dxdcnet.loco_control import build_loco_control_request_frame, build_loco_speed_frame
 from server.vehicle_store import VehicleStore
-from tests.server_tests.controller_test_env import temporary_vehicle_router
+from tests.server_tests.controller_test_env import ready_loco_control_state, temporary_vehicle_router
 from tests.server_tests.fake_udp import FakeRequestMappedUdpTransport
 
 
 class ConsistApiTest(unittest.TestCase):
-  def _ready_loco_state(self):
-    state = default_state()
-    state["controller"].update({
-      "track_mode": "ho",
-      "udp_port": 12000,
-      "local_udp_port": 6667,
-      "udp_checksum_algorithm": "xor",
-      "last_probe_ok": True,
-      "controller_reachable": True,
-      "booster_status": {
-        "source": "dxdcnet_status_0x23",
-        "power_on": True,
-        "dcc_mode": True,
-      },
-      "safety_snapshot": {
-        "controller_endpoint_version": 1,
-        "last_read_info_at": "2026-06-22T00:00:00+08:00",
-        "booster_status_fresh": True,
-        "programming_track_status_fresh": True,
-      },
-    })
-    return state
-
   def _loco_control_ack(self, address: int):
     high = ((address >> 8) & 0x3F) | (0x80 if address > 0x7F else 0)
     return build_udp_frame(
@@ -126,7 +103,7 @@ class ConsistApiTest(unittest.TestCase):
     self.assertEqual(payload["error"]["type"], "protocol_not_ready")
 
   def test_consist_speed_fans_out_to_all_members_with_loco_safety_gate(self):
-    state = self._ready_loco_state()
+    state = ready_loco_control_state()
     state["vehicles"] = [
       {"id": "v1", "name": "A", "address": 11},
       {"id": "v2", "name": "B", "address": 22},
@@ -149,7 +126,7 @@ class ConsistApiTest(unittest.TestCase):
       control_b: [self._loco_control_ack(22)],
       request_b: [self._loco_speed_feedback(22, 42, "forward")],
     })
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/consists/local-consist-1/speed",
       b'{"speed":42,"direction":"forward"}',
@@ -162,7 +139,7 @@ class ConsistApiTest(unittest.TestCase):
     self.assertEqual(payload["data"]["control_mode"], "consist")
 
   def test_consist_stop_sets_speed_zero_for_all_members(self):
-    state = self._ready_loco_state()
+    state = ready_loco_control_state()
     state["vehicles"] = [
       {"id": "v1", "name": "A", "address": 11},
       {"id": "v2", "name": "B", "address": 22},
@@ -185,7 +162,7 @@ class ConsistApiTest(unittest.TestCase):
       control_b: [self._loco_control_ack(22)],
       request_b: [self._loco_speed_feedback(22, 0, "forward")],
     })
-    body, status = ApiRouter(None, udp_transport=transport).handle_json(
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
       "POST",
       "/api/consists/local-consist-1/stop",
       b"{}",

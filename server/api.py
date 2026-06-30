@@ -4,7 +4,7 @@ import copy
 from pathlib import Path
 from urllib.parse import urlparse
 
-from server import models, response
+from server import response
 from server.api_support import http_helpers
 from server.api_support.context import ApiSupportContext
 from server.api_support.controller import ControllerApiSupport
@@ -18,14 +18,11 @@ from server.api_support.routes import handler_for
 from server.api_support.vehicle_library import VehicleLibraryApiSupport
 from server.capabilities import gateway_capabilities
 from server.controller_service import ControllerService
-from server.controller_sessions import default_controller_session
+from server.controller_sessions import default_controller_session_registry
 from server.controllers.registry import default_controller_registry
 from server.cv_metadata import cv_metadata
 from server.cv_read_session import CVReadSessionRegistry
 from server.importers.registry import default_import_registry
-
-
-SCREEN_DIRECTION_LABELS = models.SCREEN_DIRECTION_LABELS
 
 
 class ApiRouter:
@@ -34,19 +31,22 @@ class ApiRouter:
     state_store,
     image_dir: Path = Path("data/vehicle-images"),
     probe_runner=None,
-    udp_transport=None,
-    controller_session=None,
+    controller_transport=None,
+    controller_session_registry=None,
     cv_read_sessions=None,
     vehicle_store=None,
     import_registry=None,
     controller_registry=None,
   ):
-    self.controller_session = controller_session or default_controller_session(udp_transport)
-    self.udp_transport = udp_transport
+    self.controller_transport = controller_transport
+    self.controller_registry = controller_registry or default_controller_registry()
+    self.controller_session_registry = controller_session_registry or default_controller_session_registry(
+      self.controller_registry,
+      controller_transport,
+    )
     self.cv_read_sessions = cv_read_sessions or CVReadSessionRegistry()
     self.vehicle_store = vehicle_store
     self.import_registry = import_registry or default_import_registry(Path(image_dir))
-    self.controller_registry = controller_registry or default_controller_registry()
     self.context = ApiSupportContext(
       state_store=state_store,
       vehicle_store=self.vehicle_store,
@@ -54,8 +54,7 @@ class ApiRouter:
       import_registry=self.import_registry,
       cv_read_sessions=self.cv_read_sessions,
       image_dir=Path(image_dir),
-      controller_session=self.controller_session,
-      udp_transport=self.udp_transport,
+      controller_transport=self.controller_transport,
     )
     controller_service_ports = ControllerServicePorts(
       mark_controller_unreachable_port=self.context.mark_controller_unreachable,
@@ -71,8 +70,8 @@ class ApiRouter:
     self.controller_service = ControllerService(
       service_support=self.controller_service_support,
       controller_registry=self.controller_registry,
-      controller_session=self.controller_session,
-      udp_transport=self.udp_transport,
+      controller_session_registry=self.controller_session_registry,
+      controller_transport=self.controller_transport,
     )
     self.controller_api = ControllerApiSupport(self.context, self.controller_service, probe_runner=probe_runner)
     self.vehicle_api = VehicleLibraryApiSupport(self.context)
@@ -119,7 +118,9 @@ class ApiRouter:
 
   def _build_handlers(self) -> dict:
     return {
-      "capabilities.get": lambda route, body, state: http_helpers.success(gateway_capabilities(self.controller_registry, self.import_registry)),
+      "capabilities.get": lambda route, body, state: http_helpers.success(
+        gateway_capabilities(self.controller_registry, self.import_registry, self._controller_descriptor_configs(state))
+      ),
       "state.get": lambda route, body, state: self._state_response(state),
       "vehicles.list": lambda route, body, state: self.vehicle_api.list_vehicles(state),
       "categories.list": lambda route, body, state: self.vehicle_api.list_categories(state),
@@ -136,9 +137,8 @@ class ApiRouter:
       "controller.read_info": lambda route, body, state: self.controller_api.read_info(state),
       "controller.track_power": lambda route, body, state: self.controller_api.track_power(body, state),
       "controller.dc_control": lambda route, body, state: self.controller_api.dc_control(body, state),
-      "controller.connect": lambda route, body, state: self.controller_api.connect(body, state),
+      "controller.reset_config": lambda route, body, state: self.controller_api.reset_config(body, state),
       "controller.probe": lambda route, body, state: self.controller_api.probe(body, state),
-      "controller.disconnect": lambda route, body, state: self.controller_api.disconnect(state),
       "controller.track_mode": lambda route, body, state: self.controller_api.track_mode(body, state),
       "controller.settings": lambda route, body, state: self.controller_api.settings(body, state),
       "cv.read": lambda route, body, state: self.cv_programming_api.read_cv(body, state),
@@ -154,12 +154,19 @@ class ApiRouter:
       "consists.create": lambda route, body, state: self.vehicle_api.create_consist(body, state),
       "consists.patch": lambda route, body, state: self.vehicle_api.patch_consist(route, body, state),
       "consists.delete": lambda route, body, state: self.vehicle_api.delete_consist(route, state),
-      "consists.speed": lambda route, body, state: self.loco_control_api.handle_consist_speed(route, body, state),
+      "consists.operation": lambda route, body, state: self.loco_control_api.handle_consist_operation(route, body, state),
     }
 
   def _state_response(self, state: dict):
     state = self.context.state_with_vehicle_store_data(state)
     return http_helpers.success(copy.deepcopy(state))
+
+  def _controller_descriptor_configs(self, state: dict) -> dict:
+    if self.context.state_store and hasattr(self.context.state_store, "controller_descriptor_configs"):
+      return self.context.state_store.controller_descriptor_configs()
+    controller = state.get("controller", {}) if isinstance(state, dict) else {}
+    kind = controller.get("kind") if isinstance(controller, dict) else ""
+    return {kind: controller} if kind else {}
 
   def _not_found(self, route: str):
     return http_helpers.failure("not_found", "API 路径不存在", route, status=404)

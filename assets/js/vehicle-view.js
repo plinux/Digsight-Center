@@ -5,43 +5,6 @@ import {
   vehicleKindIcon
 } from "./vehicle-kind-icons.js";
 
-export function renderVehicleRegistry(container, vehicles, handlers = {}) {
-  container.replaceChildren();
-  const header = document.createElement("div");
-  header.className = "section-title";
-  const count = document.createElement("span");
-  count.textContent = `${vehicles.length} 辆`;
-  header.append(count);
-
-  const grid = document.createElement("div");
-  grid.className = "vehicle-grid";
-  for (const vehicle of vehicles) {
-    const card = document.createElement("article");
-    card.className = "vehicle-card";
-    card.append(vehicleImage(vehicle), vehicleText(vehicle, handlers));
-    const actions = document.createElement("div");
-    actions.className = "card-actions";
-    const edit = document.createElement("button");
-    edit.type = "button";
-    edit.textContent = "编辑";
-    edit.addEventListener("click", () => handlers.onEdit?.(vehicle.id));
-    const control = document.createElement("button");
-    control.type = "button";
-    control.textContent = "控制";
-    control.addEventListener("click", () => handlers.onControl?.(vehicle.id));
-    actions.append(edit, control);
-    card.append(actions);
-    grid.append(card);
-  }
-  if (!vehicles.length) {
-    const empty = document.createElement("p");
-    empty.className = "empty-state";
-    empty.textContent = "暂无车辆";
-    grid.append(empty);
-  }
-  container.append(header, grid);
-}
-
 export function resolveFunctionIcon(functionEntry = {}, catalog = FALLBACK_FUNCTION_ICON_CATALOG) {
   const mappings = catalog.mappings || {};
   const icons = catalog.icons || {};

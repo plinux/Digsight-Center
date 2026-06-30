@@ -13,6 +13,7 @@ class UnsupportedControllerAdapter:
   config_file_name = "unsupported_controller.json"
   capabilities = ControllerCapabilities(
     track_power=False,
+    dc_control=False,
     read_info=False,
     cv_programming=False,
     loco_control=False,
@@ -93,6 +94,9 @@ class ControllerAdapterCapabilitiesTest(unittest.TestCase):
 
   def test_track_power_requires_track_power_capability(self):
     self.assert_not_supported("POST", "/api/track-power", {"powered": True})
+
+  def test_dc_control_requires_dc_control_capability(self):
+    self.assert_not_supported("POST", "/api/dc-control", {"voltage": 6.0, "direction": "forward"})
 
   def test_cv_read_requires_cv_programming_capability(self):
     self.assert_not_supported("POST", "/api/cv/read", {"cv": 1})

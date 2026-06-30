@@ -1,5 +1,4 @@
 import json
-import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +6,7 @@ import zipfile
 
 import server.importers.z21_parser as z21_module
 from server.importers.z21_parser import Z21Importer
+from tests.server_tests.z21_fixture_builder import write_custom_z21_archive, write_minimal_z21_archive
 
 
 FIXTURE_DIR = Path("tests/fixtures")
@@ -14,31 +14,20 @@ FIXTURE_DIR = Path("tests/fixtures")
 
 class Z21ImporterTest(unittest.TestCase):
   def _create_minimal_z21(self, temp_dir: Path, function_rows: list[tuple]) -> Path:
-    sqlite_path = temp_dir / "Loco.sqlite"
-    con = sqlite3.connect(sqlite_path)
-    try:
-      con.execute(
-        "CREATE TABLE vehicles (id INTEGER PRIMARY KEY, position INTEGER, name TEXT, address INTEGER, type INTEGER, image_name TEXT, max_speed INTEGER)"
-      )
-      con.execute(
-        "CREATE TABLE functions (id INTEGER PRIMARY KEY, vehicle_id INTEGER, function INTEGER, shortcut TEXT, image_name TEXT, button_type INTEGER, time TEXT, position INTEGER, show_function_number INTEGER, is_configured INTEGER)"
-      )
-      con.execute("CREATE TABLE train_list (train_id TEXT, vehicle_id INTEGER, position INTEGER)")
-      con.execute(
-        "INSERT INTO vehicles (id, position, name, address, type, image_name, max_speed) VALUES (1, 0, '测试车', 3, 0, '', 100)"
-      )
-      for row in function_rows:
-        con.execute(
-          "INSERT INTO functions (id, vehicle_id, function, shortcut, image_name, button_type, time, position, show_function_number, is_configured) VALUES (?, 1, ?, ?, ?, ?, ?, ?, 1, 0)",
-          row,
-        )
-      con.commit()
-    finally:
-      con.close()
-    archive_path = temp_dir / "HO.z21"
-    with zipfile.ZipFile(archive_path, "w") as archive:
-      archive.write(sqlite_path, "export/test/Loco.sqlite")
-    return archive_path
+    functions = [
+      {
+        "id": row[0],
+        "function": row[1],
+        "shortcut": row[2],
+        "image_name": row[3],
+        "button_type": row[4],
+        "time": row[5],
+        "position": row[6],
+        "is_configured": 0,
+      }
+      for row in function_rows
+    ]
+    return write_minimal_z21_archive(temp_dir, functions=functions)
 
   def test_imports_known_samples(self):
     baselines = json.loads(Path("tests/fixtures/z21_baselines.json").read_text(encoding="utf-8"))
@@ -95,7 +84,6 @@ class Z21ImporterTest(unittest.TestCase):
   def test_rejects_archive_without_loco_sqlite(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       archive_path = Path(temp_dir) / "empty.z21"
-      import zipfile
       with zipfile.ZipFile(archive_path, "w") as archive:
         archive.writestr("note.txt", "not a z21 export")
       importer = Z21Importer(Path(temp_dir) / "vehicle-images")
@@ -137,12 +125,33 @@ class Z21ImporterTest(unittest.TestCase):
       self.assertEqual(by_number[2]["icon_name"], "function-generic")
       self.assertEqual(by_number[2]["z21_icon_name"], "unknown_z21_icon")
 
+  def test_icon_config_load_failures_are_reported_as_warnings(self):
+    with tempfile.TemporaryDirectory() as temp_name:
+      temp_dir = Path(temp_name)
+      archive_path = self._create_minimal_z21(temp_dir, [
+        (1, 0, "灯", "main_beam", 0, "", 0),
+      ])
+      bad_catalog_path = temp_dir / "function-icons.json"
+      bad_mapping_path = temp_dir / "z21.json"
+      bad_catalog_path.write_text("{bad catalog", encoding="utf-8")
+      bad_mapping_path.write_text("{bad mapping", encoding="utf-8")
+
+      result = Z21Importer(
+        temp_dir / "vehicle-images",
+        function_icon_catalog_path=bad_catalog_path,
+        function_icon_mapping_path=bad_mapping_path,
+      ).import_file(archive_path)
+
+      self.assertEqual(result.summary["warnings"], [
+        "function_icon_catalog_load_failed",
+        "function_icon_mapping_load_failed",
+      ])
+      self.assertEqual(result.functions[0]["icon_name"], "function-generic")
+
   def test_type3_vehicle_is_linked_to_train_list_consist_members(self):
     with tempfile.TemporaryDirectory() as temp_name:
       temp_dir = Path(temp_name)
-      sqlite_path = temp_dir / "Loco.sqlite"
-      con = sqlite3.connect(sqlite_path)
-      try:
+      def populate_database(con):
         con.execute(
           "CREATE TABLE vehicles (id INTEGER PRIMARY KEY, position INTEGER, name TEXT, address INTEGER, type INTEGER, image_name TEXT, max_speed INTEGER)"
         )
@@ -155,13 +164,8 @@ class Z21ImporterTest(unittest.TestCase):
         con.execute("INSERT INTO vehicles VALUES (100, 2, 'AB重联', 3, 3, '', 100)")
         con.execute("INSERT INTO train_list VALUES ('100', 1, 0)")
         con.execute("INSERT INTO train_list VALUES ('100', 2, 1)")
-        con.commit()
-      finally:
-        con.close()
 
-      archive_path = temp_dir / "HO.z21"
-      with zipfile.ZipFile(archive_path, "w") as archive:
-        archive.write(sqlite_path, "export/test/Loco.sqlite")
+      archive_path = write_custom_z21_archive(temp_dir, populate_database)
 
       result = Z21Importer(temp_dir / "vehicle-images").import_file(archive_path)
       consist = result.consists[0]
@@ -180,9 +184,7 @@ class Z21ImporterTest(unittest.TestCase):
   def test_type3_vehicle_with_non_locomotive_member_is_imported_as_train_set(self):
     with tempfile.TemporaryDirectory() as temp_name:
       temp_dir = Path(temp_name)
-      sqlite_path = temp_dir / "Loco.sqlite"
-      con = sqlite3.connect(sqlite_path)
-      try:
+      def populate_database(con):
         con.execute(
           "CREATE TABLE vehicles (id INTEGER PRIMARY KEY, position INTEGER, name TEXT, address INTEGER, type INTEGER, image_name TEXT, max_speed INTEGER)"
         )
@@ -195,13 +197,8 @@ class Z21ImporterTest(unittest.TestCase):
         con.execute("INSERT INTO vehicles VALUES (100, 2, '施工编组', 3, 3, '', 100)")
         con.execute("INSERT INTO train_list VALUES ('100', 1, 0)")
         con.execute("INSERT INTO train_list VALUES ('100', 2, 1)")
-        con.commit()
-      finally:
-        con.close()
 
-      archive_path = temp_dir / "HO.z21"
-      with zipfile.ZipFile(archive_path, "w") as archive:
-        archive.write(sqlite_path, "export/test/Loco.sqlite")
+      archive_path = write_custom_z21_archive(temp_dir, populate_database)
 
       result = Z21Importer(temp_dir / "vehicle-images").import_file(archive_path)
       control = next(vehicle for vehicle in result.vehicles if vehicle["id"] == "z21-ho-vehicle-100")
@@ -211,9 +208,7 @@ class Z21ImporterTest(unittest.TestCase):
   def test_import_prefills_brand_from_first_vehicle_name_token(self):
     with tempfile.TemporaryDirectory() as temp_name:
       temp_dir = Path(temp_name)
-      sqlite_path = temp_dir / "Loco.sqlite"
-      con = sqlite3.connect(sqlite_path)
-      try:
+      def populate_database(con):
         con.execute(
           "CREATE TABLE vehicles (id INTEGER PRIMARY KEY, position INTEGER, name TEXT, address INTEGER, type INTEGER, image_name TEXT, max_speed INTEGER)"
         )
@@ -222,13 +217,8 @@ class Z21ImporterTest(unittest.TestCase):
         )
         con.execute("INSERT INTO vehicles VALUES (1, 0, 'ROCO EK750 0604 (HO)', 604, 1, '', 6)")
         con.execute("INSERT INTO vehicles VALUES (2, 1, '   ', 605, 1, '', 100)")
-        con.commit()
-      finally:
-        con.close()
 
-      archive_path = temp_dir / "HO.z21"
-      with zipfile.ZipFile(archive_path, "w") as archive:
-        archive.write(sqlite_path, "export/test/Loco.sqlite")
+      archive_path = write_custom_z21_archive(temp_dir, populate_database)
 
       result = Z21Importer(temp_dir / "vehicle-images").import_file(archive_path)
       first = next(vehicle for vehicle in result.vehicles if vehicle["id"] == "z21-ho-vehicle-1")
@@ -239,9 +229,7 @@ class Z21ImporterTest(unittest.TestCase):
   def test_import_prefills_vehicle_kind_from_z21_categories(self):
     with tempfile.TemporaryDirectory() as temp_name:
       temp_dir = Path(temp_name)
-      sqlite_path = temp_dir / "Loco.sqlite"
-      con = sqlite3.connect(sqlite_path)
-      try:
+      def populate_database(con):
         con.execute(
           "CREATE TABLE vehicles (id INTEGER PRIMARY KEY, position INTEGER, name TEXT, address INTEGER, type INTEGER, image_name TEXT, max_speed INTEGER)"
         )
@@ -277,13 +265,8 @@ class Z21ImporterTest(unittest.TestCase):
         )
         con.execute("INSERT INTO train_list VALUES ('100', 1, 0)")
         con.execute("INSERT INTO train_list VALUES ('100', 2, 1)")
-        con.commit()
-      finally:
-        con.close()
 
-      archive_path = temp_dir / "HO.z21"
-      with zipfile.ZipFile(archive_path, "w") as archive:
-        archive.write(sqlite_path, "export/test/Loco.sqlite")
+      archive_path = write_custom_z21_archive(temp_dir, populate_database)
 
       result = Z21Importer(temp_dir / "vehicle-images").import_file(archive_path)
       vehicles = {vehicle["source_vehicle_id"]: vehicle for vehicle in result.vehicles}
@@ -297,11 +280,9 @@ class Z21ImporterTest(unittest.TestCase):
   def test_sanitizes_text_vehicle_ids_before_building_local_paths(self):
     with tempfile.TemporaryDirectory() as temp_name:
       temp_dir = Path(temp_name)
-      sqlite_path = temp_dir / "Loco.sqlite"
       source_vehicle_id = "../bad/3"
       source_consist_id = "../bad/consist"
-      con = sqlite3.connect(sqlite_path)
-      try:
+      def populate_database(con):
         con.execute(
           "CREATE TABLE vehicles (id TEXT PRIMARY KEY, position INTEGER, name TEXT, address INTEGER, type INTEGER, image_name TEXT, max_speed INTEGER)"
         )
@@ -326,14 +307,12 @@ class Z21ImporterTest(unittest.TestCase):
         con.execute("INSERT INTO categories VALUES (?, '恶意分类')", ("../bad/category",))
         con.execute("INSERT INTO vehicles_to_categories VALUES (?, ?)", (source_vehicle_id, "../bad/category"))
         con.execute("INSERT INTO train_list VALUES (?, ?, 0)", (source_consist_id, source_vehicle_id))
-        con.commit()
-      finally:
-        con.close()
 
-      archive_path = temp_dir / "HO.z21"
-      with zipfile.ZipFile(archive_path, "w") as archive:
-        archive.write(sqlite_path, "export/test/Loco.sqlite")
-        archive.writestr("loco.png", b"\x89PNG\r\n\x1a\nminimal")
+      archive_path = write_custom_z21_archive(
+        temp_dir,
+        populate_database,
+        image_files={"loco.png": b"\x89PNG\r\n\x1a\nminimal"},
+      )
 
       image_dir = temp_dir / "vehicle-images"
       result = Z21Importer(image_dir).import_file(archive_path)

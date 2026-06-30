@@ -5,8 +5,14 @@ import time
 
 from server import models
 from server.api_support.cv_operations import readback_value_matches
-from server.controllers.base import ControllerOperationNotSupported, CvCommandRequest
+from server.controllers.base import ControllerOperationNotSupported, ControllerProtocolNotSupported, CvCommandRequest
 from server.controller_services.results import ServiceResult
+
+
+CV_WRITE_TIMEOUT_ERROR_TYPE = "cv_write_timeout"
+CV_WRITE_TIMEOUT_MESSAGE = "写入 CV 超时"
+CV_WRITE_TRANSPORT_ERROR_TYPE = "cv_write_transport_error"
+CV_WRITE_TRANSPORT_MESSAGE = "写入 CV 通信失败"
 
 
 class CvProgrammingService:
@@ -85,7 +91,7 @@ class CvProgrammingService:
     try:
       adapter = self.ensure_supported(controller, "cv_programming", "cv_read")
       result = adapter.read_cv_request(
-        self.controller_session,
+        self.controller_session_for(controller),
         controller,
         CvCommandRequest(
           cv_number=cv_number,
@@ -95,11 +101,13 @@ class CvProgrammingService:
           timeout_seconds=timeout_seconds,
           max_packets=max_packets,
         ),
-        transport=self.udp_transport,
+        transport=self.controller_transport,
       )
       return bytes.fromhex(result.request_hex), result.frames, None
     except ControllerOperationNotSupported as exc:
       return request_frame, [], self.operation_not_supported_response(exc)
+    except ControllerProtocolNotSupported as exc:
+      return request_frame, [], self.protocol_not_supported_response(exc)
     except TimeoutError as exc:
       if state is not None:
         self.service_support.mark_controller_unreachable(state, "cv_read_timeout")
@@ -339,12 +347,11 @@ class CvProgrammingService:
     attempt: int,
     state: dict | None,
   ):
-    support = self.service_support
     request_frame = b""
     try:
       adapter = self.ensure_supported(controller, "cv_programming", "cv_write")
       result = adapter.write_cv_request(
-        self.controller_session,
+        self.controller_session_for(controller),
         controller,
         CvCommandRequest(
           cv_number=cv_number,
@@ -355,46 +362,76 @@ class CvProgrammingService:
           timeout_seconds=None,
           max_packets=32,
         ),
-        transport=self.udp_transport,
+        transport=self.controller_transport,
       )
       return bytes.fromhex(result.request_hex), result.frames, None
     except ControllerOperationNotSupported as exc:
       return request_frame, [], self.operation_not_supported_response(exc)
+    except ControllerProtocolNotSupported as exc:
+      return request_frame, [], self.protocol_not_supported_response(exc)
     except TimeoutError as exc:
-      if state is not None:
-        support.mark_controller_unreachable(state, "cv_write_timeout")
-      return request_frame, [], support.failure(
-        "cv_write_timeout",
-        "写入 CV 超时",
+      return request_frame, [], self._cv_write_send_failure_response(
+        CV_WRITE_TIMEOUT_ERROR_TYPE,
+        CV_WRITE_TIMEOUT_MESSAGE,
         str(exc),
         status=504,
-        debug=support.cv_debug(
-          cv=cv_number,
-          client_id=client_id,
-          request_frame=request_frame,
-          pom_address=pom_address,
-          extra={"value": value, "attempt": attempt + 1},
-        ),
+        unreachable_reason=CV_WRITE_TIMEOUT_ERROR_TYPE,
+        state=state,
+        cv_number=cv_number,
+        value=value,
+        client_id=client_id,
+        request_frame=request_frame,
+        pom_address=pom_address,
+        attempt=attempt,
       )
     except (OSError, ValueError) as exc:
-      if state is not None:
-        support.mark_controller_unreachable(state, "cv_write_transport_error")
-      return request_frame, [], support.failure(
-        "cv_write_transport_error",
-        "写入 CV 通信失败",
+      return request_frame, [], self._cv_write_send_failure_response(
+        CV_WRITE_TRANSPORT_ERROR_TYPE,
+        CV_WRITE_TRANSPORT_MESSAGE,
         str(exc),
         status=502,
-        debug=support.cv_debug(
-          cv=cv_number,
-          client_id=client_id,
-          request_frame=request_frame,
-          pom_address=pom_address,
-          extra={"value": value, "attempt": attempt + 1},
-        ),
+        unreachable_reason=CV_WRITE_TRANSPORT_ERROR_TYPE,
+        state=state,
+        cv_number=cv_number,
+        value=value,
+        client_id=client_id,
+        request_frame=request_frame,
+        pom_address=pom_address,
+        attempt=attempt,
       )
 
-  def _classify_cv_write_attempt(self, controller: dict, frames: list, client_id: int, cv_number: int, pom_address):
-    return self._classify_cv_responses(controller, frames, client_id, cv_number, pom_address)
+  def _cv_write_send_failure_response(
+    self,
+    error_type: str,
+    message: str,
+    detail: str,
+    *,
+    status: int,
+    unreachable_reason: str,
+    state: dict | None,
+    cv_number: int,
+    value: int,
+    client_id: int,
+    request_frame: bytes,
+    pom_address,
+    attempt: int,
+  ):
+    support = self.service_support
+    if state is not None:
+      support.mark_controller_unreachable(state, unreachable_reason)
+    return support.failure(
+      error_type,
+      message,
+      detail,
+      status=status,
+      debug=support.cv_debug(
+        cv=cv_number,
+        client_id=client_id,
+        request_frame=request_frame,
+        pom_address=pom_address,
+        extra={"value": value, "attempt": attempt + 1},
+      ),
+    )
 
   def _cv_write_attempt_outcome(
     self,
@@ -411,7 +448,7 @@ class CvProgrammingService:
     busy_retries: int,
     last_busy_debug,
   ):
-    classification = self._classify_cv_write_attempt(controller, frames, client_id, cv_number, pom_address)
+    classification = self._classify_cv_responses(controller, frames, client_id, cv_number, pom_address)
     matched_ack = classification.ack
     if matched_ack is None:
       if classification.parse_warnings:
