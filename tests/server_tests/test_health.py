@@ -55,6 +55,14 @@ class HealthTest(unittest.TestCase):
     self.assertEqual(args.host, "::")
     self.assertEqual(args.trusted_host, ["layout.local", "digsight.local"])
 
+  def test_create_gateway_context_accepts_custom_paths(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      root = Path(temp_dir)
+      context = gateway_main.create_gateway_context(root)
+      self.assertEqual(context.project_root, root)
+      self.assertTrue((root / "data" / "vehicles.sqlite3").exists())
+      self.assertIsNotNone(context.api_router)
+
   def test_gateway_uses_ipv6_server_for_ipv6_host(self):
     server_class = gateway_main.server_class_for_host("::")
     self.assertEqual(server_class.address_family, gateway_main.socket.AF_INET6)
@@ -103,6 +111,13 @@ class HealthTest(unittest.TestCase):
   def test_public_document_entry_files_exist(self):
     self.assertTrue((PROJECT_ROOT / "README.md").is_file())
     self.assertTrue((PROJECT_ROOT / "manual" / "MANUAL.html").is_file())
+
+  def test_gateway_static_controller_config_allowlist_is_registry_driven(self):
+    source = inspect.getsource(gateway_main)
+    self.assertIn("def static_public_files(", source)
+    self.assertIn("registry.descriptors()", source)
+    self.assertNotIn("Digsight_D9000", source)
+    self.assertIn("/config/controllers/Digsight_D9000.json", gateway_main.static_public_files())
 
   def test_start_web_script_starts_gateway_as_detached_background_process(self):
     content = (PROJECT_ROOT / "scripts" / "start_web.sh").read_text(encoding="utf-8")
@@ -173,6 +188,48 @@ class HealthTest(unittest.TestCase):
     self.assertIn("sys.version_info", content)
     self.assertIn("Python 3.10", content)
     self.assertIn("Use --python", content)
+
+  def test_gateway_main_constructs_server_and_prints_lan_hint(self):
+    calls = []
+
+    class FakeServer:
+      def __init__(self, address, handler_class):
+        calls.append(("server", address, handler_class.__name__))
+
+      def serve_forever(self):
+        calls.append(("serve_forever",))
+        raise RuntimeError("stop test server")
+
+    original_parse = gateway_main.parse_gateway_args
+    original_server = gateway_main.ThreadingHTTPServer
+    original_chdir = gateway_main.os.chdir
+    original_create_context = gateway_main.create_gateway_context
+    original_context = gateway_main.GATEWAY_CONTEXT
+    try:
+      gateway_main.parse_gateway_args = lambda: SimpleNamespace(host="0.0.0.0", port=8765)
+      gateway_main.ThreadingHTTPServer = FakeServer
+      gateway_main.os.chdir = lambda path: calls.append(("chdir", str(path)))
+      gateway_main.GATEWAY_CONTEXT = None
+      gateway_main.create_gateway_context = lambda project_root: SimpleNamespace(
+        project_root=project_root,
+        state_store=None,
+        vehicle_store=None,
+        api_router=None,
+        started_at=0,
+      )
+      with self.assertRaisesRegex(RuntimeError, "stop test server"):
+        gateway_main.main()
+    finally:
+      gateway_main.parse_gateway_args = original_parse
+      gateway_main.ThreadingHTTPServer = original_server
+      gateway_main.os.chdir = original_chdir
+      gateway_main.create_gateway_context = original_create_context
+      gateway_main.GATEWAY_CONTEXT = original_context
+
+    self.assertEqual(calls[0], ("chdir", str(PROJECT_ROOT)))
+    self.assertEqual(calls[1], ("server", ("0.0.0.0", 8765), "DigsightHandler"))
+    self.assertEqual(calls[2], ("serve_forever",))
+
 
 if __name__ == "__main__":
   unittest.main()

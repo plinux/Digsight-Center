@@ -1,6 +1,7 @@
 """Z21 .z21 import support."""
 
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 import os
@@ -8,6 +9,9 @@ import re
 import sqlite3
 import tempfile
 import zipfile
+
+from server.image_validation import validate_vehicle_image
+from server.public_paths import VEHICLE_IMAGE_PUBLIC_PREFIX
 
 
 DEFAULT_FUNCTION_ICON = "function-generic"
@@ -93,11 +97,20 @@ class Z21Importer:
       import_scope = track_mode or self._import_scope(file_name)
       categories = self._read_categories(con)
       vehicle_categories = self._read_vehicle_categories(con)
-      categories = self._scope_categories(categories, import_scope, track_mode)
-      vehicle_categories = self._scope_vehicle_categories(vehicle_categories, import_scope)
+      categories, category_id_by_raw_id = self._scope_categories(categories, import_scope, track_mode)
+      vehicle_categories = self._scope_vehicle_categories(vehicle_categories, category_id_by_raw_id)
       category_names_by_id = {category["id"]: category["name"] for category in categories}
-      vehicles = self._read_vehicles(file_name, import_scope, track_mode, con, archive, png_names, vehicle_categories, category_names_by_id)
-      functions = self._read_functions(con, import_scope)
+      vehicles, vehicle_id_by_source_id, vehicle_token_by_source_id = self._read_vehicles(
+        file_name,
+        import_scope,
+        track_mode,
+        con,
+        archive,
+        png_names,
+        vehicle_categories,
+        category_names_by_id,
+      )
+      functions = self._read_functions(con, import_scope, vehicle_id_by_source_id, vehicle_token_by_source_id)
       consists = self._read_consists(con, vehicles)
       self._apply_consist_kind_to_control_vehicles(vehicles, consists)
       summary = {
@@ -119,9 +132,16 @@ class Z21Importer:
   def _read_vehicles(self, file_name, import_scope, track_mode, con, archive, png_names, vehicle_categories, category_names_by_id):
     rows = con.execute("SELECT * FROM vehicles ORDER BY position, id").fetchall()
     vehicles = []
+    used_tokens = {}
+    vehicle_id_by_source_id = {}
+    vehicle_token_by_source_id = {}
     for row in rows:
       row_keys = row.keys()
-      vehicle_id = f"z21-{import_scope}-vehicle-{row['id']}"
+      source_vehicle_id = self._source_key(row["id"])
+      vehicle_token = self._unique_source_token(source_vehicle_id, used_tokens)
+      vehicle_id = f"z21-{import_scope}-vehicle-{vehicle_token}"
+      vehicle_id_by_source_id[source_vehicle_id] = vehicle_id
+      vehicle_token_by_source_id[source_vehicle_id] = vehicle_token
       image_path = self._extract_vehicle_image(vehicle_id, row["image_name"], archive, png_names)
       vehicle_name = row["name"] or f"车辆 {row['address']}"
       category_ids = vehicle_categories.get(row["id"], [])
@@ -129,7 +149,7 @@ class Z21Importer:
       vehicles.append({
         "id": vehicle_id,
         "source": "z21",
-        "source_vehicle_id": str(row["id"]),
+        "source_vehicle_id": source_vehicle_id,
         "track_mode": track_mode,
         "source_position": row["position"] if "position" in row_keys else None,
         "name": vehicle_name,
@@ -155,7 +175,7 @@ class Z21Importer:
         "category_ids": category_ids,
         "import_file": file_name,
       })
-    return vehicles
+    return vehicles, vehicle_id_by_source_id, vehicle_token_by_source_id
 
   def _read_categories(self, con):
     if not self._table_exists(con, "categories"):
@@ -182,14 +202,18 @@ class Z21Importer:
       vehicle_categories.setdefault(row["vehicle_id"], []).append(f"z21-category-{row['category_id']}")
     return vehicle_categories
 
-  def _read_functions(self, con, import_scope):
+  def _read_functions(self, con, import_scope, vehicle_id_by_source_id, vehicle_token_by_source_id):
     rows = con.execute("SELECT * FROM functions ORDER BY vehicle_id, position").fetchall()
     functions = []
     for index, row in enumerate(rows):
+      source_vehicle_id = self._source_key(row["vehicle_id"])
+      vehicle_token = vehicle_token_by_source_id.get(source_vehicle_id) or self._safe_source_token(source_vehicle_id)
+      vehicle_id = vehicle_id_by_source_id.get(source_vehicle_id) or f"z21-{import_scope}-vehicle-{vehicle_token}"
+      function_token = self._safe_source_token(row["function"])
       z21_icon_name = row["image_name"] or ""
       functions.append({
-        "id": f"z21-{import_scope}-function-{row['vehicle_id']}-{row['function']}-{index}",
-        "vehicle_id": f"z21-{import_scope}-vehicle-{row['vehicle_id']}",
+        "id": f"z21-{import_scope}-function-{vehicle_token}-{function_token}-{index}",
+        "vehicle_id": vehicle_id,
         "source_function_id": str(row["id"]),
         "function_number": row["function"],
         "label": row["shortcut"] or f"F{row['function']}",
@@ -232,18 +256,21 @@ class Z21Importer:
       })
     consists = []
     default_track_mode = vehicles[0]["track_mode"] if vehicles else ""
+    vehicle_by_id = {vehicle["id"]: vehicle for vehicle in vehicles}
+    used_consist_tokens = {}
     for train_id, members in grouped.items():
       if not members:
         continue
       control_vehicle = control_vehicle_by_train_id.get(train_id)
       track_mode = control_vehicle["track_mode"] if control_vehicle else default_track_mode
+      consist_token = self._unique_source_token(train_id, used_consist_tokens)
       consists.append({
-        "id": f"z21-{track_mode or 'unknown'}-consist-{train_id}",
+        "id": f"z21-{track_mode or 'unknown'}-consist-{consist_token}",
         "source": "z21",
         "source_train_id": train_id,
         "control_vehicle_id": control_vehicle["id"] if control_vehicle else None,
         "track_mode": track_mode,
-        "consist_kind": (control_vehicle or {}).get("consist_kind") or self._infer_consist_kind(members, vehicle_by_source_id),
+        "consist_kind": (control_vehicle or {}).get("consist_kind") or self._infer_consist_kind(members, vehicle_by_id),
         "name": control_vehicle["name"] if control_vehicle else f"Z21 编组 {train_id}",
         "members": members,
         "note": "由 Z21 train_list 导入；type=3 车辆作为控制入口" if control_vehicle else "由 Z21 train_list 导入",
@@ -289,12 +316,11 @@ class Z21Importer:
     words = str(name or "").strip().split()
     return words[0] if words else ""
 
-  def _infer_consist_kind(self, members: list[dict], vehicle_by_source_id: dict) -> str:
+  def _infer_consist_kind(self, members: list[dict], vehicle_by_id: dict) -> str:
     member_types = []
     for member in members:
       vehicle_id = member.get("vehicle_id", "")
-      source_id = str(vehicle_id).rsplit("-", 1)[-1]
-      vehicle = vehicle_by_source_id.get(source_id)
+      vehicle = vehicle_by_id.get(vehicle_id)
       if vehicle is None:
         continue
       try:
@@ -319,10 +345,25 @@ class Z21Importer:
       return ""
     if archive.getinfo(archive_name).file_size > MAX_Z21_IMAGE_BYTES:
       raise ValueError("车辆图片超过导入大小限制")
+    content = archive.read(archive_name)
+    validate_vehicle_image(
+      archive_name,
+      content,
+      max_bytes=MAX_Z21_IMAGE_BYTES,
+      allowed_extensions=(".png",),
+    )
     self.image_dir.mkdir(parents=True, exist_ok=True)
-    target = self.image_dir / f"{vehicle_id}.png"
-    target.write_bytes(archive.read(archive_name))
-    return f"/data/vehicle-images/{target.name}"
+    image_dir = self.image_dir.resolve()
+    target = (self.image_dir / f"{vehicle_id}.png").resolve()
+    try:
+      target.relative_to(image_dir)
+    except ValueError as exc:
+      raise ValueError("车辆图片路径无效") from exc
+    try:
+      target.write_bytes(content)
+    except OSError as exc:
+      raise ValueError("车辆图片写入失败") from exc
+    return f"{VEHICLE_IMAGE_PUBLIC_PREFIX}{target.name}"
 
   def _validate_image_member_budgets(self, archive: zipfile.ZipFile) -> None:
     total_image_bytes = 0
@@ -361,19 +402,48 @@ class Z21Importer:
     scope = re.sub(r"[^a-z0-9]+", "-", Path(file_name).stem.lower()).strip("-")
     return scope or "unknown"
 
-  def _scope_categories(self, categories: list[dict], import_scope: str, track_mode: str) -> list[dict]:
+  def _source_key(self, source_id) -> str:
+    return str(source_id)
+
+  def _safe_source_token(self, source_id) -> str:
+    text = self._source_key(source_id)
+    tokens = [token for token in re.split(r"[^a-z0-9]+", text.lower()) if token]
+    if tokens:
+      return "-".join(tokens)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+  def _unique_source_token(self, source_id, used_tokens: dict[str, str]) -> str:
+    source_key = self._source_key(source_id)
+    base_token = self._safe_source_token(source_key)
+    token = base_token
+    if token in used_tokens and used_tokens[token] != source_key:
+      digest = hashlib.sha256(source_key.encode("utf-8")).hexdigest()[:8]
+      token = f"{base_token}-{digest}"
+      index = 2
+      while token in used_tokens and used_tokens[token] != source_key:
+        token = f"{base_token}-{digest}-{index}"
+        index += 1
+    used_tokens[token] = source_key
+    return token
+
+  def _scope_categories(self, categories: list[dict], import_scope: str, track_mode: str) -> tuple[list[dict], dict[str, str]]:
     scoped = []
+    scoped_id_by_raw_id = {}
+    used_tokens = {}
     for category in categories:
+      category_token = self._unique_source_token(category["source_category_id"], used_tokens)
+      scoped_id = f"z21-{import_scope}-category-{category_token}"
+      scoped_id_by_raw_id[category["id"]] = scoped_id
       scoped.append({
         **category,
-        "id": f"z21-{import_scope}-category-{category['source_category_id']}",
+        "id": scoped_id,
         "track_mode": track_mode,
       })
-    return scoped
+    return scoped, scoped_id_by_raw_id
 
-  def _scope_vehicle_categories(self, vehicle_categories: dict, import_scope: str) -> dict:
+  def _scope_vehicle_categories(self, vehicle_categories: dict, category_id_by_raw_id: dict[str, str]) -> dict:
     return {
-      vehicle_id: [f"z21-{import_scope}-category-{category_id.rsplit('-', 1)[-1]}" for category_id in category_ids]
+      vehicle_id: [category_id_by_raw_id.get(category_id, category_id) for category_id in category_ids]
       for vehicle_id, category_ids in vehicle_categories.items()
     }
 

@@ -16,7 +16,16 @@ from urllib.parse import unquote, urlparse
 
 from server import response
 from server.api import ApiRouter
+from server.api_support.routes import (
+  API_MUTATION_ROUTES,
+  LOCK_MODE_HARDWARE,
+  LOCK_MODE_HARDWARE_SESSION,
+  LOCK_MODE_SNAPSHOT,
+  mutation_route_spec,
+)
 from server.app_state import AppStateStore
+from server.controllers.registry import default_controller_registry
+from server.importers.registry import default_import_registry
 from server.vehicle_store import VehicleStore
 
 
@@ -28,73 +37,30 @@ STATIC_PUBLIC_FILES = {
   "/index.html",
   "/manual/MANUAL.html",
   "/config/function-icons.json",
-  "/config/function-icon-mappings/z21.json",
 }
 STATIC_PUBLIC_PREFIXES = (
   "/assets/",
   "/manual/assets/",
   "/data/vehicle-images/",
 )
-MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
-MAX_VEHICLE_IMAGE_JSON_BODY_BYTES = 3 * 1024 * 1024
-MAX_IMPORT_BODY_BYTES = 64 * 1024 * 1024
-LOCK_MODE_STATEFUL = "stateful"
-LOCK_MODE_SNAPSHOT = "snapshot"
-LOCK_MODE_HARDWARE = "hardware"
-LOCK_MODE_HARDWARE_SESSION = "hardware_session"
-API_MUTATION_DEFAULT = {
-  "json_body": True,
-  "body_limit": MAX_JSON_BODY_BYTES,
-  "handler": "api",
-  "lock_mode": LOCK_MODE_STATEFUL,
-}
-API_MUTATION_ROUTES = {
-  "/api/import/config": {
-    "json_body": False,
-    "body_limit": MAX_IMPORT_BODY_BYTES,
-    "handler": "import_config",
-    "lock_mode": LOCK_MODE_STATEFUL,
-  },
-  "/api/import/z21": {
-    "json_body": False,
-    "body_limit": MAX_IMPORT_BODY_BYTES,
-    "handler": "import_z21",
-    "lock_mode": LOCK_MODE_STATEFUL,
-  },
-  "/api/vehicle-images": {
-    "json_body": True,
-    "body_limit": MAX_VEHICLE_IMAGE_JSON_BODY_BYTES,
-    "handler": "api",
-    "lock_mode": LOCK_MODE_STATEFUL,
-  },
-  "/api/cv/read-all": {
-    "json_body": True,
-    "body_limit": MAX_JSON_BODY_BYTES,
-    "handler": "api",
-    "lock_mode": LOCK_MODE_HARDWARE_SESSION,
-  },
-  "/api/cv/read-all/cancel": {
-    "json_body": True,
-    "body_limit": MAX_JSON_BODY_BYTES,
-    "handler": "api",
-    "lock_mode": LOCK_MODE_SNAPSHOT,
-  },
-  "/api/controller/read-info": {"lock_mode": LOCK_MODE_HARDWARE},
-  "/api/controller/probe": {"lock_mode": LOCK_MODE_HARDWARE},
-  "/api/track-power": {"lock_mode": LOCK_MODE_HARDWARE},
-  "/api/dc-control": {"lock_mode": LOCK_MODE_HARDWARE},
-  "/api/cv/read": {"lock_mode": LOCK_MODE_HARDWARE},
-  "/api/cv/write": {"lock_mode": LOCK_MODE_HARDWARE},
-  "/api/chip-info/read": {"lock_mode": LOCK_MODE_HARDWARE},
-  "/api/address/read": {"lock_mode": LOCK_MODE_HARDWARE},
-  "/api/address/write": {"lock_mode": LOCK_MODE_HARDWARE},
-  "/api/loco/speed": {"lock_mode": LOCK_MODE_HARDWARE},
-  "/api/loco/function": {"lock_mode": LOCK_MODE_HARDWARE},
-}
 CLIENT_HEADER_NAME = "X-Digsight-Client"
 CLIENT_HEADER_VALUE = "digsight-web"
 TRUSTED_DNS_HOSTS = {"localhost"}
 GATEWAY_CONTEXT = None
+
+
+def static_public_files(controller_registry=None, import_registry=None) -> set[str]:
+  controller_registry = controller_registry or default_controller_registry()
+  import_registry = import_registry or default_import_registry(PROJECT_ROOT / "data" / "vehicle-images")
+  files = set(STATIC_PUBLIC_FILES)
+  files.update(
+    f"/config/controllers/{descriptor['config_file_name']}"
+    for descriptor in controller_registry.descriptors()
+    if descriptor.get("config_file_name")
+  )
+  for descriptor in import_registry.descriptors():
+    files.update(descriptor.get("public_files") or [])
+  return files
 
 
 @dataclass
@@ -109,10 +75,16 @@ class GatewayContext:
 
 def create_gateway_context(project_root: Path = PROJECT_ROOT) -> GatewayContext:
   project_root = Path(project_root)
-  state_store = AppStateStore(project_root / "data" / "app-state.json")
+  controller_registry = default_controller_registry()
+  state_store = AppStateStore(project_root / "data" / "app-state.json", controller_registry=controller_registry)
   vehicle_store = VehicleStore(project_root / "data" / "vehicles.sqlite3")
   vehicle_store.ensure_initial_test_vehicles()
-  api_router = ApiRouter(state_store, project_root / "data" / "vehicle-images", vehicle_store=vehicle_store)
+  api_router = ApiRouter(
+    state_store,
+    project_root / "data" / "vehicle-images",
+    vehicle_store=vehicle_store,
+    controller_registry=controller_registry,
+  )
   return GatewayContext(project_root, state_store, vehicle_store, api_router, time.time(), threading.Lock())
 
 
@@ -153,9 +125,9 @@ def normalized_url_path(raw_path: str) -> str:
   return path
 
 
-def is_public_static_path(raw_path: str) -> bool:
+def is_public_static_path(raw_path: str, *, controller_registry=None, import_registry=None) -> bool:
   path = normalized_url_path(raw_path)
-  return path in STATIC_PUBLIC_FILES or any(path.startswith(prefix) for prefix in STATIC_PUBLIC_PREFIXES)
+  return path in static_public_files(controller_registry, import_registry) or any(path.startswith(prefix) for prefix in STATIC_PUBLIC_PREFIXES)
 
 
 def _split_host_header(value: str) -> tuple[str, str]:
@@ -265,6 +237,18 @@ def format_listen_url(host: str, port: int) -> str:
   return f"http://{host}:{port}/"
 
 
+def import_options_from_header(value: str) -> dict:
+  if not value:
+    return {}
+  try:
+    options = json.loads(value)
+  except json.JSONDecodeError as exc:
+    raise ValueError(f"X-Import-Options must be a JSON object: {exc}") from exc
+  if not isinstance(options, dict):
+    raise ValueError("X-Import-Options must be a JSON object")
+  return options
+
+
 class DigsightHandler(SimpleHTTPRequestHandler):
   def __init__(self, *args, **kwargs):
     super().__init__(*args, directory=str(gateway_context().project_root), **kwargs)
@@ -280,12 +264,6 @@ class DigsightHandler(SimpleHTTPRequestHandler):
     self.end_headers()
     if include_body:
       self.wfile.write(body)
-
-  def _request_meta(self) -> dict:
-    return {
-      "headers": {key: value for key, value in self.headers.items()},
-      "client_ip": self.client_address[0] if self.client_address else "",
-    }
 
   def _read_limited_body(self, limit_bytes: int):
     try:
@@ -370,21 +348,7 @@ class DigsightHandler(SimpleHTTPRequestHandler):
 
   def _api_mutation_route_spec(self, method: str, path: str, body: bytes) -> dict:
     route = normalized_url_path(path)
-    spec = dict(API_MUTATION_DEFAULT)
-    spec.update(API_MUTATION_ROUTES.get(route, {}))
-    if method == "DELETE":
-      spec["json_body"] = False
-      spec["body_limit"] = 0
-    if method == "POST" and route.startswith("/api/consists/") and route.endswith(("/speed", "/stop")):
-      spec["lock_mode"] = LOCK_MODE_HARDWARE
-    if method == "PATCH" and route == "/api/controller/settings":
-      try:
-        payload = json.loads(body.decode("utf-8") or "{}")
-      except (UnicodeDecodeError, json.JSONDecodeError):
-        return spec
-      if isinstance(payload, dict) and payload.get("apply_to_device") is True:
-        spec["lock_mode"] = LOCK_MODE_HARDWARE
-    return spec
+    return mutation_route_spec(method, route, body)
 
   def _handle_api_mutation(self, method: str, path: str, body: bytes):
     context = gateway_context()
@@ -394,7 +358,7 @@ class DigsightHandler(SimpleHTTPRequestHandler):
         state = self._load_state_snapshot()
         expected_revision = int(state.get("controller", {}).get("runtime_revision", 0) or 0)
         state["_expected_controller_runtime_revision"] = expected_revision
-        response_body, status = context.api_router.handle_json(method, path, body, state, request_meta=self._request_meta())
+        response_body, status = context.api_router.handle_json(method, path, body, state)
         pending_state = state.pop("_pending_persistent_state", None)
         state.pop("_expected_controller_runtime_revision", None)
         if pending_state is not None:
@@ -409,33 +373,32 @@ class DigsightHandler(SimpleHTTPRequestHandler):
             ), 409
         return response_body, status
     return self._run_stateful_mutation(
-      lambda state: context.api_router.handle_json(method, path, body, state, request_meta=self._request_meta()),
-      persist=context.api_router._persistent_state,
+      lambda state: context.api_router.handle_json(method, path, body, state),
+      persist=context.api_router.persistent_state,
     )
 
   def _handle_hardware_session_api_mutation(self, method: str, path: str, body: bytes):
     context = gateway_context()
     with _hardware_session_lock(context):
       state = self._load_state_snapshot()
-      return context.api_router.handle_json(method, path, body, state, request_meta=self._request_meta())
+      return context.api_router.handle_json(method, path, body, state)
 
   def _handle_snapshot_api_mutation(self, method: str, path: str, body: bytes):
     context = gateway_context()
     state = self._load_state_snapshot()
-    return context.api_router.handle_json(method, path, body, state, request_meta=self._request_meta())
+    return context.api_router.handle_json(method, path, body, state)
 
-  def _handle_config_import_mutation(self, format_name: str, file_name: str, body: bytes):
+  def _handle_config_import_mutation(self, format_name: str, file_name: str, body: bytes, options: dict | None = None):
     context = gateway_context()
     return self._run_stateful_mutation(
-      lambda state: context.api_router.import_config_bytes(format_name, file_name, body, state, request_meta=self._request_meta()),
-      persist=context.api_router._persistent_state,
-    )
-
-  def _handle_z21_import_mutation(self, file_name: str, body: bytes):
-    context = gateway_context()
-    return self._run_stateful_mutation(
-      lambda state: context.api_router.import_z21_bytes(file_name, body, state, request_meta=self._request_meta()),
-      persist=context.api_router._persistent_state,
+      lambda state: context.api_router.import_config_bytes(
+        format_name,
+        file_name,
+        body,
+        state,
+        options=options,
+      ),
+      persist=context.api_router.persistent_state,
     )
 
   def do_GET(self):
@@ -454,10 +417,19 @@ class DigsightHandler(SimpleHTTPRequestHandler):
         return
       context = gateway_context()
       state = context.state_store.load()
-      response_body, status = context.api_router.handle_json("GET", self.path, b"", state, request_meta=self._request_meta())
+      response_body, status = context.api_router.handle_json("GET", self.path, b"", state)
       self._send_json(status, response_body)
       return
-    if not is_public_static_path(self.path):
+    error_body, status = self._reject_untrusted_api_host()
+    if error_body is not None:
+      self._send_json(status, error_body)
+      return
+    context = gateway_context()
+    if not is_public_static_path(
+      self.path,
+      controller_registry=context.api_router.controller_registry,
+      import_registry=context.api_router.import_registry,
+    ):
       self._send_json(404, response.failure("not_found", "路径不存在", normalized_url_path(self.path)))
       return
     return super().do_GET()
@@ -474,7 +446,16 @@ class DigsightHandler(SimpleHTTPRequestHandler):
         include_body=False,
       )
       return
-    if not is_public_static_path(self.path):
+    error_body, status = self._reject_untrusted_api_host()
+    if error_body is not None:
+      self._send_json(status, error_body, include_body=False)
+      return
+    context = gateway_context()
+    if not is_public_static_path(
+      self.path,
+      controller_registry=context.api_router.controller_registry,
+      import_registry=context.api_router.import_registry,
+    ):
       self._send_json(
         404,
         response.failure("not_found", "路径不存在", normalized_url_path(self.path)),
@@ -485,6 +466,10 @@ class DigsightHandler(SimpleHTTPRequestHandler):
 
   def do_POST(self):
     if self.path.startswith("/api/"):
+      route = normalized_url_path(self.path)
+      if route.startswith("/api/import/") and route not in API_MUTATION_ROUTES:
+        self._send_json(404, response.failure("not_found", "路径不存在", route))
+        return
       spec = self._api_mutation_route_spec("POST", self.path, b"")
       error_body, status = self._reject_unsafe_mutation(json_body=spec["json_body"])
       if error_body is not None:
@@ -494,15 +479,25 @@ class DigsightHandler(SimpleHTTPRequestHandler):
       if error_body is not None:
         self._send_json(status, error_body)
         return
-      if spec["handler"] == "import_config":
+      if spec["gateway_handler"] == "import_config":
         file_name = self.headers.get("X-File-Name", "import.config")
-        format_name = self.headers.get("X-Import-Format", "z21_layout_config")
-        response_body, status = self._handle_config_import_mutation(format_name, file_name, body)
-        self._send_json(status, response_body)
-        return
-      if spec["handler"] == "import_z21":
-        file_name = self.headers.get("X-File-Name", "import.z21")
-        response_body, status = self._handle_z21_import_mutation(file_name, body)
+        format_name = (self.headers.get("X-Import-Format") or "").strip()
+        if not format_name:
+          self._send_json(
+            400,
+            response.failure(
+              "missing_import_format",
+              "缺少导入格式",
+              "导入配置必须通过 X-Import-Format 指定配置格式",
+            ),
+          )
+          return
+        try:
+          import_options = import_options_from_header(self.headers.get("X-Import-Options", ""))
+        except ValueError as exc:
+          self._send_json(400, response.failure("invalid_import_options", "导入选项无效", str(exc)))
+          return
+        response_body, status = self._handle_config_import_mutation(format_name, file_name, body, import_options)
         self._send_json(status, response_body)
         return
       if spec["lock_mode"] == LOCK_MODE_SNAPSHOT:

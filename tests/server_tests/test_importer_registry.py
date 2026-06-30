@@ -85,6 +85,17 @@ class Z21ConfigImporterTest(unittest.TestCase):
         importer.import_bytes(request)
     self.assertEqual(str(caught.exception), "boom")
 
+  def test_z21_importer_rejects_vehicle_image_with_png_name_but_wrong_signature(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      root = Path(temp_dir)
+      z21_path = self._write_minimal_z21(root, image_bytes=b"not a png")
+
+      with self.assertRaises(ValueError) as caught:
+        Z21Importer(root / "images").import_file(z21_path)
+
+      self.assertIn("file content does not match PNG", str(caught.exception))
+      self.assertFalse((root / "images" / "z21-ho-vehicle-1.png").exists())
+
   def test_z21_importer_accepts_vehicle_image_with_png_signature(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       root = Path(temp_dir)

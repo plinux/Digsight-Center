@@ -14,7 +14,6 @@ from server.controller_services.loco_control import LocoCommandService
 from server.controller_services.track_power import TrackPowerService
 from server.controllers.digsight import DigsightDXDCNetControllerAdapter
 from server.controllers.dxdcnet_info_parser import DXDCNetControllerInfoParser
-from server.controllers.example import ExampleControllerAdapter
 from server.controllers.registry import ControllerRegistry
 from server.controllers.registry import default_controller_registry
 from server.models import CONTROLLER_KIND_DIGSIGHT
