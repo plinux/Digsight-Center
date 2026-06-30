@@ -294,6 +294,72 @@ class Z21ImporterTest(unittest.TestCase):
       self.assertEqual(vehicles["100"]["consist_kind"], "multiple_unit")
       self.assertEqual(result.consists[0]["consist_kind"], "multiple_unit")
 
+  def test_sanitizes_text_vehicle_ids_before_building_local_paths(self):
+    with tempfile.TemporaryDirectory() as temp_name:
+      temp_dir = Path(temp_name)
+      sqlite_path = temp_dir / "Loco.sqlite"
+      source_vehicle_id = "../bad/3"
+      source_consist_id = "../bad/consist"
+      con = sqlite3.connect(sqlite_path)
+      try:
+        con.execute(
+          "CREATE TABLE vehicles (id TEXT PRIMARY KEY, position INTEGER, name TEXT, address INTEGER, type INTEGER, image_name TEXT, max_speed INTEGER)"
+        )
+        con.execute(
+          "CREATE TABLE functions (id INTEGER PRIMARY KEY, vehicle_id TEXT, function INTEGER, shortcut TEXT, image_name TEXT, button_type INTEGER, time TEXT, position INTEGER, show_function_number INTEGER, is_configured INTEGER)"
+        )
+        con.execute("CREATE TABLE categories (id TEXT PRIMARY KEY, name TEXT)")
+        con.execute("CREATE TABLE vehicles_to_categories (vehicle_id TEXT, category_id TEXT)")
+        con.execute("CREATE TABLE train_list (train_id TEXT, vehicle_id TEXT, position INTEGER)")
+        con.execute(
+          "INSERT INTO vehicles VALUES (?, 0, '恶意路径车', 3, 0, 'loco.png', 100)",
+          (source_vehicle_id,),
+        )
+        con.execute(
+          "INSERT INTO vehicles VALUES (?, 1, '恶意路径编组', 4, 3, '', 100)",
+          (source_consist_id,),
+        )
+        con.execute(
+          "INSERT INTO functions VALUES (1, ?, 0, '灯', 'main_beam', 0, '', 0, 1, 1)",
+          (source_vehicle_id,),
+        )
+        con.execute("INSERT INTO categories VALUES (?, '恶意分类')", ("../bad/category",))
+        con.execute("INSERT INTO vehicles_to_categories VALUES (?, ?)", (source_vehicle_id, "../bad/category"))
+        con.execute("INSERT INTO train_list VALUES (?, ?, 0)", (source_consist_id, source_vehicle_id))
+        con.commit()
+      finally:
+        con.close()
+
+      archive_path = temp_dir / "HO.z21"
+      with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.write(sqlite_path, "export/test/Loco.sqlite")
+        archive.writestr("loco.png", b"\x89PNG\r\n\x1a\nminimal")
+
+      image_dir = temp_dir / "vehicle-images"
+      result = Z21Importer(image_dir).import_file(archive_path)
+
+      vehicle = next(item for item in result.vehicles if item["source_vehicle_id"] == source_vehicle_id)
+      self.assertEqual(vehicle["id"], "z21-ho-vehicle-bad-3")
+      self.assertNotIn("/", vehicle["id"])
+      self.assertNotIn("..", vehicle["id"])
+      self.assertEqual(vehicle["image_path"], "/data/vehicle-images/z21-ho-vehicle-bad-3.png")
+      stored_image = image_dir / Path(vehicle["image_path"]).name
+      self.assertTrue(stored_image.exists())
+      self.assertEqual(stored_image.resolve().parent, image_dir.resolve())
+
+      function = result.functions[0]
+      self.assertEqual(function["vehicle_id"], vehicle["id"])
+      self.assertNotIn("/", function["id"])
+      category = result.categories[0]
+      self.assertEqual(category["source_category_id"], "../bad/category")
+      self.assertEqual(category["id"], "z21-ho-category-bad-category")
+      self.assertEqual(vehicle["category_ids"], [category["id"]])
+      consist = result.consists[0]
+      self.assertEqual(consist["source_train_id"], source_consist_id)
+      self.assertEqual(consist["id"], "z21-ho-consist-bad-consist")
+      self.assertNotIn("/", consist["id"])
+      self.assertEqual(consist["members"][0]["vehicle_id"], vehicle["id"])
+
 
 if __name__ == "__main__":
   unittest.main()

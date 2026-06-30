@@ -1,14 +1,27 @@
 """Z21 .z21 configuration import adapter."""
 
 from pathlib import Path
+import sqlite3
 import tempfile
+import zipfile
 
-from server.importers.base import ConfigImportRequest, ConfigImportResult, ImportFormatDescriptor
+from server.importers.base import (
+  CATEGORY_MERGE_SHARED_BY_NORMALIZED_NAME,
+  ConfigImportRequest,
+  ConfigImportResult,
+  ImportFormatDescriptor,
+  ImportSource,
+)
 from server.importers.z21_parser import Z21Importer
 
 
 class Z21ConfigImporter:
-  descriptor = ImportFormatDescriptor(format="z21_layout_config", label="Z21 .z21", extensions=[".z21"])
+  descriptor = ImportFormatDescriptor(
+    format="z21_layout_config",
+    label="Z21 .z21",
+    extensions=[".z21"],
+    public_files=["/config/function-icon-mappings/z21.json"],
+  )
 
   def __init__(self, image_dir: Path | str):
     self.image_dir = Path(image_dir)
@@ -22,19 +35,27 @@ class Z21ConfigImporter:
       temp_path.write_bytes(request.content)
       try:
         z21_result = Z21Importer(self.image_dir).import_file(temp_path)
-      except Exception as exc:
+      except (ValueError, zipfile.BadZipFile, sqlite3.Error) as exc:
         raise ValueError(f"Z21 configuration import failed: {exc}") from exc
     summary = dict(z21_result.summary)
     summary["file_name"] = request.file_name
     warnings = list(summary.get("warnings") or [])
+    track_mode = str(summary.get("track_mode") or "").strip().lower()
     return ConfigImportResult(
       format=self.descriptor.format,
+      source=ImportSource(
+        format=self.descriptor.format,
+        key="z21",
+        label=self.descriptor.label,
+        category_merge_strategy=CATEGORY_MERGE_SHARED_BY_NORMALIZED_NAME,
+      ),
       vehicles=z21_result.vehicles,
       functions=z21_result.functions,
       categories=z21_result.categories,
       consists=z21_result.consists,
-      images=[],
       summary=summary,
       warnings=warnings,
       errors=[],
+      source_mappings={},
+      replace_scope={"track_modes": [track_mode] if track_mode else []},
     )

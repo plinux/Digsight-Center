@@ -23,6 +23,7 @@ class ImportRegistry:
         "format": importer.descriptor.format,
         "label": importer.descriptor.label,
         "extensions": list(importer.descriptor.extensions),
+        "public_files": list(importer.descriptor.public_files),
       }
       for importer in self._importers.values()
     ]

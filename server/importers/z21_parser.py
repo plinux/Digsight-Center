@@ -131,7 +131,7 @@ class Z21Importer:
         "source": "z21",
         "source_vehicle_id": str(row["id"]),
         "track_mode": track_mode,
-        "z21_position": row["position"] if "position" in row_keys else None,
+        "source_position": row["position"] if "position" in row_keys else None,
         "name": vehicle_name,
         "address": row["address"],
         "type": row["type"],

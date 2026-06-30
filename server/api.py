@@ -351,15 +351,7 @@ class ApiRouter:
       import_result = importer.import_bytes(ConfigImportRequest(format=format_name, file_name=safe_file_name, content=body))
     except ValueError as exc:
       return response.failure("import_failed", "导入配置失败", str(exc)), 400
-    self._merge_import_result(
-      state,
-      import_result.format,
-      import_result.vehicles,
-      import_result.functions,
-      import_result.categories,
-      import_result.consists,
-      import_result.summary,
-    )
+    self._merge_import_result(state, import_result)
     if include_format_list:
       return response.success({"summary": import_result.summary, "formats": self.import_registry.descriptors()}), 200
     return response.success(import_result.summary), 200
@@ -377,24 +369,17 @@ class ApiRouter:
   def _merge_import_result(
     self,
     state: dict,
-    format_name: str,
-    vehicles: list,
-    functions: list,
-    categories: list,
-    consists: list,
-    summary: dict,
+    import_result,
   ) -> None:
     if self.vehicle_store:
-      if format_name != "z21_layout_config":
-        raise ValueError(f"vehicle store import is not implemented for {format_name}")
-      self.vehicle_store.replace_imported_z21_data(summary, vehicles, categories, functions, consists)
+      self.vehicle_store.replace_imported_config_data(import_result)
       self._state_with_vehicle_store_data(state)
       return
-    state["vehicles"] = vehicles
-    state["functions"] = functions
-    state["categories"] = categories
-    state["consists"] = consists
-    state.setdefault("imports", []).append(summary)
+    state["vehicles"] = import_result.vehicles
+    state["functions"] = import_result.functions
+    state["categories"] = import_result.categories
+    state["consists"] = import_result.consists
+    state.setdefault("imports", []).append(import_result.summary)
     self._save(state)
 
   def _handle_controller_probe(self, body: bytes, state: dict):

@@ -3,9 +3,11 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS vehicles (
   id TEXT PRIMARY KEY,
   source TEXT NOT NULL DEFAULT 'manual',
+  source_format TEXT DEFAULT '',
+  source_key TEXT DEFAULT '',
   source_vehicle_id TEXT,
   track_mode TEXT DEFAULT '',
-  z21_position INTEGER,
+  source_position INTEGER,
   custom_sort_order INTEGER DEFAULT 0,
   name TEXT NOT NULL,
   address INTEGER NOT NULL,
@@ -51,6 +53,8 @@ CREATE TABLE IF NOT EXISTS vehicle_functions (
 CREATE TABLE IF NOT EXISTS categories (
   id TEXT PRIMARY KEY,
   source TEXT NOT NULL DEFAULT 'manual',
+  source_format TEXT DEFAULT '',
+  source_key TEXT DEFAULT '',
   source_category_id TEXT,
   track_mode TEXT DEFAULT '',
   name TEXT NOT NULL,
@@ -69,6 +73,8 @@ CREATE TABLE IF NOT EXISTS vehicle_categories (
 CREATE TABLE IF NOT EXISTS consists (
   id TEXT PRIMARY KEY,
   source TEXT NOT NULL DEFAULT 'manual',
+  source_format TEXT DEFAULT '',
+  source_key TEXT DEFAULT '',
   source_train_id TEXT,
   control_vehicle_id TEXT REFERENCES vehicles(id) ON DELETE SET NULL,
   track_mode TEXT DEFAULT '',

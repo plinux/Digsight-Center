@@ -2,11 +2,31 @@ import tempfile
 import unittest
 from pathlib import Path
 import sqlite3
+from contextlib import contextmanager
+import inspect
 
 from server.vehicle_store import VehicleStore
 
 
+class CountingConnection:
+  def __init__(self, connection):
+    self.connection = connection
+    self.execute_count = 0
+
+  def execute(self, *args, **kwargs):
+    self.execute_count += 1
+    return self.connection.execute(*args, **kwargs)
+
+  def __getattr__(self, name):
+    return getattr(self.connection, name)
+
+
 class VehicleStoreCoreTest(unittest.TestCase):
+  def test_vehicle_store_schema_uses_sql_file_without_column_migrations(self):
+    source = inspect.getsource(VehicleStore)
+    self.assertNotIn("_ensure_column", source)
+    self.assertNotIn("ALTER TABLE", source)
+
   def test_initial_test_vehicle_seed_creates_n_ho_g_single_and_consist_fixtures(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       store = VehicleStore(Path(temp_dir) / "vehicles.sqlite3")
@@ -96,60 +116,73 @@ class VehicleStoreCoreTest(unittest.TestCase):
       self.assertEqual(vehicles[0]["id"], existing["id"])
       self.assertEqual(vehicles[0]["name"], "用户车辆")
 
-  def test_vehicle_store_adds_renamed_buffer_columns_to_existing_database(self):
+  def test_list_vehicles_with_details_returns_functions_and_categories(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      store = VehicleStore(Path(temp_dir) / "vehicles.sqlite3")
+      category = store.create_category({"id": "cat-electric", "name": "电力机车", "source": "manual"})
+      store.create_vehicle_with_functions(
+        {
+          "id": "vehicle-3",
+          "name": "测试车",
+          "address": 3,
+          "track_mode": "ho",
+          "category_ids": [category["id"]],
+        },
+        [{"function_number": 0, "label": "", "icon_name": "function-generic"}],
+      )
+
+      vehicles = store.list_vehicles_with_details()
+
+      self.assertEqual(len(vehicles), 1)
+      self.assertEqual(vehicles[0]["categories"][0]["id"], "cat-electric")
+      self.assertEqual(vehicles[0]["category_ids"], ["cat-electric"])
+      self.assertEqual(vehicles[0]["functions"][0]["function_number"], 0)
+      self.assertEqual(vehicles[0]["functions"][0]["icon_name"], "function-generic")
+
+  def test_list_consists_batch_loads_members_for_all_consists(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       db_path = Path(temp_dir) / "vehicles.sqlite3"
-      old_buffer_column = "buffer_leng" "ht"
-      old_model_buffer_column = "model_buffer_leng" "ht"
-      con = sqlite3.connect(db_path)
-      con.executescript(
-        f"""
-        CREATE TABLE vehicles (
-          id TEXT PRIMARY KEY,
-          source TEXT NOT NULL DEFAULT 'manual',
-          source_vehicle_id TEXT,
-          track_mode TEXT DEFAULT '',
-          z21_position INTEGER,
-          custom_sort_order INTEGER DEFAULT 0,
-          name TEXT NOT NULL,
-          address INTEGER NOT NULL,
-          image_name TEXT,
-          image_path TEXT,
-          type INTEGER DEFAULT 0,
-          sync_function_control INTEGER DEFAULT 0,
-          energy_type TEXT DEFAULT '',
-          car_subtype TEXT DEFAULT '',
-          consist_kind TEXT DEFAULT '',
-          max_speed INTEGER,
-          brand TEXT,
-          full_name TEXT,
-          railway TEXT,
-          article_number TEXT,
-          decoder_type TEXT,
-          {old_buffer_column} TEXT,
-          {old_model_buffer_column} TEXT,
-          service_weight TEXT,
-          model_weight TEXT,
-          rmin TEXT,
-          description TEXT,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-        """
-      )
-      con.close()
-
       store = VehicleStore(db_path)
-      vehicle = store.create_vehicle({
-        "name": "迁移测试车",
-        "address": 3,
-        "track_mode": "ho",
-        "buffer_length": "120",
-        "model_buffer_length": "10400",
+      first = store.create_vehicle({"id": "vehicle-a", "name": "A", "address": 3, "track_mode": "ho"})
+      second = store.create_vehicle({"id": "vehicle-b", "name": "B", "address": 4, "track_mode": "ho"})
+      store.create_consist({
+        "id": "consist-a",
+        "name": "A+B",
+        "members": [
+          {"vehicle_id": first["id"], "address": 3, "direction": "forward", "order": 1},
+          {"vehicle_id": second["id"], "address": 4, "direction": "reverse", "order": 2},
+        ],
       })
+      store.create_consist({
+        "id": "consist-b",
+        "name": "B+A",
+        "members": [
+          {"vehicle_id": second["id"], "address": 4, "direction": "forward", "order": 1},
+        ],
+      })
+      execute_counts = []
 
-      self.assertEqual(vehicle["buffer_length"], "120")
-      self.assertEqual(vehicle["model_buffer_length"], "10400")
+      @contextmanager
+      def counted_connect():
+        raw = sqlite3.connect(db_path)
+        raw.row_factory = sqlite3.Row
+        raw.execute("PRAGMA foreign_keys = ON")
+        counting = CountingConnection(raw)
+        try:
+          yield counting
+          raw.commit()
+        finally:
+          execute_counts.append(counting.execute_count)
+          raw.close()
+
+      store._connect = counted_connect
+
+      consists = store.list_consists()
+
+      self.assertEqual([consist["id"] for consist in consists], ["consist-a", "consist-b"])
+      self.assertEqual([member["vehicle_id"] for member in consists[0]["members"]], ["vehicle-a", "vehicle-b"])
+      self.assertEqual([member["vehicle_id"] for member in consists[1]["members"]], ["vehicle-b"])
+      self.assertEqual(execute_counts[-1], 2)
 
   def test_vehicle_functions_preserve_explicit_empty_label(self):
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -168,7 +201,7 @@ class VehicleStoreCoreTest(unittest.TestCase):
     self.assertIn("def _vehicle_update_assignments(", source)
     self.assertIn("def _normalized_function_row(", source)
 
-  def test_schema_preserves_z21_vehicle_fields_and_categories(self):
+  def test_schema_preserves_source_vehicle_fields_and_categories(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       store = VehicleStore(Path(temp_dir) / "vehicles.sqlite3")
       category = store.create_category({"name": "电力机车", "description": "自定义分类"})
@@ -177,7 +210,7 @@ class VehicleStoreCoreTest(unittest.TestCase):
         "address": 103,
         "source": "manual",
         "source_vehicle_id": None,
-        "z21_position": 7,
+        "source_position": 7,
         "image_name": "image-uuid",
         "image_path": "/data/vehicle-images/br103.png",
         "type": 0,
@@ -200,7 +233,51 @@ class VehicleStoreCoreTest(unittest.TestCase):
       self.assertEqual(stored["article_number"], "39150")
       self.assertEqual(stored["buffer_length"], "192")
       self.assertEqual(stored["track_mode"], "ho")
+      self.assertEqual(stored["source_position"], 7)
+      self.assertNotIn("z21_position", stored)
       self.assertEqual(stored["categories"][0]["name"], "电力机车")
+
+  def test_vehicle_image_path_allows_only_local_vehicle_assets(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      store = VehicleStore(Path(temp_dir) / "vehicles.sqlite3")
+      allowed_paths = [
+        "",
+        "/data/vehicle-images/br103.png",
+        "/data/vehicle-images/vehicle-abc123.webp",
+        "/assets/icons/vehicle-types/energy-electric.svg",
+      ]
+      for index, image_path in enumerate(allowed_paths, start=1):
+        with self.subTest(image_path=image_path):
+          vehicle = store.create_vehicle({
+            "name": f"图片测试车 {index}",
+            "address": index,
+            "track_mode": "ho",
+            "image_path": image_path,
+          })
+          self.assertEqual(vehicle["image_path"], image_path)
+
+  def test_vehicle_image_path_rejects_external_or_traversal_paths(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      store = VehicleStore(Path(temp_dir) / "vehicles.sqlite3")
+      blocked_paths = [
+        "http://example.test/train.png",
+        "https://example.test/train.png",
+        "//example.test/train.png",
+        "data:image/png;base64,AAAA",
+        "/data/vehicle-images/../secret.png",
+        "/data/vehicle-images/nested/train.png",
+        "/assets/../server/main.py",
+        "/assets/icons/functions/light-front.svg",
+      ]
+      for image_path in blocked_paths:
+        with self.subTest(image_path=image_path):
+          with self.assertRaises(ValueError):
+            store.create_vehicle({
+              "name": "坏图片路径",
+              "address": 3,
+              "track_mode": "ho",
+              "image_path": image_path,
+            })
 
   def test_update_and_delete_vehicle_cleans_related_rows(self):
     with tempfile.TemporaryDirectory() as temp_dir:
