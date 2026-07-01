@@ -298,6 +298,10 @@ class VehicleStore:
     finally:
       con.close()
 
+  @staticmethod
+  def _table_count(con, table: str) -> int:
+    return int(con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
   def list_vehicles(self) -> list[dict]:
     with self._connect() as con:
       rows = con.execute(f"SELECT * FROM vehicles ORDER BY {VEHICLE_LIST_ORDER_BY}").fetchall()
@@ -389,6 +393,35 @@ class VehicleStore:
     with self._connect() as con:
       result = con.execute("DELETE FROM vehicles WHERE id = ?", (vehicle_id,))
       return result.rowcount > 0
+
+  def clear_vehicle_library(self) -> dict:
+    with self._connect() as con:
+      image_paths = [
+        row["image_path"]
+        for row in con.execute(
+          "SELECT DISTINCT image_path FROM vehicles WHERE image_path IS NOT NULL AND image_path != ''"
+        ).fetchall()
+      ]
+      counts = {
+        "vehicles_deleted": self._table_count(con, "vehicles"),
+        "functions_deleted": self._table_count(con, "vehicle_functions"),
+        "vehicle_categories_deleted": self._table_count(con, "vehicle_categories"),
+        "categories_deleted": self._table_count(con, "categories"),
+        "consists_deleted": self._table_count(con, "consists"),
+        "consist_members_deleted": self._table_count(con, "consist_members"),
+        "imports_deleted": self._table_count(con, "vehicle_imports"),
+      }
+      for table in (
+        "vehicle_functions",
+        "vehicle_categories",
+        "consist_members",
+        "consists",
+        "vehicle_imports",
+        "categories",
+        "vehicles",
+      ):
+        con.execute(f"DELETE FROM {table}")
+      return {**counts, "image_paths": image_paths}
 
   def create_category(self, data: dict) -> dict:
     now = self._now()

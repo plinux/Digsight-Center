@@ -2,6 +2,7 @@ export function buildCabWorkspaceActions({
   appState,
   activateCab,
   selectCabVehicle,
+  chooseVehicleFromSelectionGrid,
   toggleVehicleSelection,
   showVehicleEditor,
   toggleCabExpanded,
@@ -20,7 +21,8 @@ export function buildCabWorkspaceActions({
   return {
     onActivateCab: activateCab,
     onSelectVehicle: selectCabVehicle,
-    selectionMode: appState.vehicleSelectionMode,
+    onChooseVehicle: chooseVehicleFromSelectionGrid,
+    selectionMode: appState.vehicleDeletionSelectionMode,
     selectedVehicleIds: appState.selectedVehicleIds,
     onToggleVehicleSelection: toggleVehicleSelection,
     onEdit: showVehicleEditor,

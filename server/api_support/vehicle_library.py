@@ -1,9 +1,11 @@
 """Vehicle, category, and consist API orchestration."""
 
+from pathlib import Path
 import sqlite3
 
 from server import models, response
 from server.api_support import http_helpers
+from server.public_paths import VEHICLE_IMAGE_PUBLIC_PREFIX
 
 
 class VehicleLibraryApiSupport:
@@ -68,6 +70,22 @@ class VehicleLibraryApiSupport:
     self.context.refresh_vehicle_store_data(state)
     self.context.save(state)
     return http_helpers.success({"id": vehicle_id, "deleted": True})
+
+  def clear_vehicles(self, state: dict):
+    summary = self.vehicle_store.clear_vehicle_library()
+    image_delete_result = self.delete_vehicle_images(summary.get("image_paths", []))
+    self.context.refresh_vehicle_store_data(state)
+    self.context.save(state)
+    return http_helpers.success({
+      "vehicles_deleted": summary["vehicles_deleted"],
+      "functions_deleted": summary["functions_deleted"],
+      "vehicle_categories_deleted": summary["vehicle_categories_deleted"],
+      "categories_deleted": summary["categories_deleted"],
+      "consists_deleted": summary["consists_deleted"],
+      "consist_members_deleted": summary["consist_members_deleted"],
+      "imports_deleted": summary["imports_deleted"],
+      **image_delete_result,
+    })
 
   def reorder_vehicles(self, body: bytes, state: dict):
     request = http_helpers.json_body(body)
@@ -173,6 +191,35 @@ class VehicleLibraryApiSupport:
     if "functions" not in payload:
       payload["functions"] = self.vehicle_store.list_functions(vehicle["id"])
     return payload
+
+  def delete_vehicle_images(self, image_paths: list[str]) -> dict:
+    deleted = 0
+    failed = []
+    for image_path in sorted(set(str(path or "") for path in image_paths)):
+      target = self.local_vehicle_image_path(image_path)
+      if target is None:
+        continue
+      try:
+        if target.exists() and target.is_file():
+          target.unlink()
+          deleted += 1
+      except OSError as exc:
+        failed.append({"image_path": image_path, "error": str(exc)})
+    return {"images_deleted": deleted, "images_failed": failed}
+
+  def local_vehicle_image_path(self, image_path: str) -> Path | None:
+    if not image_path.startswith(VEHICLE_IMAGE_PUBLIC_PREFIX):
+      return None
+    relative_name = image_path.removeprefix(VEHICLE_IMAGE_PUBLIC_PREFIX)
+    if not relative_name or "/" in relative_name or "\\" in relative_name:
+      return None
+    image_root = self.context.image_dir.resolve()
+    target = (self.context.image_dir / relative_name).resolve()
+    try:
+      target.relative_to(image_root)
+    except ValueError:
+      return None
+    return target
 
   def _patch_store_vehicle(self, vehicle_id: str, body: bytes, state: dict):
     vehicle = self.vehicle_store.get_vehicle(vehicle_id)

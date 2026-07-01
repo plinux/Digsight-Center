@@ -297,6 +297,33 @@ class VehicleApiTest(unittest.TestCase):
       self.assertEqual(payload["error"]["type"], "invalid_vehicle")
       self.assertEqual([function["label"] for function in vehicle_store.list_functions("v1")], ["灯"])
 
+  def test_clear_vehicles_removes_vehicle_rows_and_images_only(self):
+    with temporary_vehicle_router() as (router, vehicle_store, state):
+      image_dir = Path(vehicle_store.path).parent / "vehicle-images"
+      image_dir.mkdir(parents=True, exist_ok=True)
+      image_path = image_dir / "local-test.webp"
+      image_path.write_bytes(b"image")
+      vehicle_store.create_vehicle({
+        "id": "v1",
+        "name": "车",
+        "address": 3,
+        "track_mode": "ho",
+        "image_path": "/data/vehicle-images/local-test.webp",
+      })
+      vehicle_store.replace_vehicle_functions("v1", [{"function_number": 0, "label": "灯"}])
+
+      body, status = router.handle_json("POST", "/api/vehicles/clear", b"{}", state)
+
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 200)
+      self.assertEqual(payload["data"]["vehicles_deleted"], 1)
+      self.assertEqual(payload["data"]["images_deleted"], 1)
+      self.assertFalse(image_path.exists())
+      self.assertEqual(vehicle_store.list_vehicles(), [])
+      self.assertEqual(state["vehicles"], [])
+      self.assertEqual(state["categories"], [])
+      self.assertEqual(state["consists"], [])
+
   def test_sqlite_vehicle_data_is_not_mirrored_to_app_state_file(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       state_store = AppStateStore(Path(temp_dir) / "app-state.json")

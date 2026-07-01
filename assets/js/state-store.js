@@ -32,7 +32,7 @@ export const appState = {
   selectedVehicleId: "",
   editingVehicleId: "",
   editingVehicleDraft: null,
-  vehicleSelectionMode: false,
+  vehicleDeletionSelectionMode: false,
   selectedVehicleIds: new Set(),
   activeView: "vehicle",
   vehicleSubview: "registry",

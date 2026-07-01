@@ -25,6 +25,11 @@ export function renderVehicleControlWorkspace(container, vehicles, functions, ca
     return;
   }
 
+  if (handlers.selectionMode) {
+    container.append(renderVehicleSelectionGrid(vehicles, handlers));
+    return;
+  }
+
   const workspace = document.createElement("div");
   workspace.className = "cab-workspace";
   const leftVehicles = handlers.cabVehicles?.left || vehicles;
@@ -35,6 +40,44 @@ export function renderVehicleControlWorkspace(container, vehicles, functions, ca
   );
   container.append(workspace);
   restoreCabVehicleListScroll(workspace, previousListScroll);
+}
+
+function renderVehicleSelectionGrid(vehicles, handlers) {
+  const grid = document.createElement("div");
+  grid.className = "vehicle-selection-grid";
+  for (const vehicle of vehicles) {
+    grid.append(renderVehicleSelectionCard(vehicle, handlers));
+  }
+  return grid;
+}
+
+function renderVehicleSelectionCard(vehicle, handlers) {
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = "vehicle-selection-card";
+  card.dataset.vehicleId = String(vehicle.id);
+  card.title = `选择 ${vehicle.name || "未命名车辆"}`;
+  card.append(vehicleImage(vehicle), renderVehicleSelectionText(vehicle));
+  card.addEventListener("click", () => {
+    handlers.onChooseVehicle?.(vehicle.id);
+  });
+  return card;
+}
+
+function renderVehicleSelectionText(vehicle) {
+  const text = document.createElement("span");
+  text.className = "vehicle-selection-text";
+
+  const address = document.createElement("strong");
+  address.className = "vehicle-selection-address";
+  address.textContent = formatCabAddressText(vehicle);
+
+  const name = document.createElement("span");
+  name.className = "vehicle-selection-name";
+  name.textContent = vehicle.name || "未命名车辆";
+
+  text.append(address, name);
+  return text;
 }
 
 function captureCabVehicleListScroll(container) {

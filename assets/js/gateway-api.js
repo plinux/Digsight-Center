@@ -167,6 +167,10 @@ export function deleteVehicle(vehicleId) {
   return deleteJson(`/api/vehicles/${encodeURIComponent(vehicleId)}`);
 }
 
+export function clearVehicles() {
+  return postJson("/api/vehicles/clear", {});
+}
+
 export function uploadVehicleImage(file) {
   return uploadVehicleImagePayload(file);
 }

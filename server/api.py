@@ -129,6 +129,7 @@ class ApiRouter:
       "vehicles.create": lambda route, body, state: self.vehicle_api.create_vehicle(body, state),
       "vehicles.patch": lambda route, body, state: self.vehicle_api.patch_vehicle(route, body, state),
       "vehicles.delete": lambda route, body, state: self.vehicle_api.delete_vehicle(route, state),
+      "vehicles.clear": lambda route, body, state: self.vehicle_api.clear_vehicles(state),
       "vehicles.reorder": lambda route, body, state: self.vehicle_api.reorder_vehicles(body, state),
       "vehicle_images.upload": lambda route, body, state: self.resource_api.upload_vehicle_image(body),
       "categories.create": lambda route, body, state: self.vehicle_api.create_category(body),

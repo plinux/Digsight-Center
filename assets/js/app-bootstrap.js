@@ -62,6 +62,7 @@ export function wireAppEvents({
   toggleVehicleSelectionMode,
   createNewVehicle,
   deleteSelectedVehicles,
+  clearAllVehicles,
   handleVehicleKeyboard,
   handleVehicleKeyboardRelease
 }) {
@@ -126,6 +127,7 @@ export function wireAppEvents({
   elements.selectVehiclesButton.addEventListener("click", toggleVehicleSelectionMode);
   elements.addVehicleButton.addEventListener("click", createNewVehicle);
   elements.deleteVehiclesButton.addEventListener("click", deleteSelectedVehicles);
+  elements.clearVehiclesButton.addEventListener("click", clearAllVehicles);
 
   document.addEventListener("keydown", handleVehicleKeyboard);
   document.addEventListener("keyup", handleVehicleKeyboardRelease);

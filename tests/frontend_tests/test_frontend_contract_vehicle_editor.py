@@ -83,7 +83,7 @@ class FrontendVehicleEditorContractTest(SourceAssertionsMixin, unittest.TestCase
     ]:
       self.assertIn(token, api_source)
     for token in [
-      "vehicleSelectionMode",
+      "vehicleDeletionSelectionMode",
       "selectedVehicleIds",
       "createNewVehicle",
       "toggleVehicleSelectionMode",

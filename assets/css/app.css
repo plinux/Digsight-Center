@@ -981,6 +981,64 @@ select {
   overflow: auto;
 }
 
+.vehicle-selection-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(138px, 1fr));
+  gap: 8px;
+  align-items: stretch;
+}
+
+.vehicle-selection-card {
+  min-width: 0;
+  min-height: 92px;
+  display: grid;
+  grid-template-rows: minmax(42px, 1fr) auto;
+  justify-items: center;
+  align-items: center;
+  gap: 5px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  text-align: center;
+  cursor: pointer;
+}
+
+.vehicle-selection-card:hover,
+.vehicle-selection-card:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
+}
+
+.vehicle-selection-card > img,
+.vehicle-selection-card > .vehicle-placeholder {
+  inline-size: min(100%, 6rem);
+  block-size: 3rem;
+  object-fit: contain;
+}
+
+.vehicle-selection-text {
+  min-width: 0;
+  inline-size: 100%;
+  display: grid;
+  gap: 2px;
+}
+
+.vehicle-selection-address {
+  font-size: 13px;
+  line-height: 1.1;
+}
+
+.vehicle-selection-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
 .cab-vehicle-row {
   width: 100%;
   min-height: 76px;

@@ -556,6 +556,47 @@ class FrontendVehicleControlContractTest(SourceAssertionsMixin, unittest.TestCas
     self.assertIn('resource_route(route, "vehicles")', source)
     self.assertNotIn('route.startswith("/api/vehicles/")', source)
 
+  def test_import_strip_exposes_clear_vehicle_button(self):
+    index_source = self.read_text("index.html")
+    api_source = self.read_text("assets/js/gateway-api.js")
+    app_source = self.read_text("assets/js/app.js")
+    bootstrap_source = self.read_text("assets/js/app-bootstrap.js")
+
+    self.assert_source_contains_all(index_source + api_source + app_source + bootstrap_source, [
+      'id="clearVehiclesButton"',
+      "clearVehiclesButton",
+      "function clearAllVehicles",
+      "clearVehicles()",
+      "clearVehiclesButton.addEventListener",
+      "确认清空所有车辆、编组、导入记录和车辆图片？",
+      "不会影响控制器配置或 CV 配置",
+    ])
+
+  def test_vehicle_selection_mode_uses_full_page_compact_grid(self):
+    view_source = self.read_text("assets/js/vehicle-cab-view.js")
+    app_source = self.read_text("assets/js/app.js")
+    action_source = self.read_text("assets/js/cab-workspace-actions.js")
+    css = self.read_text("assets/css/app.css")
+
+    self.assert_source_contains_all(view_source + app_source + action_source + css, [
+      "renderVehicleSelectionGrid",
+      "vehicle-selection-grid",
+      "vehicle-selection-card",
+      "vehicle-selection-address",
+      "vehicle-selection-name",
+      "handlers.onChooseVehicle?.(vehicle.id)",
+      "selectionMode: appState.vehicleDeletionSelectionMode",
+      "onChooseVehicle: chooseVehicleFromSelectionGrid",
+      ".vehicle-selection-grid",
+      ".vehicle-selection-card",
+    ])
+    selection_branch = view_source[
+      view_source.index("if (handlers.selectionMode)"):
+      view_source.index("const workspace = document.createElement(\"div\");")
+    ]
+    self.assertIn("renderVehicleSelectionGrid", selection_branch)
+    self.assertNotIn("renderCabColumn", selection_branch)
+
   def test_state_store_tracks_left_and_right_cabs(self):
     source = self.read_text("assets/js/state-store.js")
     self.assertIn('activeCabId: "left"', source)

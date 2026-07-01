@@ -1,4 +1,5 @@
 import {
+  clearVehicles,
   createConsist,
   createVehicle,
   deleteVehicle,
@@ -88,6 +89,7 @@ const elements = {
   selectVehiclesButton: document.getElementById("selectVehiclesButton"),
   addVehicleButton: document.getElementById("addVehicleButton"),
   deleteVehiclesButton: document.getElementById("deleteVehiclesButton"),
+  clearVehiclesButton: document.getElementById("clearVehiclesButton"),
   vehicleCount: document.getElementById("vehicleCount"),
   vehicleModeHint: document.getElementById("vehicleModeHint"),
   vehicleControlView: document.getElementById("vehicleControlView"),
@@ -458,15 +460,15 @@ function createNewVehicle() {
 }
 
 function toggleVehicleSelectionMode() {
-  appState.vehicleSelectionMode = !appState.vehicleSelectionMode;
-  if (!appState.vehicleSelectionMode) {
+  appState.vehicleDeletionSelectionMode = !appState.vehicleDeletionSelectionMode;
+  if (!appState.vehicleDeletionSelectionMode) {
     appState.selectedVehicleIds.clear();
   }
   renderAll();
 }
 
 function toggleVehicleSelection(vehicleId) {
-  if (!appState.vehicleSelectionMode) {
+  if (!appState.vehicleDeletionSelectionMode) {
     return;
   }
   if (appState.selectedVehicleIds.has(vehicleId)) {
@@ -479,7 +481,7 @@ function toggleVehicleSelection(vehicleId) {
 
 async function deleteSelectedVehicles() {
   const vehicleIds = Array.from(appState.selectedVehicleIds);
-  if (!appState.vehicleSelectionMode || !vehicleIds.length) {
+  if (!appState.vehicleDeletionSelectionMode || !vehicleIds.length) {
     setStatus("请先点击“选择”并勾选要删除的车辆");
     return;
   }
@@ -500,11 +502,44 @@ async function deleteSelectedVehicles() {
     }
   }
   appState.selectedVehicleIds.clear();
-  appState.vehicleSelectionMode = false;
+  appState.vehicleDeletionSelectionMode = false;
   setStatus(failures.length
     ? `已删除 ${deletedCount} 辆，失败 ${failures.length} 辆：${failures.join("；")}`
     : `已删除 ${deletedCount} 辆车辆`);
   await refreshState();
+}
+
+async function clearAllVehicles() {
+  const confirmed = typeof globalThis.confirm === "function"
+    ? globalThis.confirm("确认清空所有车辆、编组、导入记录和车辆图片？不会影响控制器配置或 CV 配置。")
+    : false;
+  if (!confirmed) {
+    return;
+  }
+  try {
+    const result = await clearVehicles();
+    resetCabRuntimeSelections();
+    appState.selectedVehicleIds.clear();
+    appState.vehicleDeletionSelectionMode = false;
+    setStatus(
+      `已清空 ${result.vehicles_deleted || 0} 辆车辆，删除 ${result.images_deleted || 0} 张车辆图片`
+    );
+    await refreshState();
+  } catch (error) {
+    setStatus(formatError(error));
+  }
+}
+
+function resetCabRuntimeSelections() {
+  for (const cab of Object.values(appState.cabs || {})) {
+    cab.vehicleId = "";
+    cab.speed = 0;
+    cab.functions = {};
+    cab.expanded = false;
+    cab.memberIndex = null;
+  }
+  appState.activeCabId = "left";
+  appState.selectedVehicleId = "";
 }
 
 async function saveVehicleConsist(changes, controlVehicleId) {
@@ -553,6 +588,23 @@ function selectCabVehicle(cabId, vehicleId) {
   appState.cabs[cabId].vehicleId = vehicleId;
   appState.cabs[cabId].memberIndex = null;
   appState.selectedVehicleId = vehicleId;
+  renderAll();
+}
+
+function chooseVehicleFromSelectionGrid(vehicleId) {
+  const cabId = appState.activeCabId || "left";
+  if (!appState.cabs[cabId]) {
+    return;
+  }
+  if (vehicleSelectedByOtherCab(cabId, vehicleId)) {
+    setStatus("该车辆已在另一侧控制区中选择");
+    return;
+  }
+  appState.cabs[cabId].vehicleId = vehicleId;
+  appState.cabs[cabId].memberIndex = null;
+  appState.selectedVehicleId = vehicleId;
+  appState.vehicleSelectionMode = false;
+  appState.selectedVehicleIds.clear();
   renderAll();
 }
 
@@ -738,9 +790,9 @@ function syncVehicleSelectionToolbar(visibleVehicles) {
     }
   }
   elements.selectVehiclesButton.disabled = !isDigitalOperationMode();
-  elements.selectVehiclesButton.classList.toggle("active", appState.vehicleSelectionMode);
-  elements.selectVehiclesButton.textContent = appState.vehicleSelectionMode ? "取消选择" : "选择";
-  elements.deleteVehiclesButton.disabled = !appState.vehicleSelectionMode || appState.selectedVehicleIds.size === 0;
+  elements.selectVehiclesButton.classList.toggle("active", appState.vehicleDeletionSelectionMode);
+  elements.selectVehiclesButton.textContent = appState.vehicleDeletionSelectionMode ? "取消选择" : "选择";
+  elements.deleteVehiclesButton.disabled = !appState.vehicleDeletionSelectionMode || appState.selectedVehicleIds.size === 0;
   elements.addVehicleButton.disabled = !isDigitalOperationMode();
 }
 
@@ -890,6 +942,7 @@ function cabWorkspaceActions() {
     appState,
     activateCab,
     selectCabVehicle,
+    chooseVehicleFromSelectionGrid,
     toggleVehicleSelection,
     showVehicleEditor,
     toggleCabExpanded,
@@ -1228,6 +1281,7 @@ wireAppEvents({
   toggleVehicleSelectionMode,
   createNewVehicle,
   deleteSelectedVehicles,
+  clearAllVehicles,
   handleVehicleKeyboard,
   handleVehicleKeyboardRelease
 });

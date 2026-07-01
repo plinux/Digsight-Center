@@ -23,6 +23,7 @@ GET_ROUTES = {
 
 POST_ROUTES = {
   "/api/vehicles": "vehicles.create",
+  "/api/vehicles/clear": "vehicles.clear",
   "/api/vehicle-images": "vehicle_images.upload",
   "/api/categories": "categories.create",
   "/api/controller/read-info": "controller.read_info",
