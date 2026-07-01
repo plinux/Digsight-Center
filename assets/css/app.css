@@ -943,26 +943,29 @@ select {
   flex: 0 1 auto;
   min-width: 0;
   display: grid;
-  grid-template-columns: repeat(5, max-content);
+  grid-template-columns: repeat(6, max-content);
   justify-content: end;
   gap: 8px;
   align-items: center;
 }
 
 .cab-function-number-toggle,
-.cab-function-label-toggle {
+.cab-function-label-toggle,
+.cab-thumbnail-toggle {
   white-space: nowrap;
 }
 
 .cab-function-number-toggle[aria-pressed="true"],
-.cab-function-label-toggle[aria-pressed="true"] {
+.cab-function-label-toggle[aria-pressed="true"],
+.cab-thumbnail-toggle[aria-pressed="true"] {
   border-color: var(--accent);
   background: var(--accent);
   color: #fff;
 }
 
 .cab-function-number-toggle[aria-pressed="false"],
-.cab-function-label-toggle[aria-pressed="false"] {
+.cab-function-label-toggle[aria-pressed="false"],
+.cab-thumbnail-toggle[aria-pressed="false"] {
   background: #fff;
   color: var(--muted);
 }
@@ -981,6 +984,54 @@ select {
   overflow: auto;
 }
 
+.cab-thumbnail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+  gap: 8px;
+  max-height: calc(100vh - 360px);
+  overflow: auto;
+}
+
+.cab-thumbnail-card,
+.vehicle-selection-card {
+  min-width: 0;
+  display: grid;
+  justify-items: center;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  text-align: center;
+  cursor: pointer;
+}
+
+.cab-thumbnail-card {
+  min-height: 82px;
+  grid-template-rows: minmax(38px, 1fr) auto;
+  gap: 4px;
+  padding: 7px;
+  background: var(--soft);
+}
+
+.cab-thumbnail-card.selected {
+  border-color: var(--accent);
+  background: #eef6ff;
+  box-shadow: inset 0 0 0 2px rgba(37, 99, 235, 0.16);
+}
+
+.cab-thumbnail-card.disabled-by-other-cab {
+  opacity: 0.48;
+  filter: grayscale(1);
+  cursor: not-allowed;
+}
+
+.cab-thumbnail-card > img,
+.cab-thumbnail-card > .vehicle-placeholder {
+  inline-size: min(100%, 5.4rem);
+  block-size: 2.7rem;
+  object-fit: contain;
+}
+
 .vehicle-selection-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(138px, 1fr));
@@ -989,20 +1040,34 @@ select {
 }
 
 .vehicle-selection-card {
-  min-width: 0;
+  position: relative;
   min-height: 92px;
-  display: grid;
   grid-template-rows: minmax(42px, 1fr) auto;
-  justify-items: center;
-  align-items: center;
   gap: 5px;
   padding: 8px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
   background: var(--panel);
-  color: var(--text);
-  text-align: center;
-  cursor: pointer;
+}
+
+.vehicle-selection-card.multi-selected {
+  border-color: var(--accent);
+  background: #e8f4f2;
+  box-shadow: inset 0 0 0 2px rgba(37, 99, 235, 0.16);
+}
+
+.vehicle-selection-check {
+  position: absolute;
+  inset-block-start: 6px;
+  inset-inline-start: 6px;
+  inline-size: 1.2rem;
+  block-size: 1.2rem;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--accent);
+  font-size: 0.85rem;
+  font-weight: 800;
 }
 
 .vehicle-selection-card:hover,
@@ -2735,7 +2800,7 @@ body.function-icon-picker-open {
   }
 
   .cab-filter-bar {
-    grid-template-columns: repeat(5, max-content);
+    grid-template-columns: repeat(6, max-content);
     gap: 4px;
     font-size: clamp(0.72rem, 2.6vw, 0.9rem);
   }

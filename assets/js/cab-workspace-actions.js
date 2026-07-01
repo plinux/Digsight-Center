@@ -2,12 +2,12 @@ export function buildCabWorkspaceActions({
   appState,
   activateCab,
   selectCabVehicle,
-  chooseVehicleFromSelectionGrid,
   toggleVehicleSelection,
   showVehicleEditor,
   toggleCabExpanded,
   toggleCabFunctionNumbers,
   toggleCabFunctionLabels,
+  toggleCabThumbnailMode,
   switchCabConsistMember,
   renderAll,
   saveCustomVehicleOrder,
@@ -21,7 +21,6 @@ export function buildCabWorkspaceActions({
   return {
     onActivateCab: activateCab,
     onSelectVehicle: selectCabVehicle,
-    onChooseVehicle: chooseVehicleFromSelectionGrid,
     selectionMode: appState.vehicleDeletionSelectionMode,
     selectedVehicleIds: appState.selectedVehicleIds,
     onToggleVehicleSelection: toggleVehicleSelection,
@@ -29,6 +28,7 @@ export function buildCabWorkspaceActions({
     onToggleCabExpanded: toggleCabExpanded,
     onToggleCabFunctionNumbers: toggleCabFunctionNumbers,
     onToggleCabFunctionLabels: toggleCabFunctionLabels,
+    onToggleCabThumbnailMode: toggleCabThumbnailMode,
     onSwitchConsistMember: switchCabConsistMember,
     onCabCategoryFilter: (cabId, categoryId) => {
       const cab = appState.cabs[cabId];

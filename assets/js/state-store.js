@@ -8,6 +8,7 @@ function createCabState() {
     expanded: false,
     showFunctionNumbers: true,
     showFunctionLabels: true,
+    thumbnailMode: false,
     categoryId: "",
     sortKey: "custom",
     sortDirection: "asc"
@@ -73,6 +74,9 @@ function ensureCabVehicles() {
     }
     if (typeof cab.showFunctionLabels !== "boolean") {
       cab.showFunctionLabels = true;
+    }
+    if (typeof cab.thumbnailMode !== "boolean") {
+      cab.thumbnailMode = false;
     }
     if (!("memberIndex" in cab)) {
       cab.memberIndex = null;

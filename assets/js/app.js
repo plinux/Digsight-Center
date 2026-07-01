@@ -591,23 +591,6 @@ function selectCabVehicle(cabId, vehicleId) {
   renderAll();
 }
 
-function chooseVehicleFromSelectionGrid(vehicleId) {
-  const cabId = appState.activeCabId || "left";
-  if (!appState.cabs[cabId]) {
-    return;
-  }
-  if (vehicleSelectedByOtherCab(cabId, vehicleId)) {
-    setStatus("该车辆已在另一侧控制区中选择");
-    return;
-  }
-  appState.cabs[cabId].vehicleId = vehicleId;
-  appState.cabs[cabId].memberIndex = null;
-  appState.selectedVehicleId = vehicleId;
-  appState.vehicleSelectionMode = false;
-  appState.selectedVehicleIds.clear();
-  renderAll();
-}
-
 function switchCabConsistMember(cabId, step) {
   const vehicle = cabVehicle(cabId);
   const cab = appState.cabs[cabId];
@@ -670,6 +653,15 @@ function toggleCabFunctionLabels(cabId) {
   }
   cab.showFunctionLabels = !cab.showFunctionLabels;
   cab.expanded = false;
+  renderAll();
+}
+
+function toggleCabThumbnailMode(cabId) {
+  const cab = selectCabForControl(cabId);
+  if (!cab) {
+    return;
+  }
+  cab.thumbnailMode = !cab.thumbnailMode;
   renderAll();
 }
 
@@ -942,12 +934,12 @@ function cabWorkspaceActions() {
     appState,
     activateCab,
     selectCabVehicle,
-    chooseVehicleFromSelectionGrid,
     toggleVehicleSelection,
     showVehicleEditor,
     toggleCabExpanded,
     toggleCabFunctionNumbers,
     toggleCabFunctionLabels,
+    toggleCabThumbnailMode,
     switchCabConsistMember,
     renderAll,
     saveCustomVehicleOrder,

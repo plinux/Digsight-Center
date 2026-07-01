@@ -572,7 +572,7 @@ class FrontendVehicleControlContractTest(SourceAssertionsMixin, unittest.TestCas
       "不会影响控制器配置或 CV 配置",
     ])
 
-  def test_vehicle_selection_mode_uses_full_page_compact_grid(self):
+  def test_import_selection_mode_uses_full_page_delete_multi_select_grid(self):
     view_source = self.read_text("assets/js/vehicle-cab-view.js")
     app_source = self.read_text("assets/js/app.js")
     action_source = self.read_text("assets/js/cab-workspace-actions.js")
@@ -584,18 +584,42 @@ class FrontendVehicleControlContractTest(SourceAssertionsMixin, unittest.TestCas
       "vehicle-selection-card",
       "vehicle-selection-address",
       "vehicle-selection-name",
-      "handlers.onChooseVehicle?.(vehicle.id)",
+      "handlers.onToggleVehicleSelection?.(vehicle.id)",
       "selectionMode: appState.vehicleDeletionSelectionMode",
-      "onChooseVehicle: chooseVehicleFromSelectionGrid",
+      "selectedVehicleIds: appState.selectedVehicleIds",
       ".vehicle-selection-grid",
       ".vehicle-selection-card",
+      ".vehicle-selection-card.multi-selected",
     ])
+    self.assertNotIn("onChooseVehicle", action_source)
+    self.assertNotIn("chooseVehicleFromSelectionGrid", app_source)
     selection_branch = view_source[
       view_source.index("if (handlers.selectionMode)"):
       view_source.index("const workspace = document.createElement(\"div\");")
     ]
     self.assertIn("renderVehicleSelectionGrid", selection_branch)
     self.assertNotIn("renderCabColumn", selection_branch)
+
+  def test_each_cab_can_toggle_thumbnail_vehicle_picker(self):
+    state_source = self.read_text("assets/js/state-store.js")
+    app_source = self.read_text("assets/js/app.js")
+    action_source = self.read_text("assets/js/cab-workspace-actions.js")
+    view_source = self.read_text("assets/js/vehicle-cab-view.js")
+    css = self.read_text("assets/css/app.css")
+    self.assert_source_contains_all(state_source + app_source + action_source + view_source + css, [
+      "thumbnailMode: false",
+      "function toggleCabThumbnailMode(cabId)",
+      "cab.thumbnailMode = !cab.thumbnailMode;",
+      "onToggleCabThumbnailMode: toggleCabThumbnailMode",
+      "onToggleCabThumbnailMode?.(cabId)",
+      "cab-thumbnail-toggle",
+      "renderCabThumbnailGrid",
+      "cab-thumbnail-grid",
+      "cab-thumbnail-card",
+      "handlers.onSelectVehicle?.(cabId, vehicle.id)",
+      ".cab-thumbnail-grid",
+      ".cab-thumbnail-card",
+    ])
 
   def test_state_store_tracks_left_and_right_cabs(self):
     source = self.read_text("assets/js/state-store.js")
@@ -630,8 +654,11 @@ class FrontendVehicleControlContractTest(SourceAssertionsMixin, unittest.TestCas
       source.index("function renderCabFilters")
     ]
     self.assertIn("const controlPanel = selectedVehicle ? renderCabControlPanel", cab_column)
-    self.assertIn("section.append(renderCabVehicleList(cabId, vehicles, cab, cabState, handlers));", cab_column)
-    self.assertLess(cab_column.index("section.append(controlPanel);"), cab_column.index("section.append(renderCabVehicleList"))
+    self.assertIn("const vehicleList = cab.thumbnailMode", cab_column)
+    self.assertIn("renderCabThumbnailGrid(cabId, vehicles, cab, cabState, handlers)", cab_column)
+    self.assertIn("renderCabVehicleList(cabId, vehicles, cab, cabState, handlers)", cab_column)
+    self.assertIn("section.append(vehicleList);", cab_column)
+    self.assertLess(cab_column.index("section.append(controlPanel);"), cab_column.index("section.append(vehicleList);"))
     for token in [
       "cab-current-badge",
       'select.setAttribute("aria-pressed"',

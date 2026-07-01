@@ -52,16 +52,27 @@ function renderVehicleSelectionGrid(vehicles, handlers) {
 }
 
 function renderVehicleSelectionCard(vehicle, handlers) {
+  const isMultiSelected = handlers.selectedVehicleIds?.has?.(vehicle.id) || false;
   const card = document.createElement("button");
   card.type = "button";
   card.className = "vehicle-selection-card";
+  card.classList.toggle("multi-selected", isMultiSelected);
   card.dataset.vehicleId = String(vehicle.id);
-  card.title = `选择 ${vehicle.name || "未命名车辆"}`;
-  card.append(vehicleImage(vehicle), renderVehicleSelectionText(vehicle));
+  card.setAttribute("aria-pressed", isMultiSelected ? "true" : "false");
+  card.title = `${isMultiSelected ? "取消选择" : "选择"} ${vehicle.name || "未命名车辆"} 用于删除`;
+  card.append(renderVehicleSelectionMark(isMultiSelected), vehicleImage(vehicle), renderVehicleSelectionText(vehicle));
   card.addEventListener("click", () => {
-    handlers.onChooseVehicle?.(vehicle.id);
+    handlers.onToggleVehicleSelection?.(vehicle.id);
   });
   return card;
+}
+
+function renderVehicleSelectionMark(isMultiSelected) {
+  const mark = document.createElement("span");
+  mark.className = "vehicle-selection-check";
+  mark.textContent = isMultiSelected ? "✓" : "";
+  mark.setAttribute("aria-hidden", "true");
+  return mark;
 }
 
 function renderVehicleSelectionText(vehicle) {
@@ -150,7 +161,10 @@ function renderCabColumn(cabId, titleText, vehicles, functions, cabState, handle
   if (controlPanel) {
     section.append(controlPanel);
   }
-  section.append(renderCabVehicleList(cabId, vehicles, cab, cabState, handlers));
+  const vehicleList = cab.thumbnailMode
+    ? renderCabThumbnailGrid(cabId, vehicles, cab, cabState, handlers)
+    : renderCabVehicleList(cabId, vehicles, cab, cabState, handlers);
+  section.append(vehicleList);
   return section;
 }
 
@@ -200,7 +214,16 @@ function renderCabFilters(cabId, cab, categories, handlers) {
     handlers.onCabSortChange?.(cabId, cab.sortKey || "custom", cab.sortDirection === "desc" ? "asc" : "desc");
   });
 
-  bar.append(numberToggle, nameToggle, category, sort, direction);
+  const thumbnailToggle = cabToggleButton({
+    className: "cab-thumbnail-toggle",
+    active: Boolean(cab.thumbnailMode),
+    label: "缩略",
+    activeTitle: "当前显示缩略车辆选择",
+    inactiveTitle: "切换到缩略车辆选择",
+    onClick: () => handlers.onToggleCabThumbnailMode?.(cabId)
+  });
+
+  bar.append(numberToggle, nameToggle, category, sort, direction, thumbnailToggle);
   return bar;
 }
 
@@ -250,6 +273,39 @@ function renderCabVehicleList(cabId, vehicles, cab, cabState, handlers) {
     list.append(renderCabVehicleRow(cabId, vehicle, cab, cabState, handlers));
   }
   return list;
+}
+
+function renderCabThumbnailGrid(cabId, vehicles, cab, cabState, handlers) {
+  const grid = document.createElement("div");
+  grid.className = "cab-thumbnail-grid";
+  for (const vehicle of vehicles) {
+    grid.append(renderCabThumbnailCard(cabId, vehicle, cab, cabState, handlers));
+  }
+  return grid;
+}
+
+function renderCabThumbnailCard(cabId, vehicle, cab, cabState, handlers) {
+  const isSelected = cab.vehicleId === vehicle.id;
+  const disabledByOtherCab = selectedByOtherCab(cabId, cabState, vehicle.id);
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = "cab-thumbnail-card";
+  card.classList.toggle("selected", isSelected);
+  card.classList.toggle("disabled-by-other-cab", disabledByOtherCab);
+  card.dataset.vehicleId = String(vehicle.id);
+  card.disabled = disabledByOtherCab;
+  card.setAttribute("aria-pressed", isSelected ? "true" : "false");
+  card.title = disabledByOtherCab
+    ? `${vehicle.name || "未命名车辆"} 已在另一侧控制区中选择`
+    : `选择 ${vehicle.name || "未命名车辆"} 作为${cabId === "left" ? "左控制台" : "右控制台"}当前控制车辆`;
+  card.append(vehicleImage(vehicle), renderVehicleSelectionText(vehicle));
+  card.addEventListener("click", () => {
+    if (disabledByOtherCab) {
+      return;
+    }
+    handlers.onSelectVehicle?.(cabId, vehicle.id);
+  });
+  return card;
 }
 
 function renderCabVehicleRow(cabId, vehicle, cab, cabState, handlers) {
