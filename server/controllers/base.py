@@ -22,7 +22,6 @@ class ControllerCapabilities:
   controller_settings: bool
   railcom_settings: bool = False
   profile_settings_on_track_mode: bool = False
-  sound_editor: bool = False
 
   def to_dict(self) -> dict:
     return {
@@ -34,7 +33,6 @@ class ControllerCapabilities:
       "controller_settings": self.controller_settings,
       "railcom_settings": self.railcom_settings,
       "profile_settings_on_track_mode": self.profile_settings_on_track_mode,
-      "sound_editor": self.sound_editor,
     }
 
 

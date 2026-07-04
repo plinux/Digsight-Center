@@ -3,6 +3,12 @@
 from server.controllers.base import controller_display_name, controller_protocol
 from server.controllers.digsight import DigsightDXDCNetControllerAdapter
 from server.controllers.ecos import ECoSControllerAdapter
+from server.controllers.z21 import (
+  Z21_STD_PROFILE,
+  Z21_START_PROFILE,
+  Z21_XL_PROFILE,
+  Z21LanControllerAdapter,
+)
 from server.descriptor_paths import validate_descriptor_file_name
 from server.public_paths import CONTROLLER_CONFIG_PUBLIC_PREFIX, CONTROLLER_CONFIG_RELATIVE_PREFIX
 
@@ -86,4 +92,7 @@ def default_controller_registry():
   registry = ControllerRegistry()
   registry.register(DigsightDXDCNetControllerAdapter(), default=True)
   registry.register(ECoSControllerAdapter())
+  registry.register(Z21LanControllerAdapter(Z21_STD_PROFILE))
+  registry.register(Z21LanControllerAdapter(Z21_START_PROFILE))
+  registry.register(Z21LanControllerAdapter(Z21_XL_PROFILE))
   return registry

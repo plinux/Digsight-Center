@@ -13,9 +13,11 @@ from server.controllers.base import (
   ControllerTransportDescriptor,
 )
 from server.controllers.digsight import DigsightDXDCNetControllerAdapter
+from server.controllers.ecos import ECoSControllerAdapter
 from server.controllers.example import ExampleControllerAdapter
 from server.controllers.registry import ControllerRegistry
 from server.controllers.registry import default_controller_registry
+from server.controllers.z21 import Z21_STD_PROFILE, Z21_START_PROFILE, Z21_XL_PROFILE, Z21LanControllerAdapter
 import server.api_support.controller as controller_api_support
 import server.controllers.digsight as digsight_module
 import server.controllers.dxdcnet_constants as dxdcnet_constants
@@ -117,7 +119,6 @@ class ControllerRegistryTest(unittest.TestCase):
         "controller_settings": False,
         "railcom_settings": False,
         "profile_settings_on_track_mode": False,
-        "sound_editor": False,
       },
       "transport_descriptor": {
         "kind": "udp",
@@ -135,6 +136,16 @@ class ControllerRegistryTest(unittest.TestCase):
         "required_paths": [],
       },
     }])
+
+  def test_sound_editor_is_not_a_controller_capability(self):
+    descriptors = {
+      descriptor["kind"]: descriptor
+      for descriptor in default_controller_registry().descriptors()
+    }
+
+    self.assertNotIn("sound_editor", descriptors[models.CONTROLLER_KIND_DIGSIGHT]["capabilities"])
+    self.assertNotIn("sound_editor", descriptors[models.CONTROLLER_KIND_ECOS_50200]["capabilities"])
+    self.assertNotIn("sound_editor", descriptors[models.CONTROLLER_KIND_Z21_STD]["capabilities"])
 
   def test_udp_transport_descriptor_does_not_infer_endpoint_readiness(self):
     descriptor = ControllerTransportDescriptor(
@@ -272,6 +283,10 @@ class DigsightControllerAdapterTest(unittest.TestCase):
 
   def test_controller_adapters_declare_config_file_names(self):
     self.assertEqual(DigsightDXDCNetControllerAdapter.config_file_name, "Digsight_D9000.json")
+    self.assertEqual(ECoSControllerAdapter.config_file_name, "ESU_ECoS_50200.json")
+    self.assertEqual(Z21_STD_PROFILE.config_file_name, "Z21.json")
+    self.assertEqual(Z21_START_PROFILE.config_file_name, "Z21_Start.json")
+    self.assertEqual(Z21_XL_PROFILE.config_file_name, "Z21_XL.json")
     self.assertEqual(ExampleControllerAdapter.config_file_name, "example_controller.json")
 
   def test_digsight_adapter_declares_capabilities(self):
@@ -280,6 +295,7 @@ class DigsightControllerAdapterTest(unittest.TestCase):
     self.assertTrue(adapter.capabilities.track_power)
     self.assertTrue(adapter.capabilities.dc_control)
     self.assertTrue(adapter.capabilities.read_info)
+    self.assertTrue(adapter.capabilities.railcom_settings)
 
   def test_digsight_adapter_exposes_semantic_operations(self):
     adapter = DigsightDXDCNetControllerAdapter()
@@ -402,6 +418,9 @@ class ExampleControllerAdapterTest(unittest.TestCase):
     self.assertEqual(default_kinds, [
       "digsight_controller",
       "ecos_50200_controller",
+      "z21_std_controller",
+      "z21_xl_controller",
+      "z21_start_controller",
     ])
     self.assertNotIn("example_controller", default_kinds)
 
@@ -410,9 +429,85 @@ class ExampleControllerAdapterTest(unittest.TestCase):
     self.assertEqual(default_kinds, [
       "digsight_controller",
       "ecos_50200_controller",
+      "z21_std_controller",
+      "z21_xl_controller",
+      "z21_start_controller",
     ])
     self.assertNotIn("example_controller", default_kinds)
     self.assertEqual(ExampleControllerAdapter().kind, "example_controller")
+
+
+class ECoSAndZ21ControllerAdapterTest(unittest.TestCase):
+  def test_ecos_adapter_declares_tcp_control_capabilities(self):
+    adapter = ECoSControllerAdapter()
+
+    self.assertEqual(adapter.kind, "ecos_50200_controller")
+    self.assertEqual(adapter.protocol, "ECoS")
+    self.assertEqual(adapter.transport_descriptor.kind, "tcp")
+    self.assertEqual(adapter.transport_descriptor.defaults["tcp_port"], 15471)
+    self.assertEqual(adapter.transport_descriptor.endpoint_required_paths, ("transport.tcp_port",))
+    self.assertTrue(adapter.capabilities.read_info)
+    self.assertTrue(adapter.capabilities.track_power)
+    self.assertTrue(adapter.capabilities.cv_programming)
+    self.assertTrue(adapter.capabilities.loco_control)
+    self.assertTrue(adapter.capabilities.controller_settings)
+    self.assertTrue(adapter.capabilities.railcom_settings)
+    self.assertNotIn("target_voltage_v", adapter.default_track_profiles["ho"])
+    self.assertEqual(adapter.default_track_profiles["ho"]["target_current_limit_ma"], 4000)
+    self.assertEqual(adapter.default_track_profiles["ho"]["max_target_current_limit_ma"], 6000)
+    self.assertFalse(adapter.default_track_profiles["dc"]["enabled"])
+    self.assertIn("50200/50210/50220", adapter.field_descriptions["protocol"])
+
+  def test_z21_model_profiles_declare_separate_defaults(self):
+    z21 = Z21LanControllerAdapter(Z21_STD_PROFILE)
+    start = Z21LanControllerAdapter(Z21_START_PROFILE)
+    xl = Z21LanControllerAdapter(Z21_XL_PROFILE)
+
+    self.assertEqual(z21.kind, "z21_std_controller")
+    self.assertEqual(start.kind, "z21_start_controller")
+    self.assertEqual(xl.kind, "z21_xl_controller")
+    self.assertNotIn("output_value", z21.default_track_profiles["ho"])
+    self.assertNotIn("current_param", z21.default_track_profiles["ho"])
+    self.assertNotIn("target_current_limit_ma", z21.default_track_profiles["ho"])
+    self.assertNotIn("max_target_current_limit_ma", z21.default_track_profiles["ho"])
+    self.assertTrue(z21.default_track_profiles["g"]["enabled"])
+    self.assertFalse(z21.default_track_profiles["dc"]["enabled"])
+    self.assertTrue(z21.capabilities.controller_settings)
+    self.assertFalse(start.capabilities.controller_settings)
+    self.assertTrue(xl.capabilities.controller_settings)
+    self.assertTrue(z21.capabilities.railcom_settings)
+    self.assertTrue(start.capabilities.railcom_settings)
+    self.assertTrue(xl.capabilities.railcom_settings)
+    self.assertTrue(z21.capabilities.profile_settings_on_track_mode)
+    self.assertFalse(start.capabilities.profile_settings_on_track_mode)
+    self.assertTrue(xl.capabilities.profile_settings_on_track_mode)
+    for mode in ("n", "ho", "g"):
+      self.assertEqual(z21.default_track_profiles[mode]["target_voltage_v"], 16.0)
+      self.assertEqual(z21.default_track_profiles[mode]["min_target_voltage_v"], 11.0)
+      self.assertEqual(z21.default_track_profiles[mode]["max_target_voltage_v"], 23.0)
+    self.assertFalse(start.default_track_profiles["g"]["enabled"])
+    self.assertTrue(xl.default_track_profiles["g"]["enabled"])
+    self.assertEqual(xl.transport_descriptor.defaults["udp_port"], 21105)
+    self.assertTrue(xl.transport_descriptor.metadata["allow_zero_local_udp_port"])
+
+  def test_default_registry_exposes_read_only_controller_adapters(self):
+    registry = default_controller_registry()
+    descriptors = {descriptor["kind"]: descriptor for descriptor in registry.descriptors()}
+
+    self.assertEqual(registry.default_kind, "digsight_controller")
+    self.assertEqual(set(descriptors), {
+      "digsight_controller",
+      "ecos_50200_controller",
+      "z21_std_controller",
+      "z21_start_controller",
+      "z21_xl_controller",
+    })
+    self.assertEqual(descriptors["ecos_50200_controller"]["transport_descriptor"]["kind"], "tcp")
+    self.assertEqual(descriptors["z21_std_controller"]["transport_descriptor"]["kind"], "udp")
+    self.assertTrue(descriptors["ecos_50200_controller"]["capabilities"]["read_info"])
+    self.assertTrue(descriptors["ecos_50200_controller"]["capabilities"]["loco_control"])
+    self.assertTrue(descriptors["z21_xl_controller"]["capabilities"]["read_info"])
+    self.assertTrue(descriptors["z21_xl_controller"]["capabilities"]["cv_programming"])
 
 
 if __name__ == "__main__":

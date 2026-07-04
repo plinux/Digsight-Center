@@ -31,6 +31,9 @@ class CapabilitiesApiTest(unittest.TestCase):
     self.assertEqual([item["kind"] for item in data["controllers"]], [
       "digsight_controller",
       "ecos_50200_controller",
+      "z21_std_controller",
+      "z21_xl_controller",
+      "z21_start_controller",
     ])
     self.assertEqual([item["format"] for item in data["import_formats"]], ["z21_layout_config"])
     self.assertNotIn("example_controller", [item["kind"] for item in data["controllers"]])
@@ -42,6 +45,7 @@ class CapabilitiesApiTest(unittest.TestCase):
     self.assertEqual(data["controllers"][0]["default_ip"], models.CONTROLLER_DEFAULT_IP)
     self.assertTrue(data["controllers"][0]["capabilities"]["track_power"])
     self.assertTrue(data["controllers"][0]["capabilities"]["dc_control"])
+    self.assertTrue(data["controllers"][0]["capabilities"]["railcom_settings"])
     self.assertEqual(data["controllers"][0]["transport_descriptor"], {
       "kind": "udp",
       "defaults": {
@@ -60,6 +64,18 @@ class CapabilitiesApiTest(unittest.TestCase):
     self.assertEqual(data["controllers"][0]["endpoint_readiness"], {
       "required_paths": ["transport.udp_port"],
     })
+    controller_by_kind = {controller["kind"]: controller for controller in data["controllers"]}
+    self.assertEqual(controller_by_kind["ecos_50200_controller"]["protocol"], "ECoS")
+    self.assertEqual(controller_by_kind["ecos_50200_controller"]["transport_descriptor"]["kind"], "tcp")
+    self.assertEqual(controller_by_kind["z21_xl_controller"]["protocol"], "Z21LAN")
+    self.assertEqual(controller_by_kind["z21_xl_controller"]["transport_descriptor"]["defaults"]["udp_port"], 21105)
+    self.assertTrue(controller_by_kind["z21_xl_controller"]["capabilities"]["track_power"])
+    self.assertTrue(controller_by_kind["z21_xl_controller"]["capabilities"]["controller_settings"])
+    self.assertTrue(controller_by_kind["z21_xl_controller"]["capabilities"]["profile_settings_on_track_mode"])
+    self.assertFalse(controller_by_kind["z21_start_controller"]["capabilities"]["controller_settings"])
+    self.assertFalse(controller_by_kind["ecos_50200_controller"]["capabilities"]["profile_settings_on_track_mode"])
+    self.assertTrue(controller_by_kind["z21_xl_controller"]["capabilities"]["railcom_settings"])
+    self.assertTrue(controller_by_kind["ecos_50200_controller"]["capabilities"]["railcom_settings"])
     self.assertEqual(data["import_formats"][0]["format"], "z21_layout_config")
     self.assertIn(".z21", data["import_formats"][0]["extensions"])
     self.assertEqual(data["import_formats"][0]["function_icon_mapping_files"], ["/config/function-icon-mappings/z21.json"])
@@ -72,7 +88,7 @@ class CapabilitiesApiTest(unittest.TestCase):
       (config_dir / "Digsight_D9000.json").write_text(json.dumps({
         "display_name": "展厅控制器",
         "protocol": "DXDCNet",
-        "ip": "0.0.0.0",
+        "ip": "192.0.2.55",
         "transport": {
           "kind": "udp",
           "udp_port": 12000,
@@ -96,6 +112,7 @@ class CapabilitiesApiTest(unittest.TestCase):
       self.assertEqual(data["controllers"][0]["label"], "展厅控制器")
       self.assertEqual(data["controllers"][0]["display_name"], "展厅控制器")
       self.assertEqual(data["controllers"][0]["protocol"], "DXDCNet")
+      self.assertEqual(data["controllers"][0]["configured_ip"], "192.0.2.55")
 
   def test_capabilities_default_import_format_comes_from_registry(self):
     registry = ImportRegistry()

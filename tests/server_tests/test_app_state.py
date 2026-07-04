@@ -43,6 +43,7 @@ class AppStateStoreTest(unittest.TestCase):
       "ip",
       "protocol",
       "settings",
+      "settings.railcom_enabled",
       "transport.kind",
       "transport.udp_port",
       "transport.local_udp_port",
@@ -60,6 +61,40 @@ class AppStateStoreTest(unittest.TestCase):
       self.assertGreater(len(descriptions[path]), 0)
     self.assertIn("目标", descriptions["track_profiles.<mode>.target_voltage_v"])
     self.assertIn("不是实时电流", descriptions["track_profiles.<mode>.target_current_limit_ma"])
+
+  def test_z21_default_controller_config_omits_dxdcnet_track_output_fields(self):
+    config = AppStateStore.default_controller_config(default_controller_registry(), "z21_std_controller")
+    descriptions = config["field_descriptions"]
+    profile = config["track_profiles"]["ho"]
+
+    self.assertNotIn("output_value", profile)
+    self.assertNotIn("current_param", profile)
+    self.assertNotIn("target_current_limit_ma", profile)
+    self.assertNotIn("max_target_current_limit_ma", profile)
+    self.assertNotIn("track_profiles.<mode>.output_value", descriptions)
+    self.assertNotIn("track_profiles.<mode>.current_param", descriptions)
+    self.assertNotIn("track_profiles.<mode>.target_current_limit_ma", descriptions)
+    self.assertNotIn("track_profiles.<mode>.max_target_current_limit_ma", descriptions)
+    self.assertEqual(config["settings"], {"programming_track_voltage_v": 16.0})
+    self.assertIn("settings.programming_track_voltage_v", descriptions)
+
+  def test_ecos_default_controller_config_uses_current_limit_without_voltage_fields(self):
+    config = AppStateStore.default_controller_config(default_controller_registry(), "ecos_50200_controller")
+    descriptions = config["field_descriptions"]
+    profile = config["track_profiles"]["ho"]
+
+    self.assertNotIn("target_voltage_v", profile)
+    self.assertNotIn("max_target_voltage_v", profile)
+    self.assertNotIn("track_profiles.<mode>.target_voltage_v", descriptions)
+    self.assertNotIn("track_profiles.<mode>.max_target_voltage_v", descriptions)
+    self.assertEqual(profile["target_current_limit_ma"], 4000)
+    self.assertEqual(profile["max_target_current_limit_ma"], 6000)
+    self.assertEqual(profile["current_step_ma"], 100)
+    self.assertIn("track_profiles.<mode>.target_current_limit_ma", descriptions)
+    self.assertIn("track_profiles.<mode>.max_target_current_limit_ma", descriptions)
+    self.assertEqual(config["settings"], {"short_circuit_detection_delay_ms": 0})
+    self.assertIn("settings.short_circuit_detection_delay_ms", descriptions)
+    self.assertFalse(config["track_profiles"]["dc"]["enabled"])
 
   def test_example_controller_default_config_uses_example_field_descriptions(self):
     registry = ControllerRegistry()
@@ -639,6 +674,22 @@ class AppStateStoreTest(unittest.TestCase):
       self.assertNotIn("xx", controller["track_profiles"])
       self.assertEqual(state["last_error"]["type"], "controller_runtime_invalid")
       self.assertEqual(state["last_error"]["invalid_fields"], ["track_mode", "programming_target"])
+
+  def test_with_defaults_moves_disabled_controller_track_mode_to_first_enabled_mode(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      path = Path(temp_dir) / "app-state.json"
+      store = AppStateStore(path, controller_config_dir=Path(temp_dir) / "controllers")
+      state = store._with_defaults({
+        "controller": {
+          "kind": "z21_std_controller",
+          "track_mode": "dc",
+        }
+      })
+
+      self.assertEqual(state["controller"]["track_mode"], "n")
+      self.assertFalse(state["controller"]["track_profiles"]["dc"]["enabled"])
+      self.assertEqual(state["last_error"]["type"], "controller_runtime_invalid")
+      self.assertEqual(state["last_error"]["invalid_fields"], ["track_mode"])
 
   def test_invalid_runtime_controller_mode_invalidates_stale_safety_state(self):
     with tempfile.TemporaryDirectory() as temp_dir:

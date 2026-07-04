@@ -24,6 +24,16 @@ from digsight_dxdcnet.constants import (
 from digsight_dxdcnet.frames import build_udp_frame
 from tests.server_tests.controller_test_env import CustomDefaultsControllerAdapter, controller_ip_payload, controller_test_ip
 from tests.server_tests.fake_udp import FakeRequestMappedUdpTransport
+from z21_lan import (
+  LAN_GET_COMMON_SETTINGS,
+  LAN_GET_MMDCC_SETTINGS,
+  LAN_SET_COMMON_SETTINGS,
+  LAN_SET_MMDCC_SETTINGS,
+  build_get_common_settings,
+  build_set_common_settings,
+  encode_dataset,
+  parse_common_settings,
+)
 
 
 class SettingsReadyExampleControllerAdapter(ExampleControllerAdapter):
@@ -37,6 +47,114 @@ class SettingsReadyExampleControllerAdapter(ExampleControllerAdapter):
   )
 
 
+class RailComStateOnlyZ21Adapter(ExampleControllerAdapter):
+  kind = "railcom_state_only_z21_controller"
+  label = "RailCom 状态测试控制器"
+  default_display_name = "RailCom 状态测试控制器"
+  protocol = models.CONTROLLER_PROTOCOL_Z21_LAN
+  config_file_name = "railcom_state_only_z21.json"
+  capabilities = ControllerCapabilities(
+    track_power=False,
+    dc_control=False,
+    read_info=False,
+    cv_programming=False,
+    loco_control=False,
+    controller_settings=True,
+    railcom_settings=False,
+  )
+
+
+class FakeECoSTimeoutTransport:
+  def exchange(self, host, port, commands, *, timeout_seconds=None, expected_replies=1, expected_events=0):
+    raise TimeoutError("ECoS TCP exchange timed out")
+
+
+class FakeECoSMissingInfoTransport:
+  def exchange(self, host, port, commands, *, timeout_seconds=None, expected_replies=1, expected_events=0):
+    return "<REPLY request(1, view)>\n1 status[GO]\n<END 0 (OK)>\n"
+
+
+class FakeECoSSettingsTransport:
+  def __init__(self):
+    self.requests = []
+    self.railcom_enabled = False
+    self.railcomplus_enabled = False
+
+  def exchange(self, host, port, commands, *, timeout_seconds=None, expected_replies=1, expected_events=0):
+    command_list = list(commands if isinstance(commands, (list, tuple)) else [commands])
+    self.requests.append({
+      "host": host,
+      "port": port,
+      "commands": command_list,
+      "timeout_seconds": timeout_seconds,
+      "expected_replies": expected_replies,
+      "expected_events": expected_events,
+    })
+    if command_list[0] == "request(65000, control)":
+      return "\n".join([
+        "<REPLY request(65000, control)>",
+        "<END 0 (OK)>",
+        f"<REPLY {command_list[1]}>",
+        "<END 0 (OK)>",
+        "<REPLY get(65000, limit)>",
+        "65000 limit[3500]",
+        "<END 0 (OK)>",
+        "<REPLY release(65000, control)>",
+        "<END 0 (OK)>",
+      ])
+    if command_list[0].startswith("set(1, railcom"):
+      replies = []
+      for command in command_list:
+        if command == "set(1, railcom[0])":
+          self.railcom_enabled = False
+          self.railcomplus_enabled = False
+        elif command == "set(1, railcom[1])":
+          self.railcom_enabled = True
+        elif command == "set(1, railcomplus[0])":
+          self.railcomplus_enabled = False
+        elif command == "set(1, railcomplus[1])":
+          self.railcomplus_enabled = True
+        replies.extend([
+          f"<REPLY {command}>",
+          "<END 0 (OK)>",
+        ])
+      replies.extend([
+        "<REPLY get(1, railcom, railcomplus)>",
+        f"1 railcom[{1 if self.railcom_enabled else 0}] railcomplus[{1 if self.railcomplus_enabled else 0}]",
+        "<END 0 (OK)>",
+      ])
+      return "\n".join(replies)
+    raise AssertionError(f"unexpected ECoS settings command batch: {command_list!r}")
+
+
+class FakeZ21SettingsTransport:
+  def __init__(self):
+    self.requests = []
+    self.mmdcc_settings_payload = bytes.fromhex("19 06 07 01 05 14 88 13 10 27 32 80 80 3e 80 3e")
+    self.common_settings_payload = bytes.fromhex("01 00 00 03 01 00 03 00 00 00")
+
+  def exchange(self, host, port, payload, *, local_port=0, max_packets=8, stop_when=None, timeout_seconds=None):
+    self.requests.append({
+      "host": host,
+      "port": port,
+      "payload": payload,
+      "local_port": local_port,
+      "max_packets": max_packets,
+      "timeout_seconds": timeout_seconds,
+    })
+    if payload == bytes.fromhex("04 00 16 00"):
+      return [encode_dataset(LAN_GET_MMDCC_SETTINGS, self.mmdcc_settings_payload)]
+    if payload == build_get_common_settings():
+      return [encode_dataset(LAN_GET_COMMON_SETTINGS, self.common_settings_payload)]
+    if len(payload) == 20 and payload[:4] == bytes.fromhex("14 00 17 00"):
+      self.mmdcc_settings_payload = payload[4:]
+      return [encode_dataset(LAN_SET_MMDCC_SETTINGS)]
+    if len(payload) == 14 and payload[:4] == bytes.fromhex("0e 00 13 00"):
+      self.common_settings_payload = payload[4:]
+      return [encode_dataset(LAN_SET_COMMON_SETTINGS)]
+    return []
+
+
 class ControllerSettingsTest(unittest.TestCase):
   def test_controller_settings_workflow_is_split_into_helpers(self):
     router_source = inspect.getsource(ApiRouter)
@@ -48,8 +166,10 @@ class ControllerSettingsTest(unittest.TestCase):
     self.assertIn("def _parse_transport_settings", controller_source)
     self.assertIn("def _parse_controller_mode_settings", controller_source)
     self.assertIn("def _parse_track_profile_settings", controller_source)
+    self.assertIn("def _parse_controller_private_settings", controller_source)
     self.assertIn("def _build_controller_settings_candidate", controller_source)
     self.assertIn("def _apply_controller_settings_to_device", controller_source)
+    self.assertIn("def _apply_controller_private_settings_if_requested", controller_source)
     self.assertIn("def _controller_settings_response_payload", controller_source)
 
   def test_custom_defaults_controller_adapter_fixture_is_shared(self):
@@ -100,9 +220,28 @@ class ControllerSettingsTest(unittest.TestCase):
     self.assertEqual(payload["data"]["controller_kind"], "digsight_controller")
     self.assertEqual(payload["data"]["controller_label"], "动芯 拾Pro")
     self.assertEqual(payload["data"]["controller_protocol"], "DXDCNet")
+    self.assertIn("default_track_output_settings", payload["data"])
+    self.assertIn("track_profiles", payload["data"]["default_track_output_settings"])
+    self.assertEqual(
+      payload["data"]["default_track_output_settings"]["track_profiles"]["n"]["target_voltage_v"],
+      models.default_track_profiles()["n"]["target_voltage_v"],
+    )
+    self.assertEqual(payload["data"]["default_track_output_settings"]["settings"], {})
     self.assertTrue(payload["data"]["controller_capabilities"]["track_power"])
     self.assertTrue(payload["data"]["controller_capabilities"]["dc_control"])
     self.assertTrue(payload["data"]["controller_capabilities"]["read_info"])
+    self.assertTrue(payload["data"]["controller_capabilities"]["railcom_settings"])
+    self.assertEqual(payload["data"]["railcom_setting"], {
+      "available": True,
+      "writable": True,
+      "enabled": None,
+      "source": "",
+      "message": "",
+    })
+    self.assertGreaterEqual(len(payload["data"]["info_sections"]), 2)
+    self.assertEqual(payload["data"]["info_sections"][0]["title"], "设备信息")
+    self.assertEqual(payload["data"]["info_sections"][1]["title"], "工作状态")
+    self.assertEqual(payload["data"]["info_sections"][0]["rows"][0]["path"], "device_info.device_name")
     self.assertIn("n", payload["data"]["track_profiles"])
     self.assertIn("ho", payload["data"]["track_profiles"])
     self.assertIn("g", payload["data"]["track_profiles"])
@@ -111,6 +250,126 @@ class ControllerSettingsTest(unittest.TestCase):
     self.assertEqual(payload["data"]["cv_safety_warnings"], ["programming_track_status_unconfirmed"])
     self.assertEqual(payload["data"]["read_capability"]["ready"], False)
     self.assertEqual(payload["data"]["read_capability"]["warnings"], ["controller_ip_unconfigured"])
+
+  def test_controller_info_exposes_z21_railcom_as_writable(self):
+    state = default_state()
+    state["controller"].update({
+      "kind": models.CONTROLLER_KIND_Z21_STD,
+      "protocol": models.CONTROLLER_PROTOCOL_Z21_LAN,
+      "device_info": {},
+    })
+
+    body, status = ApiRouter(None).handle_json("GET", "/api/controller/info", b"", state)
+    payload = json.loads(body.decode("utf-8"))
+
+    self.assertEqual(status, 200)
+    self.assertEqual(payload["data"]["controller_protocol"], models.CONTROLLER_PROTOCOL_Z21_LAN)
+    self.assertEqual(payload["data"]["railcom_setting"], {
+      "available": True,
+      "writable": True,
+      "enabled": None,
+      "source": "",
+      "message": "",
+    })
+
+  def test_controller_info_reports_unwritable_z21_railcom_message(self):
+    registry = ControllerRegistry()
+    registry.register(RailComStateOnlyZ21Adapter(), default=True)
+    state = default_state()
+    state["controller"].update({
+      "kind": RailComStateOnlyZ21Adapter.kind,
+      "protocol": models.CONTROLLER_PROTOCOL_Z21_LAN,
+      "device_info": {"railcom_enabled": True},
+    })
+
+    body, status = ApiRouter(None, controller_registry=registry).handle_json(
+      "GET",
+      "/api/controller/info",
+      b"",
+      state,
+    )
+    payload = json.loads(body.decode("utf-8"))
+
+    self.assertEqual(status, 200)
+    self.assertEqual(payload["data"]["railcom_setting"], {
+      "available": True,
+      "writable": False,
+      "enabled": True,
+      "source": "device_info",
+      "message": "当前 Z21 控制器配置未开放 RailCom 写入。",
+    })
+
+  def test_registered_controller_info_sections_use_standard_titles(self):
+    registry = default_controller_registry()
+
+    for adapter in registry.adapters():
+      with self.subTest(controller=adapter.kind):
+        titles = [section["title"] for section in adapter.info_sections[:2]]
+        self.assertEqual(titles, ["设备信息", "工作状态"])
+
+  def test_controller_info_exposes_ecos_railcom_and_railcomplus_state_as_writable(self):
+    state = default_state()
+    state["controller"].update({
+      "kind": models.CONTROLLER_KIND_ECOS_50200,
+      "protocol": models.CONTROLLER_PROTOCOL_ECOS,
+      "device_info": {"railcom": "enabled", "railcomplus": "0"},
+    })
+
+    body, status = ApiRouter(None).handle_json("GET", "/api/controller/info", b"", state)
+    payload = json.loads(body.decode("utf-8"))
+
+    self.assertEqual(status, 200)
+    self.assertEqual(payload["data"]["controller_protocol"], models.CONTROLLER_PROTOCOL_ECOS)
+    self.assertEqual(payload["data"]["railcom_setting"], {
+      "available": True,
+      "writable": True,
+      "enabled": True,
+      "source": "device_info",
+      "message": "",
+      "railcomplus": {
+        "available": True,
+        "writable": True,
+        "enabled": False,
+        "source": "device_info",
+        "message": "",
+      },
+    })
+
+  def test_controller_info_prefers_ecos_railcom_protocol_field_when_legacy_enabled_is_null(self):
+    state = default_state()
+    state["controller"].update({
+      "kind": models.CONTROLLER_KIND_ECOS_50200,
+      "protocol": models.CONTROLLER_PROTOCOL_ECOS,
+      "device_info": {
+        "railcom_enabled": None,
+        "railcom": "1",
+        "railcomplus_enabled": None,
+        "railcomplus": "1",
+      },
+    })
+
+    body, status = ApiRouter(None).handle_json("GET", "/api/controller/info", b"", state)
+    payload = json.loads(body.decode("utf-8"))
+
+    self.assertEqual(status, 200)
+    self.assertEqual(payload["data"]["railcom_setting"]["enabled"], True)
+    self.assertEqual(payload["data"]["railcom_setting"]["source"], "device_info")
+    self.assertEqual(payload["data"]["railcom_setting"]["railcomplus"]["enabled"], True)
+
+  def test_controller_info_hides_railcomplus_for_non_ecos_controller_even_if_old_setting_exists(self):
+    state = default_state()
+    state["controller"].update({
+      "kind": models.CONTROLLER_KIND_Z21_STD,
+      "protocol": models.CONTROLLER_PROTOCOL_Z21_LAN,
+      "device_info": {"railcom_enabled": True},
+      "settings": {"railcomplus_enabled": True},
+    })
+
+    body, status = ApiRouter(None).handle_json("GET", "/api/controller/info", b"", state)
+    payload = json.loads(body.decode("utf-8"))
+
+    self.assertEqual(status, 200)
+    self.assertNotIn("railcomplus", payload["data"]["railcom_setting"])
 
   def test_default_state_tracks_controller_safety_snapshot(self):
     state = default_state()
@@ -222,6 +481,181 @@ class ControllerSettingsTest(unittest.TestCase):
     self.assertFalse(payload["data"]["applied_to_device"])
     self.assertEqual(state["controller"]["track_profiles"]["n"]["target_current_limit_ma"], 200)
 
+  def test_z21_controller_settings_keep_voltage_profile_without_current_limit(self):
+    state = default_state()
+    state["controller"] = AppStateStore.default_controller_config(default_controller_registry(), models.CONTROLLER_KIND_Z21_STD)
+    state["controller"]["kind"] = models.CONTROLLER_KIND_Z21_STD
+
+    body, status = ApiRouter(None).handle_json(
+      "PATCH",
+      "/api/controller/settings",
+      b'{"track_profiles":{"ho":{"target_voltage_v":17.0}},"settings":{"programming_track_voltage_v":15.5}}',
+      state,
+    )
+    payload = json.loads(body.decode("utf-8"))
+
+    self.assertEqual(status, 200)
+    self.assertEqual(payload["data"]["track_profiles"]["ho"]["target_voltage_v"], 17.0)
+    self.assertEqual(payload["data"]["settings"]["programming_track_voltage_v"], 15.5)
+    self.assertNotIn("target_current_limit_ma", payload["data"]["track_profiles"]["ho"])
+    self.assertNotIn("max_target_current_limit_ma", state["controller"]["track_profiles"]["ho"])
+    self.assertEqual(state["controller"]["settings"]["programming_track_voltage_v"], 15.5)
+
+  def test_z21_controller_settings_apply_voltage_to_device_and_verify_readback(self):
+    state = default_state()
+    state["controller"] = AppStateStore.default_controller_config(default_controller_registry(), models.CONTROLLER_KIND_Z21_STD)
+    state["controller"].update({
+      "kind": models.CONTROLLER_KIND_Z21_STD,
+      "ip": "192.0.2.21",
+      "udp_port": 21105,
+      "local_udp_port": 0,
+      "transport": {"kind": "udp", "udp_port": 21105, "local_udp_port": 0},
+      "telemetry": {},
+      "device_info": {},
+      "safety_snapshot": {},
+    })
+    transport = FakeZ21SettingsTransport()
+
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
+      "PATCH",
+      "/api/controller/settings",
+      b'{"apply_to_device":true,"track_profiles":{"ho":{"target_voltage_v":17.0}}}',
+      state,
+    )
+    payload = json.loads(body.decode("utf-8"))
+
+    self.assertEqual(status, 200)
+    self.assertTrue(payload["data"]["applied_to_device"])
+    self.assertEqual(payload["data"]["device_results"][0]["setting"], "z21_mmdcc_voltage")
+    self.assertEqual(payload["data"]["device_results"][0]["output_voltage_mv"], 17000)
+    self.assertEqual(payload["data"]["device_results"][0]["programming_voltage_mv"], 16000)
+    self.assertEqual(state["controller"]["track_profiles"]["ho"]["target_voltage_v"], 17.0)
+    self.assertEqual(state["controller"]["booster_status"]["output_voltage_v"], 17.0)
+    self.assertEqual([entry["payload"] for entry in transport.requests], [
+      bytes.fromhex("04 00 16 00"),
+      bytes.fromhex("14 00 17 00 19 06 07 01 05 14 88 13 10 27 32 80 68 42 80 3e"),
+      bytes.fromhex("04 00 16 00"),
+    ])
+
+  def test_z21_track_mode_switch_applies_selected_profile_voltage(self):
+    state = default_state()
+    state["controller"] = AppStateStore.default_controller_config(default_controller_registry(), models.CONTROLLER_KIND_Z21_STD)
+    state["controller"].update({
+      "kind": models.CONTROLLER_KIND_Z21_STD,
+      "ip": "192.0.2.21",
+      "udp_port": 21105,
+      "local_udp_port": 0,
+      "transport": {"kind": "udp", "udp_port": 21105, "local_udp_port": 0},
+      "track_mode": models.TRACK_MODE_N,
+      "telemetry": {},
+      "device_info": {},
+      "safety_snapshot": {},
+    })
+    state["controller"]["track_profiles"]["ho"]["target_voltage_v"] = 17.5
+    transport = FakeZ21SettingsTransport()
+
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
+      "PATCH",
+      "/api/controller/track-mode",
+      b'{"track_mode":"ho"}',
+      state,
+    )
+    payload = json.loads(body.decode("utf-8"))
+
+    self.assertEqual(status, 200)
+    self.assertEqual(payload["data"]["track_mode"], "ho")
+    self.assertTrue(payload["data"]["applied_to_device"])
+    self.assertEqual(payload["data"]["device_results"][0]["setting"], "z21_mmdcc_voltage")
+    self.assertEqual(payload["data"]["device_results"][0]["output_voltage_mv"], 17500)
+    self.assertEqual(payload["data"]["device_results"][0]["programming_voltage_mv"], 16000)
+    self.assertEqual(state["controller"]["track_mode"], "ho")
+    self.assertEqual(state["controller"]["booster_status"]["output_voltage_v"], 17.5)
+    self.assertEqual([entry["payload"] for entry in transport.requests], [
+      bytes.fromhex("04 00 16 00"),
+      bytes.fromhex("14 00 17 00 19 06 07 01 05 14 88 13 10 27 32 80 5c 44 80 3e"),
+      bytes.fromhex("04 00 16 00"),
+    ])
+
+  def test_ecos_controller_settings_keep_current_limit_profile_without_voltage(self):
+    state = default_state()
+    state["controller"] = AppStateStore.default_controller_config(default_controller_registry(), models.CONTROLLER_KIND_ECOS_50200)
+    state["controller"]["kind"] = models.CONTROLLER_KIND_ECOS_50200
+
+    body, status = ApiRouter(None).handle_json(
+      "PATCH",
+      "/api/controller/settings",
+      b'{"track_profiles":{"n":{"target_current_limit_ma":3500}},"settings":{"short_circuit_detection_delay_ms":1500}}',
+      state,
+    )
+    payload = json.loads(body.decode("utf-8"))
+
+    self.assertEqual(status, 200)
+    self.assertFalse(payload["data"]["applied_to_device"])
+    self.assertNotIn("target_voltage_v", payload["data"]["track_profiles"]["n"])
+    self.assertEqual(payload["data"]["track_profiles"]["n"]["target_current_limit_ma"], 3500)
+    self.assertEqual(payload["data"]["settings"]["short_circuit_detection_delay_ms"], 1500)
+    self.assertEqual(state["controller"]["track_profiles"]["n"]["target_current_limit_ma"], 3500)
+    self.assertEqual(state["controller"]["settings"]["short_circuit_detection_delay_ms"], 1500)
+
+  def test_controller_info_exposes_database_default_track_output_settings(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      root = Path(temp_dir)
+      state_store = AppStateStore(root / "data" / "app-state.json")
+      state = state_store.load()
+      state["controller"] = AppStateStore.default_controller_config(default_controller_registry(), models.CONTROLLER_KIND_Z21_STD)
+      state["controller"]["kind"] = models.CONTROLLER_KIND_Z21_STD
+      state["controller"]["track_profiles"]["ho"]["target_voltage_v"] = 17.5
+      router = ApiRouter(state_store)
+
+      body, status = router.handle_json("GET", "/api/controller/info", b"", state)
+      payload = json.loads(body.decode("utf-8"))
+
+      self.assertEqual(status, 200)
+      self.assertEqual(payload["data"]["track_profiles"]["ho"]["target_voltage_v"], 17.5)
+      self.assertEqual(payload["data"]["default_track_output_settings"]["track_profiles"]["ho"]["target_voltage_v"], 16.0)
+      self.assertEqual(payload["data"]["settings"]["programming_track_voltage_v"], 16.0)
+      self.assertEqual(payload["data"]["default_track_output_settings"]["settings"], {"programming_track_voltage_v": 16.0})
+      self.assertIn("programming_track_voltage_v", [
+        spec["key"] for spec in payload["data"]["track_output_setting_specs"]
+      ])
+
+  def test_ecos_controller_settings_apply_current_limit_to_booster(self):
+    state = default_state()
+    state["controller"] = AppStateStore.default_controller_config(default_controller_registry(), models.CONTROLLER_KIND_ECOS_50200)
+    state["controller"].update({
+      "kind": models.CONTROLLER_KIND_ECOS_50200,
+      "ip": "192.0.2.97",
+      "tcp_port": 15471,
+      "transport": {"kind": "tcp", "tcp_port": 15471},
+      "telemetry": {},
+      "device_info": {},
+      "safety_snapshot": {},
+    })
+    transport = FakeECoSSettingsTransport()
+
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
+      "PATCH",
+      "/api/controller/settings",
+      b'{"apply_to_device":true,"track_profiles":{"ho":{"target_current_limit_ma":3500}},"settings":{"short_circuit_detection_delay_ms":2000}}',
+      state,
+    )
+    payload = json.loads(body.decode("utf-8"))
+
+    self.assertEqual(status, 200)
+    self.assertTrue(payload["data"]["applied_to_device"])
+    self.assertEqual(payload["data"]["device_results"][0]["setting"], "ecos_booster_current_limit")
+    self.assertEqual(payload["data"]["device_results"][0]["target_current_limit_ma"], 3500)
+    self.assertEqual(payload["data"]["device_results"][0]["readback_current_limit_ma"], 3500)
+    self.assertEqual(state["controller"]["track_profiles"]["ho"]["target_current_limit_ma"], 3500)
+    self.assertEqual(state["controller"]["settings"]["short_circuit_detection_delay_ms"], 2000)
+    self.assertEqual(state["controller"]["booster_status"]["limit_ma"], 3500)
+    self.assertEqual([entry["commands"] for entry in transport.requests], [[
+      "request(65000, control)",
+      "set(65000, limit[3500])",
+      "get(65000, limit)",
+      "release(65000, control)",
+    ]])
+
   def test_controller_settings_normalizes_existing_transport_config(self):
     state = default_state()
     state["controller"]["transport"].update({
@@ -282,6 +716,173 @@ class ControllerSettingsTest(unittest.TestCase):
       bytes.fromhex("ff ff 18 01 40 00 00 82 64 bf"),
       bytes.fromhex("ff ff 17 01 41 00 00 82 d5"),
     ])
+
+  def test_controller_settings_applies_digsight_railcom_setting_and_verifies_readback(self):
+    state = self._state_with_confirmed_udp()
+    requests = {
+      bytes.fromhex("ff ff 18 01 40 00 00 03 80 da"): [],
+      bytes.fromhex("ff ff 17 01 41 00 00 03 54"): [
+        build_udp_frame(
+          device_type=DEVICE_TYPE_COMMAND_STATION,
+          source_id=0,
+          command=CMD_PARAMETER_VALUE,
+          payload=bytes([0x03, 0x80]),
+        )
+      ],
+    }
+    request = {
+      "apply_to_device": True,
+      "settings": {
+        "railcom_enabled": True,
+      },
+    }
+    transport = FakeRequestMappedUdpTransport(requests)
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
+      "PATCH",
+      "/api/controller/settings",
+      json.dumps(request).encode("utf-8"),
+      state,
+    )
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 200)
+    self.assertTrue(payload["data"]["applied_to_device"])
+    self.assertEqual(payload["data"]["settings"]["railcom_enabled"], True)
+    self.assertEqual(payload["data"]["device_results"], [{
+      "setting": "railcom_enabled",
+      "param_address": 0x03,
+      "raw_value": 0x80,
+      "enabled": True,
+      "write_request_hex": "ff ff 18 01 40 00 00 03 80 da",
+      "read_request_hex": "ff ff 17 01 41 00 00 03 54",
+    }])
+    self.assertEqual(state["controller"]["settings"]["railcom_enabled"], True)
+    self.assertEqual(state["controller"]["device_info"]["railcom_enabled"], True)
+    self.assertEqual([entry["payload"] for entry in transport.requests], [
+      bytes.fromhex("ff ff 18 01 40 00 00 03 80 da"),
+      bytes.fromhex("ff ff 17 01 41 00 00 03 54"),
+    ])
+
+  def test_controller_settings_applies_z21_railcom_setting_and_verifies_readback(self):
+    state = default_state()
+    state["controller"] = AppStateStore.default_controller_config(default_controller_registry(), models.CONTROLLER_KIND_Z21_STD)
+    state["controller"].update({
+      "kind": models.CONTROLLER_KIND_Z21_STD,
+      "ip": "192.0.2.21",
+      "udp_port": 21105,
+      "local_udp_port": 0,
+      "transport": {"kind": "udp", "udp_port": 21105, "local_udp_port": 0},
+      "telemetry": {},
+      "device_info": {},
+      "safety_snapshot": {},
+    })
+    transport = FakeZ21SettingsTransport()
+    before_settings = parse_common_settings(transport.common_settings_payload)
+    write_request = build_set_common_settings(before_settings.with_railcom(False))
+
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
+      "PATCH",
+      "/api/controller/settings",
+      b'{"apply_to_device":true,"settings":{"railcom_enabled":false}}',
+      state,
+    )
+    payload = json.loads(body.decode("utf-8"))
+
+    self.assertEqual(status, 200)
+    self.assertTrue(payload["data"]["applied_to_device"])
+    self.assertEqual(payload["data"]["device_results"][0]["setting"], "railcom_enabled")
+    self.assertFalse(payload["data"]["device_results"][0]["enabled"])
+    self.assertFalse(state["controller"]["settings"]["railcom_enabled"])
+    self.assertFalse(state["controller"]["device_info"]["railcom_enabled"])
+    self.assertEqual([entry["payload"] for entry in transport.requests], [
+      build_get_common_settings(),
+      write_request,
+      build_get_common_settings(),
+    ])
+
+  def test_controller_settings_drops_ecos_private_settings_when_switching_to_z21(self):
+    state = default_state()
+    state["controller"] = AppStateStore.default_controller_config(default_controller_registry(), models.CONTROLLER_KIND_ECOS_50200)
+    state["controller"].update({
+      "kind": models.CONTROLLER_KIND_ECOS_50200,
+      "ip": "192.0.2.97",
+      "tcp_port": 15471,
+      "transport": {"kind": "tcp", "tcp_port": 15471},
+      "settings": {"railcom_enabled": True, "railcomplus_enabled": True},
+      "device_info": {"railcom": "1", "railcomplus": "1"},
+    })
+
+    body, status = ApiRouter(None).handle_json(
+      "PATCH",
+      "/api/controller/settings",
+      b'{"kind":"z21_std_controller","ip":"192.0.2.21"}',
+      state,
+    )
+    payload = json.loads(body.decode("utf-8"))
+
+    self.assertEqual(status, 200)
+    self.assertEqual(payload["data"]["kind"], models.CONTROLLER_KIND_Z21_STD)
+    expected_settings = {
+      "programming_track_voltage_v": 16.0,
+      "railcom_enabled": True,
+    }
+    self.assertEqual(payload["data"]["settings"], expected_settings)
+    self.assertEqual(state["controller"]["settings"], expected_settings)
+
+  def test_controller_settings_applies_ecos_railcomplus_with_linked_railcom(self):
+    state = default_state()
+    state["controller"] = AppStateStore.default_controller_config(default_controller_registry(), models.CONTROLLER_KIND_ECOS_50200)
+    state["controller"].update({
+      "kind": models.CONTROLLER_KIND_ECOS_50200,
+      "ip": "192.0.2.97",
+      "tcp_port": 15471,
+      "transport": {"kind": "tcp", "tcp_port": 15471},
+      "telemetry": {},
+      "device_info": {"railcom": "0", "railcomplus": "0"},
+      "safety_snapshot": {},
+    })
+    transport = FakeECoSSettingsTransport()
+
+    body, status = ApiRouter(None, controller_transport=transport).handle_json(
+      "PATCH",
+      "/api/controller/settings",
+      b'{"apply_to_device":true,"settings":{"railcomplus_enabled":true}}',
+      state,
+    )
+    payload = json.loads(body.decode("utf-8"))
+
+    self.assertEqual(status, 200)
+    self.assertTrue(payload["data"]["applied_to_device"])
+    self.assertEqual(payload["data"]["settings"]["railcom_enabled"], True)
+    self.assertEqual(payload["data"]["settings"]["railcomplus_enabled"], True)
+    self.assertEqual(payload["data"]["device_results"], [{
+      "setting": "ecos_railcom",
+      "railcom_enabled": True,
+      "railcomplus_enabled": True,
+      "write_request_hex": "\n".join([
+        "73 65 74 28 31 2c 20 72 61 69 6c 63 6f 6d 5b 31 5d 29",
+        "73 65 74 28 31 2c 20 72 61 69 6c 63 6f 6d 70 6c 75 73 5b 31 5d 29",
+        "67 65 74 28 31 2c 20 72 61 69 6c 63 6f 6d 2c 20 72 61 69 6c 63 6f 6d 70 6c 75 73 29",
+      ]),
+    }])
+    self.assertEqual([entry["commands"] for entry in transport.requests], [[
+      "set(1, railcom[1])",
+      "set(1, railcomplus[1])",
+      "get(1, railcom, railcomplus)",
+    ]])
+
+  def test_controller_settings_rejects_non_boolean_railcom_setting(self):
+    state = default_state()
+    body, status = ApiRouter(None).handle_json(
+      "PATCH",
+      "/api/controller/settings",
+      b'{"settings":{"railcom_enabled":"true"}}',
+      state,
+    )
+    payload = json.loads(body.decode("utf-8"))
+
+    self.assertEqual(status, 400)
+    self.assertEqual(payload["error"]["type"], "invalid_controller_settings")
+    self.assertIn("settings.railcom_enabled", payload["error"]["detail"])
 
   def test_controller_settings_rejects_non_boolean_apply_to_device(self):
     state = default_state()
@@ -425,7 +1026,7 @@ class ControllerSettingsTest(unittest.TestCase):
     body, status = ApiRouter(None).handle_json(
       "PATCH",
       "/api/controller/settings",
-      b'{"kind":"z21_controller"}',
+      b'{"kind":"unknown_controller"}',
       state,
     )
     payload = json.loads(body.decode("utf-8"))
@@ -900,6 +1501,63 @@ class ControllerSettingsTest(unittest.TestCase):
     self.assertEqual(payload["error"]["type"], "protocol_not_ready")
     self.assertEqual(payload["error"]["detail"], "控制器 UDP 校验算法未确认")
     self.assertEqual(payload["debug"]["warnings"], ["udp_checksum_algorithm_unconfirmed"])
+
+  def _ecos_read_info_state(self):
+    state = default_state()
+    state["controller"].update({
+      "kind": models.CONTROLLER_KIND_ECOS_50200,
+      "protocol": models.CONTROLLER_PROTOCOL_ECOS,
+      "ip": "192.0.2.50",
+      "transport": {"kind": "tcp", "tcp_port": 15471},
+      "tcp_port": 15471,
+      "booster_status": {"source": "ecos_object_1", "power_on": True},
+      "programming_track_status": {"source": "old_status"},
+      "safety_snapshot": {
+        "controller_endpoint_version": 1,
+        "last_read_info_at": "2026-07-01T00:00:00+08:00",
+        "booster_status_fresh": True,
+        "programming_track_status_fresh": True,
+      },
+    })
+    return state
+
+  def test_ecos_read_info_timeout_returns_structured_error_and_invalidates_safety(self):
+    state = self._ecos_read_info_state()
+
+    body, status = ApiRouter(None, controller_transport=FakeECoSTimeoutTransport()).handle_json(
+      "POST",
+      "/api/controller/read-info",
+      b"{}",
+      state,
+    )
+    payload = json.loads(body.decode("utf-8"))
+
+    self.assertEqual(status, 504)
+    self.assertEqual(payload["error"]["type"], "controller_read_info_failed")
+    self.assertEqual(payload["error"]["message"], "读取控制器信息失败")
+    self.assertEqual(payload["debug"]["exception_type"], "TimeoutError")
+    self.assertFalse(state["controller"]["controller_reachable"])
+    self.assertEqual(state["controller"]["controller_unreachable_reason"], "controller_read_info_failed")
+    self.assertNotIn("booster_status", state["controller"])
+    self.assertNotIn("programming_track_status", state["controller"])
+    self.assertFalse(state["controller"]["safety_snapshot"]["booster_status_fresh"])
+    self.assertFalse(state["controller"]["safety_snapshot"]["programming_track_status_fresh"])
+
+  def test_ecos_read_info_missing_basic_info_returns_structured_error(self):
+    state = self._ecos_read_info_state()
+
+    body, status = ApiRouter(None, controller_transport=FakeECoSMissingInfoTransport()).handle_json(
+      "POST",
+      "/api/controller/read-info",
+      b"{}",
+      state,
+    )
+    payload = json.loads(body.decode("utf-8"))
+
+    self.assertEqual(status, 502)
+    self.assertEqual(payload["error"]["type"], "controller_read_info_failed")
+    self.assertIn("basic information", payload["error"]["detail"])
+    self.assertEqual(payload["debug"]["exception_type"], "ValueError")
 
   def _controller_read_info_success_requests(self):
     return {

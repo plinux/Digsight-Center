@@ -116,7 +116,6 @@ class DigsightDXDCNetControllerAdapter:
     loco_control=True,
     controller_settings=True,
     railcom_settings=True,
-    sound_editor=True,
   )
   transport_descriptor = ControllerTransportDescriptor(
     kind="udp",
