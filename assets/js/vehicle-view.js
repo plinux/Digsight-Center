@@ -1,7 +1,6 @@
 import {sortedConsistMembers} from "./consist-helpers.js";
 import {FALLBACK_FUNCTION_ICON_CATALOG} from "./function-icon-catalog.js";
 import {
-  VEHICLE_TYPE_LABELS,
   vehicleKindIcon
 } from "./vehicle-kind-icons.js";
 

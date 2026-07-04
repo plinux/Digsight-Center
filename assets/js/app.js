@@ -415,13 +415,6 @@ function setActiveView(view) {
     renderAll();
     return;
   }
-  if (view === "sound" && !soundEditorAvailableForController()) {
-    appState.activeView = "vehicle";
-    appState.vehicleSubview = "registry";
-    setStatus("当前控制器不支持音效编辑，请切换到动芯控制器后再打开");
-    renderAll();
-    return;
-  }
   appState.activeView = view;
   if (view !== "vehicle") {
     appState.vehicleSubview = "registry";
@@ -820,10 +813,8 @@ function syncVehicleSelectionToolbar(visibleVehicles) {
 
 function setNavState() {
   elements.navCvProgramming.disabled = !isDccProgrammingMode();
-  elements.navSoundEditor.disabled = !soundEditorAvailableForController();
-  elements.navSoundEditor.title = elements.navSoundEditor.disabled
-    ? "当前控制器不支持音效编辑，请切换到动芯控制器后再打开"
-    : "";
+  elements.navSoundEditor.disabled = false;
+  elements.navSoundEditor.title = "";
   for (const [view, button] of [
     ["vehicle", elements.navVehicleControl],
     ["cv", elements.navCvProgramming],
@@ -895,11 +886,6 @@ function isDccProgrammingMode(trackMode = currentOperationMode()) {
 
 function isDcOperationMode(trackMode = currentOperationMode()) {
   return trackMode === "dc";
-}
-
-function soundEditorAvailableForController() {
-  const descriptor = controllerDescriptor(appState.capabilities, appState.controller?.kind);
-  return Boolean(descriptor.capabilities?.sound_editor);
 }
 
 function currentTrackProfile(trackMode = currentOperationMode()) {
@@ -1159,10 +1145,6 @@ function syncVisibleState({digitalMode, visibleVehicles}) {
   syncCvProgrammingVehicle(visibleVehicles);
   syncCabSelectionForVisibleVehicles(visibleVehicles);
   syncVehicleSelectionToolbar(visibleVehicles);
-  if (appState.activeView === "sound" && !soundEditorAvailableForController()) {
-    appState.activeView = "vehicle";
-    appState.vehicleSubview = "registry";
-  }
   if (!digitalMode && appState.activeView === "cv") {
     appState.activeView = "vehicle";
   }

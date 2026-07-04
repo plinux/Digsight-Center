@@ -1,4 +1,5 @@
 import {
+  addSoundConnectorJudgment,
   addSoundConnector,
   addSoundNode,
   applySlotLibraryEntry,
@@ -15,9 +16,10 @@ import {
   filterSlotLibrary,
   formatBitCount,
   formatMegabitCount,
+  isSoundPropertyItemExpanded,
+  isSoundPropertySectionExpanded,
   markSoundEditorChanged,
   openSoundFileEditor,
-  panSoundCanvas,
   pasteSoundSelection,
   projectSoundFiles,
   replaceSoundFile,
@@ -39,14 +41,92 @@ import {
   setSoundSelection,
   sortSoundFiles,
   toggleSoundFileSort,
+  toggleSoundPropertyItemExpansion,
+  toggleSoundPropertySectionExpansion,
   updateSoundConnectorEndpoint,
   updateSoundConnectorField,
+  updateSoundConnectorJudgmentField,
+  setLegacyDxspSlotFile,
+  deleteSoundConnectorJudgment,
+  updateLegacyDxspSlotField,
   updateSoundNodeField,
   updateSelectedSlotField
 } from "./sound-editor-controller.js";
 
 let activeSoundPreview = null;
 let activeSoundPreviewFileId = 0;
+
+const SOUND_NODE_TYPES = new Map([
+  [1, "Play（播放）"],
+  [2, "Loop（循环）"],
+  [3, "Branch（分支）"],
+  [4, "End（结束）"],
+  [5, "Wait（等待）"],
+  [6, "Random（随机）"],
+  [7, "Mixer（混音）"]
+]);
+
+const SOUND_REGISTER_TYPES = new Map([
+  [0, "None"],
+  [1, "CV1"],
+  [2, "CV2"],
+  [3, "CV3"],
+  [4, "CV4"],
+  [6, "CV6"],
+  [8, "CV8"],
+  [16, "CV16"],
+  [19, "CV19"],
+  [26, "CV26"],
+  [27, "CV27"],
+  [28, "CV28"],
+  [29, "CV29"],
+  [30, "CV30"],
+  [31, "CV31"],
+  [32, "CV32"],
+  [33, "CV33"],
+  [41, "CV41"],
+  [42, "CV42"],
+  [43, "CV43"],
+  [44, "CV44"],
+  [49, "CV49"],
+  [54, "CV54"],
+  [61, "CV61"],
+  [136, "CV136"],
+  [138, "CV138"],
+  [156, "CV156"],
+  [157, "CV157"],
+  [255, "Always"]
+]);
+
+const SOUND_OPERATION_TYPES = new Map([
+  [0, "="],
+  [1, "≠"],
+  [2, "<"],
+  [3, ">"],
+  [4, "<="],
+  [5, ">="],
+  [128, "≠"],
+  [130, ">=+"]
+]);
+
+const SOUND_ACTION_CONFIG_TYPES = new Map([
+  [0, "Set"],
+  [1, "Add"],
+  [2, "Sub"],
+  [3, "Mul"],
+  [4, "Div"],
+  [16, "Toggle"],
+  [17, "Trigger"],
+  [22, "Config22"],
+  [23, "Config23"],
+  [24, "Config24"],
+  [32, "Play"],
+  [33, "Stop"],
+  [64, "Fade"],
+  [128, "Op128"],
+  [144, "Op144"],
+  [149, "Op149"]
+]);
 
 export function renderSoundEditor(root, state, handlers = {}) {
   if (!root) {
@@ -158,6 +238,13 @@ function renderSlots(root, state, handlers) {
 function renderCanvas(root, state, handlers) {
   const canvas = root.querySelector("#soundNodeCanvas");
   if (!canvas) {
+    return;
+  }
+  if (isLegacyDxspProject(state)) {
+    canvas.innerHTML = `<div class="legacy-dxsp-canvas">
+      <h3>旧 DXSP Slot 配置</h3>
+      <p>5313/5323 的 .dxsp 工程不包含节点图。请在右侧属性中按旧格式编辑播放方式、音量和文件1-3；循环发声使用启动段、循环段和结束段三个音效文件。</p>
+    </div>`;
     return;
   }
   const slotId = Number(state.activeSlotId || 0);
@@ -590,13 +677,25 @@ function renderProperties(root, state, handlers) {
     || selectedSlotFromSummary(state);
   const node = selectedNode(state);
   const connector = selectedConnector(state);
-  panel.innerHTML = [
+  const soundFiles = projectSoundFiles(state);
+  const content = [
     `<div class="sound-panel-resizer sound-panel-resizer-properties" data-sound-panel-resizer="properties" title="拖动调整属性栏宽度"></div>`,
-    `<h2>属性</h2>`,
-    slot ? slotEditor(slot, state) : `<p class="empty-state">选择 Slot 后编辑功能键和音效。</p>`,
-    node ? nodeDetails(node, state) : "",
-    connector ? connectorDetails(connector, state) : ""
-  ].join("");
+    `<h2>属性</h2>`
+  ];
+  if (node) {
+    content.push(nodeDetails(node, state, soundFiles));
+  } else if (connector) {
+    content.push(connectorDetails(connector, state));
+  } else if (slot) {
+    content.push(slotEditor(slot, state, soundFiles));
+    if (!isLegacyDxspProject(state)) {
+      content.push(slotNodeList(slot, state, soundFiles));
+      content.push(slotConnectorList(slot, state));
+    }
+  } else {
+    content.push(`<p class="empty-state">选择 Slot 后编辑功能键和音效。</p>`);
+  }
+  panel.innerHTML = content.join("");
   bindSoundPreviewControls(panel, state, handlers);
   panel.querySelectorAll("[data-slot-field]").forEach((input) => {
     input.addEventListener("change", () => {
@@ -620,33 +719,86 @@ function renderProperties(root, state, handlers) {
       handlers.renderAll?.();
       return;
     }
-    try {
-      const saved = await handlers.saveSoundLibrarySlot?.(entry, category);
-      if (saved) {
-        replaceLibraryEntryByKey(state.slotLibrary?.slots || [], "slot_library_id", entry.slot_library_id, saved);
-      }
-      handlers.setStatus?.("已入库");
-    } catch (error) {
-      state.slotLibrary.slots = (state.slotLibrary?.slots || [])
-        .filter((slot) => slot.slot_library_id !== entry.slot_library_id);
-      handlers.setStatus?.(`保存 Slot 库失败：${error.message || error}`);
-    }
+    await persistLibraryEntry({
+      save: handlers.saveSoundLibrarySlot,
+      category,
+      draftEntry: entry,
+      entries: state.slotLibrary?.slots || [],
+      key: "slot_library_id",
+      rollback: () => {
+        state.slotLibrary.slots = (state.slotLibrary?.slots || [])
+          .filter((slot) => slot.slot_library_id !== entry.slot_library_id);
+      },
+      failurePrefix: "保存 Slot 库失败",
+      setStatus: handlers.setStatus,
+    });
     handlers.renderAll?.();
   });
-  const fileSelect = panel.querySelector("#soundNodeFileSelect");
-  fileSelect?.addEventListener("change", () => {
-    setNodeSoundFile(state, state.selectedNodeKey, fileSelect.value);
-    handlers.renderAll?.();
+  panel.querySelectorAll("[data-legacy-slot-field]").forEach((input) => {
+    input.addEventListener("change", () => {
+      updateLegacyDxspSlotField(state, state.activeSlotId, input.dataset.legacySlotField, input.value);
+      handlers.renderAll?.();
+    });
+  });
+  panel.querySelectorAll("[data-legacy-slot-file]").forEach((select) => {
+    select.addEventListener("change", () => {
+      setLegacyDxspSlotFile(state, state.activeSlotId, select.dataset.legacySlotFile, select.value);
+      handlers.renderAll?.();
+    });
+  });
+  panel.querySelectorAll("[data-property-item-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      toggleSoundPropertyItemExpansion(state, button.dataset.propertyItemToggle);
+      handlers.renderAll?.();
+    });
+  });
+  panel.querySelectorAll("[data-property-section-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      toggleSoundPropertySectionExpansion(state, button.dataset.propertySectionToggle);
+      handlers.renderAll?.();
+    });
+  });
+  panel.querySelectorAll("[data-node-file-select]").forEach((fileSelect) => {
+    fileSelect.addEventListener("change", () => {
+      const nodeKey = fileSelect.dataset.nodeFileSelect || state.selectedNodeKey;
+      setNodeSoundFile(state, nodeKey, fileSelect.value, {selectNode: Boolean(state.selectedNodeKey)});
+      handlers.renderAll?.();
+    });
   });
   panel.querySelectorAll("[data-node-field]").forEach((input) => {
     input.addEventListener("change", () => {
-      updateSoundNodeField(state, state.selectedNodeKey, input.dataset.nodeField, input.value);
+      const nodeKey = input.dataset.nodeEditKey || state.selectedNodeKey;
+      updateSoundNodeField(state, nodeKey, input.dataset.nodeField, input.value);
       handlers.renderAll?.();
     });
   });
   panel.querySelectorAll("[data-connector-field]").forEach((input) => {
     input.addEventListener("change", () => {
-      updateSoundConnectorField(state, state.selectedConnectorId, input.dataset.connectorField, input.value);
+      updateSoundConnectorField(state, input.dataset.connectorEditId || state.selectedConnectorId, input.dataset.connectorField, input.value);
+      handlers.renderAll?.();
+    });
+  });
+  panel.querySelectorAll("[data-connector-judgment-field]").forEach((input) => {
+    input.addEventListener("change", () => {
+      updateSoundConnectorJudgmentField(
+        state,
+        input.dataset.connectorEditId || state.selectedConnectorId,
+        input.dataset.connectorJudgmentId,
+        input.dataset.connectorJudgmentField,
+        input.value
+      );
+      handlers.renderAll?.();
+    });
+  });
+  panel.querySelectorAll("[data-add-connector-judgment]").forEach((button) => {
+    button.addEventListener("click", () => {
+      addSoundConnectorJudgment(state, button.dataset.connectorEditId || state.selectedConnectorId);
+      handlers.renderAll?.();
+    });
+  });
+  panel.querySelectorAll("[data-delete-connector-judgment]").forEach((button) => {
+    button.addEventListener("click", () => {
+      deleteSoundConnectorJudgment(state, button.dataset.connectorEditId || state.selectedConnectorId, button.dataset.deleteConnectorJudgment);
       handlers.renderAll?.();
     });
   });
@@ -738,17 +890,19 @@ function renderSoundFileInventory(root, state, handlers) {
         handlers.renderAll?.();
         return;
       }
-      try {
-        const persisted = await handlers.saveSoundLibrarySound?.(saved, category);
-        if (persisted) {
-          replaceLibraryEntryByKey(state.savedSoundLibrary || [], "sound_id", saved.sound_id, persisted);
-        }
-        handlers.setStatus?.("已入库");
-      } catch (error) {
-        state.savedSoundLibrary = (state.savedSoundLibrary || [])
-          .filter((sound) => sound.sound_id !== saved.sound_id);
-        handlers.setStatus?.(`保存音效库失败：${error.message || error}`);
-      }
+      await persistLibraryEntry({
+        save: handlers.saveSoundLibrarySound,
+        category,
+        draftEntry: saved,
+        entries: state.savedSoundLibrary || [],
+        key: "sound_id",
+        rollback: () => {
+          state.savedSoundLibrary = (state.savedSoundLibrary || [])
+            .filter((sound) => sound.sound_id !== saved.sound_id);
+        },
+        failurePrefix: "保存音效库失败",
+        setStatus: handlers.setStatus,
+      });
       handlers.renderAll?.();
     });
   });
@@ -761,15 +915,41 @@ function replaceLibraryEntryByKey(entries, key, keyValue, replacement) {
   }
 }
 
+async function persistLibraryEntry({
+  save,
+  category,
+  draftEntry,
+  entries,
+  key,
+  rollback,
+  failurePrefix,
+  setStatus,
+}) {
+  try {
+    const persisted = await save?.(draftEntry, category);
+    if (persisted) {
+      replaceLibraryEntryByKey(entries, key, draftEntry[key], persisted);
+    }
+    setStatus?.("已入库");
+    return true;
+  } catch (error) {
+    rollback?.();
+    setStatus?.(`${failurePrefix}：${error.message || error}`);
+    return false;
+  }
+}
+
 function renderSoundFileEditorDialog(root, state, handlers) {
   const dialog = root.querySelector("#soundFileEditorDialog");
   const content = root.querySelector("#soundFileEditorDialogContent");
   if (!dialog || !content) {
     return;
   }
-  const fileId = Number(state.editingSoundFileId || 0);
+  const fileId = state.editingSoundFileId === null || state.editingSoundFileId === undefined
+    ? null
+    : Number(state.editingSoundFileId);
   const file = projectSoundFiles(state).find((entry) => Number(entry.file_id) === fileId);
-  if (!fileId || !file) {
+  if (fileId === null || !file) {
     if (dialog.open) {
       dialog.close();
     }
@@ -945,10 +1125,11 @@ function nodeSvg(node, state) {
   const y = nodeY(node);
   const w = nodeWidth(node);
   const h = nodeHeight(node);
+  const typeLabel = soundNodeTypeLabel(node.node_type);
   return `<g class="sound-node${selected ? " selected" : ""}" data-node-key="${esc(node.node_key)}">
     <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="6"></rect>
     <text x="${x + w / 2}" y="${y + 25}" text-anchor="middle">${esc(node.node_name || `节点 ${node.node_id}`)}</text>
-    <text x="${x + w / 2}" y="${y + 47}" text-anchor="middle">文件 ${Number(node.file_id || 0)}</text>
+    <text x="${x + w / 2}" y="${y + 47}" text-anchor="middle">${esc(typeLabel)}</text>
     <rect class="sound-node-resize-handle" data-node-resize-key="${esc(node.node_key)}" x="${x + w - 13}" y="${y + h - 13}" width="11" height="11" rx="2"></rect>
   </g>`;
 }
@@ -964,18 +1145,17 @@ function gridLines(width, height) {
   return lines.join("");
 }
 
-function slotEditor(slot, state) {
+function slotEditor(slot, state, soundFiles) {
   const functionNumber = slotFunctionNumberInputValue(slot.functionNumber ?? slot.function_number);
-  const slotSoundFileId = Number(slot.sound?.fileId ?? slot.sound?.file_id ?? 0);
-  const file = projectSoundFiles(state).find((entry) => Number(entry.file_id) === slotSoundFileId);
-  const soundFileName = file?.file_name || slot.sound?.fileName || slot.sound?.file_name || "未选择";
   const slotCategories = (state.slotLibrary?.categories || defaultSlotLibraryCategories()).map((category) => {
     return `<option value="${esc(category.category)}">${esc(category.label)}</option>`;
   }).join("");
   return `<div class="sound-property-block">
     <label>Slot 名称<input data-slot-field="slotName" value="${esc(slot.slotName || slot.slot_name || "")}"></label>
     <label>功能键<input type="number" min="0" max="68" placeholder="-" data-slot-field="functionNumber" value="${functionNumber}"></label>
-    <p class="sound-property-file-line"><span>音效文件：${esc(soundFileName)}</span>${file ? soundPreviewButton(file, "compact") : ""}</p>
+    ${isLegacyDxspProject(state)
+      ? legacyDxspSlotEditor(slot, state, soundFiles)
+      : ""}
     <div class="sound-property-actions">
       <button type="button" class="danger" data-clear-slot>清空 Slot</button>
     </div>
@@ -986,48 +1166,322 @@ function slotEditor(slot, state) {
   </div>`;
 }
 
-function nodeDetails(node, state) {
-  const files = projectSoundFiles(state);
+function legacyDxspSlotEditor(slot, state, soundFiles) {
+  const summarySlot = summarySlotForView(state, slot.slotId ?? slot.slot_id ?? state.activeSlotId);
+  const userType = legacyDxspUserType(slot, summarySlot);
+  const userVolume = legacyDxspUserVolume(slot, summarySlot, userType);
+  const userFiles = legacyDxspUserFiles(slot, summarySlot);
+  const labels = legacyDxspFileLabels(userType);
+  const fileSelectors = userFiles.map((fileId, index) => legacyDxspFileSelect({
+    index,
+    label: labels[index],
+    fileId,
+    soundFiles,
+    disabled: userType === 0
+  })).join("");
+  return `<section class="legacy-dxsp-panel">
+    <div class="sound-property-grid sound-property-grid-two legacy-dxsp-mode-row">
+      <label>播放方式<select data-legacy-slot-field="legacyUserType">${legacyDxspTypeOptions(userType)}</select></label>
+      <label class="sound-property-number-small">音量<input type="number" min="0" max="255" data-legacy-slot-field="legacyUserVolume" value="${userVolume}"></label>
+    </div>
+    <div class="legacy-dxsp-files">${fileSelectors}</div>
+    <p class="legacy-dxsp-help">旧 DXSP 没有节点图；循环发声按启动段、循环段、结束段写入 File_0/File_1/File_2。</p>
+  </section>`;
+}
+
+function legacyDxspTypeOptions(selectedType) {
+  const currentType = Number(selectedType || 0);
+  const options = [
+    [0, "不使用"],
+    [1, "单次发声"],
+    [2, "循环发声"],
+    [3, "发动机加档"],
+    [4, "发动机减档"],
+    [6, "特殊发动机启动"]
+  ];
+  if (!options.some(([value]) => value === currentType)) {
+    options.push([currentType, `保留类型 ${currentType}`]);
+  }
+  return options.map(([value, label]) => {
+    return `<option value="${value}"${value === currentType ? " selected" : ""}>${esc(label)}</option>`;
+  }).join("");
+}
+
+function legacyDxspFileSelect({index, label, fileId, soundFiles, disabled}) {
+  const currentFileId = fileId === null || fileId === undefined || fileId === "" ? "" : Number(fileId);
+  const options = [
+    `<option value=""${currentFileId === "" ? " selected" : ""}>未选择</option>`,
+    ...soundFiles.map((entry) => {
+      const entryId = Number(entry.file_id);
+      const selected = currentFileId !== "" && entryId === currentFileId ? " selected" : "";
+      return `<option value="${entryId}"${selected}>#${entryId} ${esc(entry.file_name || "")}</option>`;
+    })
+  ].join("");
+  const currentFile = soundFiles.find((entry) => Number(entry.file_id) === currentFileId);
+  return `<label class="legacy-dxsp-file-row">${esc(label)}
+    <span class="legacy-dxsp-file-control">
+      <select data-legacy-slot-file="${index}"${disabled ? " disabled" : ""}>${options}</select>
+      ${currentFile ? soundPreviewButton(currentFile, "compact") : ""}
+    </span>
+  </label>`;
+}
+
+function legacyDxspFileLabels(userType) {
+  if (Number(userType) === 2) {
+    return ["启动段", "循环段", "结束段"];
+  }
+  if (Number(userType) === 1) {
+    return ["音效文件", "保留文件2", "保留文件3"];
+  }
+  return ["文件1", "文件2", "文件3"];
+}
+
+function legacyDxspUserType(slot, summarySlot) {
+  const value = slot?.legacyUserType ?? slot?.legacy_user_type ?? summarySlot?.legacy_user_type;
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return legacyDxspUserFiles(slot, summarySlot).some((fileId) => fileId !== null) ? 1 : 0;
+  }
+  return boundedViewNumber(value, 0, 255);
+}
+
+function legacyDxspUserVolume(slot, summarySlot, userType) {
+  const value = slot?.legacyUserVolume ?? slot?.legacy_user_volume ?? summarySlot?.legacy_user_volume;
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return Number(userType || 0) ? 255 : 0;
+  }
+  return boundedViewNumber(value, 0, 255);
+}
+
+function legacyDxspUserFiles(slot, summarySlot) {
+  const rawFiles = slot?.legacyUserFiles || slot?.legacy_user_files || summarySlot?.legacy_user_files || summarySlot?.legacy_file_ids || [];
+  const normalized = [];
+  for (const value of rawFiles.slice(0, 3)) {
+    if (value === null || value === undefined || String(value).trim() === "") {
+      normalized.push(null);
+      continue;
+    }
+    const fileId = boundedViewNumber(value, 0, 999999);
+    normalized.push(fileId === 255 ? null : fileId);
+  }
+  while (normalized.length < 3) {
+    normalized.push(null);
+  }
+  return normalized;
+}
+
+function boundedViewNumber(value, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return min;
+  }
+  return Math.min(max, Math.max(min, Math.round(number)));
+}
+
+function slotNodeList(slot, state, soundFiles) {
+  const slotId = Number(slot.slotId ?? slot.slot_id ?? state.activeSlotId ?? 0);
+  const nodes = (state.projectSummary?.nodes || [])
+    .filter((node) => Number(node.slot_id) === slotId)
+    .sort((left, right) => Number(left.node_id || 0) - Number(right.node_id || 0));
+  const rows = nodes.map((node) => slotNodeListItem(node, state, soundFiles)).join("");
+  return slotPropertySection({
+    state,
+    sectionKey: `section:${slotId}:nodes`,
+    title: "Slot 内节点",
+    countLabel: `${nodes.length} 个节点`,
+    emptyText: "当前 Slot 没有节点。",
+    rows,
+    extraClass: "sound-slot-node-list"
+  });
+}
+
+function slotNodeListItem(node, state, soundFiles) {
+  const itemKey = soundPropertyNodeItemKey(node);
+  const expanded = isSoundPropertyItemExpanded(state, itemKey);
+  const file = soundFiles.find((entry) => Number(entry.file_id) === Number(node.file_id || 0));
+  const nodeKey = esc(node.node_key || "");
+  const fileName = file?.file_name || "无音频";
+  return `<section class="sound-slot-node-item${expanded ? " expanded" : ""}" data-slot-node-item="${nodeKey}">
+    <button type="button" class="sound-slot-node-toggle" data-property-item-toggle="${esc(itemKey)}" aria-expanded="${expanded ? "true" : "false"}" aria-label="节点 ${Number(node.node_id || 0)} 属性">
+      <span class="sound-slot-node-id">节点 ${Number(node.node_id || 0)}</span>
+      <span class="sound-slot-node-name">${esc(node.node_name || `节点 ${Number(node.node_id || 0)}`)}</span>
+      <span class="sound-slot-node-file">${esc(fileName)}</span>
+      <span class="sound-slot-node-action" aria-hidden="true">${expanded ? "▾" : "▸"}</span>
+    </button>
+    ${expanded ? nodeDetails(node, state, soundFiles, {embedded: true}) : ""}
+  </section>`;
+}
+
+function slotConnectorList(slot, state) {
+  const slotId = Number(slot.slotId ?? slot.slot_id ?? state.activeSlotId ?? 0);
+  const connectors = (state.projectSummary?.connectors || [])
+    .filter((connector) => Number(connector.slot_id) === slotId)
+    .sort((left, right) => Number(left.connector_id || 0) - Number(right.connector_id || 0));
+  const rows = connectors.map((connector) => slotConnectorListItem(connector, state)).join("");
+  return slotPropertySection({
+    state,
+    sectionKey: `section:${slotId}:connectors`,
+    title: "Slot 内连接",
+    countLabel: `${connectors.length} 条连接`,
+    emptyText: "当前 Slot 没有连接。",
+    rows,
+    extraClass: "sound-slot-node-list sound-slot-connector-list"
+  });
+}
+
+function slotPropertySection({state, sectionKey, title, countLabel, emptyText, rows, extraClass}) {
+  const expanded = isSoundPropertySectionExpanded(state, sectionKey);
+  return `<div class="sound-property-block ${extraClass}${expanded ? " expanded" : " collapsed"}">
+    <button type="button" class="sound-slot-node-list-header sound-slot-section-toggle" data-property-section-toggle="${esc(sectionKey)}" aria-expanded="${expanded ? "true" : "false"}" aria-label="${esc(title)}">
+      <span class="sound-slot-section-title">${esc(title)}</span>
+      <span class="sound-slot-section-count">${esc(countLabel)}</span>
+      <span class="sound-slot-section-arrow" aria-hidden="true">${expanded ? "▾" : "▸"}</span>
+    </button>
+    ${expanded ? (rows || `<p class="empty-state">${esc(emptyText)}</p>`) : ""}
+  </div>`;
+}
+
+function slotConnectorListItem(connector, state) {
+  const itemKey = soundPropertyConnectorItemKey(connector);
+  const expanded = isSoundPropertyItemExpanded(state, itemKey);
+  const connectorId = Number(connector.connector_id || 0);
+  const endpointText = connectorEndpointLabel(connector, state);
+  const metaText = `判断 ${Number(connector.judgment_count || 0)}，动作 ${Number(connector.action_count || 0)}`;
+  return `<section class="sound-slot-node-item sound-slot-connector-item${expanded ? " expanded" : ""}" data-slot-connector-item="${connectorId}">
+    <button type="button" class="sound-slot-node-toggle sound-slot-connector-toggle" data-property-item-toggle="${esc(itemKey)}" aria-expanded="${expanded ? "true" : "false"}" aria-label="连接 ${connectorId} 属性">
+      <span class="sound-slot-node-id">连接 ${connectorId}</span>
+      <span class="sound-slot-node-name">${esc(endpointText)}</span>
+      <span class="sound-slot-node-file">${esc(metaText)}</span>
+      <span class="sound-slot-node-action" aria-hidden="true">${expanded ? "▾" : "▸"}</span>
+    </button>
+    ${expanded ? connectorDetails(connector, state, {embedded: true}) : ""}
+  </section>`;
+}
+
+function soundPropertyNodeItemKey(node) {
+  return `node:${node.node_key || ""}`;
+}
+
+function soundPropertyConnectorItemKey(connector) {
+  return `connector:${Number(connector.slot_id || 0)}:${Number(connector.connector_id || 0)}`;
+}
+
+function connectorEndpointLabel(connector, state) {
+  const source = connectorNodeLabel(state, connector.slot_id, connector.source_node_id);
+  const target = connectorNodeLabel(state, connector.slot_id, connector.target_node_id);
+  return `${source} → ${target}`;
+}
+
+function connectorNodeLabel(state, slotId, nodeId) {
+  const node = (state.projectSummary?.nodes || [])
+    .find((entry) => Number(entry.slot_id) === Number(slotId) && Number(entry.node_id) === Number(nodeId));
+  const numericNodeId = Number(nodeId || 0);
+  return node ? `节点 ${numericNodeId} ${node.node_name || ""}`.trim() : `节点 ${numericNodeId}`;
+}
+
+function nodeDetails(node, state, soundFiles, options = {}) {
+  const files = soundFiles;
   const currentFileId = Number(node.file_id || 0);
   const file = files.find((entry) => Number(entry.file_id) === currentFileId);
-  const options = [
+  const nodeKey = esc(node.node_key || "");
+  const wrapperClass = options.embedded ? "sound-node-inline-details" : "sound-property-block";
+  const selectId = options.embedded ? "" : ` id="soundNodeFileSelect"`;
+  const nodeTypeValue = node.node_type === null || node.node_type === undefined || node.node_type === "" ? 1 : Number(node.node_type);
+  const renderOptions = [
     `<option value="0"${currentFileId ? "" : " selected"}>无音效文件</option>`,
     ...files.map((entry) => {
       const selected = Number(entry.file_id) === currentFileId ? " selected" : "";
       return `<option value="${Number(entry.file_id)}"${selected}>#${Number(entry.file_id)} ${esc(entry.file_name || "")}</option>`;
     })
   ].join("");
-  return `<div class="sound-property-block">
+  return `<div class="${wrapperClass}">
     <h3>节点 ${Number(node.node_id)}</h3>
-    <label>名称<input data-node-field="nodeName" value="${esc(node.node_name || "")}"></label>
+    <label>名称<input data-node-field="nodeName" data-node-edit-key="${nodeKey}" value="${esc(node.node_name || "")}"></label>
     <div class="sound-property-grid sound-property-grid-three">
-      <label>类型<input type="number" min="0" max="999" data-node-field="nodeType" value="${Number(node.node_type || 0)}"></label>
-      <label>重复次数<input type="number" min="0" max="9999" data-node-field="repeatAmount" value="${Number(node.repeat_amount || 0)}"></label>
-      <label>音量<input type="number" min="0" max="255" data-node-field="soundVolume" value="${Number(node.sound_volume || 0)}"></label>
+      <label>类型<select data-node-field="nodeType" data-node-edit-key="${nodeKey}">${soundNodeTypeOptions(nodeTypeValue)}</select></label>
+      <label class="sound-property-number-small" title="0 表示无限循环">重复次数<input type="number" min="0" max="999" data-node-field="repeatAmount" data-node-edit-key="${nodeKey}" value="${Number(node.repeat_amount || 0)}"></label>
+      <label class="sound-property-number-small">音量<input type="number" min="0" max="255" data-node-field="soundVolume" data-node-edit-key="${nodeKey}" value="${Number(node.sound_volume || 0)}"></label>
     </div>
-    <div class="sound-property-grid">
-      <label>宽<input type="number" min="80" max="500" data-node-field="width" value="${Number(node.width ?? 96)}"></label>
-      <label>高<input type="number" min="56" max="300" data-node-field="height" value="${Number(node.height ?? 64)}"></label>
+    <div class="sound-property-grid sound-property-grid-four">
+      <label class="sound-property-number-geometry">X<input type="number" min="20" max="5000" step="0.1" data-node-field="x" data-node-edit-key="${nodeKey}" value="${formatNodeNumber(nodeX(node))}"></label>
+      <label class="sound-property-number-geometry">Y<input type="number" min="20" max="5000" step="0.1" data-node-field="y" data-node-edit-key="${nodeKey}" value="${formatNodeNumber(nodeY(node))}"></label>
+      <label class="sound-property-number-geometry">宽<input type="number" min="80" max="500" data-node-field="width" data-node-edit-key="${nodeKey}" value="${Number(node.width ?? 96)}"></label>
+      <label class="sound-property-number-geometry">高<input type="number" min="56" max="300" data-node-field="height" data-node-edit-key="${nodeKey}" value="${Number(node.height ?? 64)}"></label>
     </div>
     <p class="sound-property-file-line"><span>音频：${esc(file?.file_name || "无")}</span>${file ? soundPreviewButton(file, "compact") : ""}</p>
-    <label>音效文件<select id="soundNodeFileSelect">${options}</select></label>
+    <label>音效文件<select${selectId} data-node-file-select="${nodeKey}">${renderOptions}</select></label>
   </div>`;
 }
 
-function connectorDetails(connector, state) {
+function connectorDetails(connector, state, options = {}) {
   const nodes = (state.projectSummary?.nodes || []).filter((node) => Number(node.slot_id) === Number(connector.slot_id));
   const nodeOptions = (selectedKey) => nodes.map((node) => {
     const selected = node.node_key === selectedKey ? " selected" : "";
     return `<option value="${esc(node.node_key)}"${selected}>${Number(node.node_id)} ${esc(node.node_name || "")}</option>`;
   }).join("");
-  return `<div class="sound-property-block">
-    <h3>连接 ${Number(connector.connector_id)}</h3>
-    <label>源节点<select id="soundConnectorSourceSelect" data-connector-field="sourceNodeKey">${nodeOptions(connector.source_node_key)}</select></label>
-    <label>目标节点<select id="soundConnectorTargetSelect" data-connector-field="targetNodeKey">${nodeOptions(connector.target_node_key)}</select></label>
-    <label>连接类型<input type="number" min="0" max="999" data-connector-field="connectorType" value="${Number(connector.connector_type || 0)}"></label>
-    <label>源端口<input type="number" min="0" max="999" data-connector-field="sourcePortIndex" value="${Number(connector.source_port_index || 0)}"></label>
-    <p>判断 ${Number(connector.judgment_count || 0)} / 动作 ${Number(connector.action_count || 0)}</p>
+  const connectorId = Number(connector.connector_id || 0);
+  const connectorEditId = esc(connectorId);
+  const wrapperClass = options.embedded ? "sound-connector-inline-details" : "sound-property-block";
+  const sourceSelectId = options.embedded ? "" : ` id="soundConnectorSourceSelect"`;
+  const targetSelectId = options.embedded ? "" : ` id="soundConnectorTargetSelect"`;
+  const judgments = (state.projectSummary?.judgments || [])
+    .filter((judgment) => Number(judgment.connector_id) === connectorId);
+  const actions = (state.projectSummary?.actions || [])
+    .filter((action) => Number(action.connector_id) === connectorId);
+  return `<div class="${wrapperClass}">
+    <h3>连接 ${connectorId}</h3>
+    <div class="sound-property-grid sound-connector-endpoint-grid">
+      <label>源节点<select${sourceSelectId} data-connector-edit-id="${connectorEditId}" data-connector-field="sourceNodeKey">${nodeOptions(connector.source_node_key)}</select></label>
+      <label>目标节点<select${targetSelectId} data-connector-edit-id="${connectorEditId}" data-connector-field="targetNodeKey">${nodeOptions(connector.target_node_key)}</select></label>
+    </div>
+    <div class="sound-property-grid sound-property-grid-two">
+      <label>连接类型<input type="number" min="0" max="999" data-connector-edit-id="${connectorEditId}" data-connector-field="connectorType" value="${Number(connector.connector_type || 0)}"></label>
+      <label>源端口<input type="number" min="0" max="999" data-connector-edit-id="${connectorEditId}" data-connector-field="sourcePortIndex" value="${Number(connector.source_port_index || 0)}"></label>
+    </div>
+    ${connectorJudgments(judgments, connectorId)}
+    ${connectorActions(actions)}
   </div>`;
+}
+
+function connectorJudgments(judgments, connectorId) {
+  const connectorEditId = esc(connectorId);
+  if (!judgments.length) {
+    return `<section class="sound-connector-detail-section">
+      <h4>判断 <span>0</span></h4>
+      <p class="empty-state">无判断条件。</p>
+      <button type="button" data-add-connector-judgment data-connector-edit-id="${connectorEditId}">添加判断</button>
+    </section>`;
+  }
+  const rows = judgments.map((judgment) => `<div class="sound-connector-judgment-row">
+    <span>J#${Number(judgment.judgment_id || 0)}</span>
+    <label>Reg<select data-connector-edit-id="${connectorEditId}" data-connector-judgment-id="${Number(judgment.judgment_id || 0)}" data-connector-judgment-field="registerType">${registerTypeOptions(judgment.register_type)}</select></label>
+    <label>Op<select data-connector-edit-id="${connectorEditId}" data-connector-judgment-id="${Number(judgment.judgment_id || 0)}" data-connector-judgment-field="operationType">${operationTypeOptions(judgment.operation_type)}</select></label>
+    <label>Val<input type="number" min="0" max="65535" data-connector-edit-id="${connectorEditId}" data-connector-judgment-id="${Number(judgment.judgment_id || 0)}" data-connector-judgment-field="parameterValue" value="${Number(judgment.parameter_value || 0)}"></label>
+    <button type="button" class="secondary" data-connector-edit-id="${connectorEditId}" data-delete-connector-judgment="${Number(judgment.judgment_id || 0)}">删除</button>
+  </div>`).join("");
+  return `<section class="sound-connector-detail-section">
+    <h4>判断 <span>${judgments.length}</span></h4>
+    ${rows}
+    <button type="button" data-add-connector-judgment data-connector-edit-id="${connectorEditId}">添加判断</button>
+  </section>`;
+}
+
+function connectorActions(actions) {
+  if (!actions.length) {
+    return `<section class="sound-connector-detail-section">
+      <h4>动作 <span>0</span></h4>
+      <p class="empty-state">无动作。</p>
+    </section>`;
+  }
+  const rows = actions.map((action) => `<div class="sound-connector-detail-row">
+    <span>A#${Number(action.action_id || 0)}</span>
+    <span>Reg ${Number(action.register_type || 0)} ${esc(registerTypeLabel(action.register_type))}</span>
+    <span>Cfg ${Number(action.operation_config || 0)} ${esc(actionConfigLabel(action.operation_config))}</span>
+    <span>Val ${Number(action.parameter_value || 0)}</span>
+  </div>`).join("");
+  return `<section class="sound-connector-detail-section">
+    <h4>动作 <span>${actions.length}</span></h4>
+    ${rows}
+  </section>`;
 }
 
 function selectedSlotFromSummary(state) {
@@ -1039,8 +1493,20 @@ function selectedSlotFromSummary(state) {
     slotId: slot.slot_id,
     slotName: slot.slot_name,
     functionNumber: slotFunctionNumberForRow(state, slot),
+    legacyUserType: slot.legacy_user_type,
+    legacyUserVolume: slot.legacy_user_volume,
+    legacyUserFiles: slot.legacy_user_files,
     sound: {}
   };
+}
+
+function summarySlotForView(state, slotId) {
+  const numericSlotId = Number(slotId || 0);
+  return (state.projectSummary?.slots || []).find((entry) => Number(entry.slot_id) === numericSlotId) || null;
+}
+
+function isLegacyDxspProject(state) {
+  return state.projectSummary?.project_format === "dxsp_legacy";
 }
 
 function selectedNode(state) {
@@ -1096,6 +1562,57 @@ function fallbackConnectorsForSlot(slotId) {
   return [{connector_id: 1, slot_id: slotId, source_node_key: `${slotId}:0`, target_node_key: `${slotId}:1`}];
 }
 
+function soundNodeTypeOptions(selectedType) {
+  const currentType = selectedType === null || selectedType === undefined || selectedType === "" ? 1 : Number(selectedType);
+  const knownOptions = [...SOUND_NODE_TYPES.entries()].map(([value, label]) => {
+    const selected = currentType === value ? " selected" : "";
+    return `<option value="${value}"${selected}>${esc(label)}</option>`;
+  });
+  if (currentType && !SOUND_NODE_TYPES.has(currentType)) {
+    knownOptions.push(`<option value="${currentType}" selected>未知类型 ${currentType}</option>`);
+  }
+  return knownOptions.join("");
+}
+
+function registerTypeOptions(selectedType) {
+  const currentType = selectedType === null || selectedType === undefined || selectedType === "" ? 0 : Number(selectedType);
+  const knownOptions = [...SOUND_REGISTER_TYPES.entries()].map(([value, label]) => {
+    const selected = currentType === value ? " selected" : "";
+    return `<option value="${value}"${selected}>${value} ${esc(label)}</option>`;
+  });
+  if (currentType && !SOUND_REGISTER_TYPES.has(currentType)) {
+    knownOptions.push(`<option value="${currentType}" selected>${currentType} 未知寄存器</option>`);
+  }
+  return knownOptions.join("");
+}
+
+function operationTypeOptions(selectedType) {
+  const currentType = selectedType === null || selectedType === undefined || selectedType === "" ? 0 : Number(selectedType);
+  const knownOptions = [...SOUND_OPERATION_TYPES.entries()].map(([value, label]) => {
+    const selected = currentType === value ? " selected" : "";
+    return `<option value="${value}"${selected}>${value} ${esc(label)}</option>`;
+  });
+  if (currentType && !SOUND_OPERATION_TYPES.has(currentType)) {
+    knownOptions.push(`<option value="${currentType}" selected>${currentType} 未知操作</option>`);
+  }
+  return knownOptions.join("");
+}
+
+function soundNodeTypeLabel(value) {
+  const number = value === null || value === undefined || value === "" ? 1 : Number(value);
+  return SOUND_NODE_TYPES.get(number) || `未知类型 ${number}`;
+}
+
+function registerTypeLabel(value) {
+  const number = Number(value || 0);
+  return SOUND_REGISTER_TYPES.get(number) || "";
+}
+
+function actionConfigLabel(value) {
+  const number = Number(value || 0);
+  return SOUND_ACTION_CONFIG_TYPES.get(number) || "";
+}
+
 function nodeX(node) {
   return Math.max(20, Number(node.x ?? node.Node_X ?? 0));
 }
@@ -1112,23 +1629,17 @@ function nodeHeight(node) {
   return Math.max(56, Number(node.height ?? node.Node_H ?? 64));
 }
 
+function formatNodeNumber(value) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number)) {
+    return "0";
+  }
+  return Number.isInteger(number) ? String(number) : number.toFixed(1);
+}
+
 function formatDuration(value) {
   const seconds = Number(value || 0);
   return seconds > 0 ? `${seconds.toFixed(2)}s` : "--";
-}
-
-function formatBytes(value) {
-  const bytes = Number(value || 0);
-  if (!bytes) {
-    return "--";
-  }
-  if (bytes >= 1024 * 1024) {
-    return `${Math.round(bytes / 1024 / 1024)} MB`;
-  }
-  if (bytes >= 1024) {
-    return `${Math.round(bytes / 1024)} KB`;
-  }
-  return `${bytes} B`;
 }
 
 function sourceLabel(file) {

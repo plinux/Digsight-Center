@@ -213,6 +213,58 @@ def minimal_dxsp_xml(decoder_module: str = "5313") -> bytes:
 """.encode("utf-8")
 
 
+def dxsp_loop_xml(decoder_module: str = "5323") -> bytes:
+  rows = []
+  for slot_id in range(1, 29):
+    if slot_id == 4:
+      rows.append("""  <User_Sound_Table>
+    <User_Type>2</User_Type>
+    <User_Volume>180</User_Volume>
+    <User_Label>1</User_Label>
+    <User_Function_Name>循环风机</User_Function_Name>
+    <File_0>0</File_0>
+    <File_1>3</File_1>
+    <File_2>4</File_2>
+  </User_Sound_Table>""")
+    else:
+      rows.append("""  <User_Sound_Table>
+    <User_Type>0</User_Type>
+    <User_Volume>0</User_Volume>
+    <User_Label>1</User_Label>
+    <User_Function_Name></User_Function_Name>
+    <File_0>255</File_0>
+    <File_1>255</File_1>
+    <File_2>255</File_2>
+  </User_Sound_Table>""")
+  sound_rows = []
+  for file_id, name in [(0, "start.wav"), (3, "loop.wav"), (4, "end.wav")]:
+    sound_payload = base64.b64encode(bytes([0x80 + file_id, 0x81 + file_id])).decode("ascii")
+    sound_rows.append(f"""  <SoundFile_Table>
+    <File_ID>{file_id}</File_ID>
+    <File_Name>{name}</File_Name>
+    <File_Length>2</File_Length>
+    <File_Data>{sound_payload}</File_Data>
+  </SoundFile_Table>""")
+  return f"""<?xml version="1.0" standalone="yes"?>
+<NewDataSet>
+  <Project_Base_Info>
+    <Decoder_Moudle>{decoder_module}</Decoder_Moudle>
+    <Flash_Size>33554432</Flash_Size>
+    <SoftWare_Version>25</SoftWare_Version>
+    <Engine_Type>0</Engine_Type>
+    <Random_Interval>4</Random_Interval>
+    <Sound_Config>254</Sound_Config>
+    <Sound_Name>Loop</Sound_Name>
+    <Sound_Mac_ID>151587054</Sound_Mac_ID>
+    <Model_ID>0</Model_ID>
+    <Decoder_Name>动芯领域</Decoder_Name>
+  </Project_Base_Info>
+{chr(10).join(rows)}
+{chr(10).join(sound_rows)}
+</NewDataSet>
+""".encode("utf-8")
+
+
 class SoundEditorDomainTest(unittest.TestCase):
   def test_parse_dxsd_summary_preserves_graph_and_audio_metadata(self):
     summary = parse_dxsd_summary(minimal_dxsd_xml(), "sample.dxsd")
@@ -310,8 +362,22 @@ class SoundEditorDomainTest(unittest.TestCase):
         self.assertEqual(summary["counts"]["slots"], 28)
         self.assertEqual(summary["counts"]["nodes"], 0)
         self.assertEqual(summary["slots"][0]["legacy_file_ids"], [0])
+        self.assertEqual(summary["slots"][0]["legacy_user_files"], [0, None, None])
+        self.assertEqual(summary["slots"][0]["legacy_user_type"], 1)
         self.assertEqual(summary["function_mappings"][0]["function_key"], "F1")
         self.assertEqual(summary["function_mappings"][-1]["function_key"], "F28")
+
+  def test_parse_dxsp_summary_preserves_legacy_loop_sound_segments(self):
+    summary = parse_sound_project_summary(dxsp_loop_xml(), "legacy-loop.dxsp")
+
+    loop_slot = summary["slots"][3]
+    self.assertEqual(loop_slot["slot_name"], "循环风机")
+    self.assertEqual(loop_slot["legacy_user_type"], 2)
+    self.assertEqual(loop_slot["legacy_user_volume"], 180)
+    self.assertEqual(loop_slot["legacy_user_files"], [0, 3, 4])
+    self.assertEqual(loop_slot["legacy_file_ids"], [0, 3, 4])
+    self.assertEqual(summary["counts"]["nodes"], 0)
+    self.assertEqual({entry["file_id"] for entry in summary["sound_files"]}, {0, 3, 4})
 
   def test_parse_dxsd_summary_rejects_dtd_and_entity_declarations(self):
     xml = b'<?xml version="1.0"?><!DOCTYPE x [<!ENTITY e "x">]><NewDataSet />'
@@ -411,6 +477,47 @@ class SoundEditorDomainTest(unittest.TestCase):
     self.assertIn("<CV_Value>2</CV_Value>", xml)
     self.assertEqual(package["warnings"], [])
 
+  def test_build_dxsd_package_preserves_connector_judgments_and_actions(self):
+    sound_payload = base64.b64encode(wav_bytes()).decode("ascii")
+    package = build_dxsd_package({
+      "chip_id": "digsight_8004",
+      "package_name": "连接判断",
+      "slots": [
+        {
+          "slot_id": 1,
+          "slot_name": "短风笛",
+          "function_key": 2,
+          "nodes": [
+            {"node_id": 0, "node_name": "入口", "file_id": 0, "x": 40, "y": 60},
+            {"node_id": 1, "node_name": "播放", "file_id": 6, "x": 180, "y": 60},
+          ],
+          "connectors": [
+            {"connector_id": 7, "source_node_id": 0, "target_node_id": 1, "source_port_index": 2},
+          ],
+          "judgments": [
+            {"judgment_id": 8, "connector_id": 7, "register_type": 8, "operation_type": 128, "parameter_value": 65535},
+          ],
+          "actions": [
+            {"action_id": 9, "connector_id": 7, "register_type": 30, "operation_config": 128, "parameter_value": 1},
+          ],
+          "sound_files": [
+            {"file_id": 6, "file_name": "horn.wav", "content_base64": sound_payload},
+          ],
+        },
+      ],
+    })
+    xml = base64.b64decode(package["content_base64"]).decode("utf-8")
+
+    self.assertIn("<Judgment_Table>", xml)
+    self.assertIn("<Judgment_ID>8</Judgment_ID>", xml)
+    self.assertIn("<Register_Type>8</Register_Type>", xml)
+    self.assertIn("<Operation_Type>128</Operation_Type>", xml)
+    self.assertIn("<Parameter_Value>65535</Parameter_Value>", xml)
+    self.assertIn("<Action_Table>", xml)
+    self.assertIn("<Action_ID>9</Action_ID>", xml)
+    self.assertIn("<Operation_Config>128</Operation_Config>", xml)
+    self.assertEqual(package["warnings"], [])
+
   def test_build_dxsp_package_for_5313_uses_legacy_project_suffix_and_tables(self):
     sound_payload = base64.b64encode(wav_bytes(sample_rate=11025, bits=8, data=b"\x00\x01")).decode("ascii")
     package = build_dxsd_package({
@@ -441,6 +548,73 @@ class SoundEditorDomainTest(unittest.TestCase):
     self.assertNotIn("<Base_Info>", xml)
     self.assertNotIn("<Slot_Table>", xml)
     self.assertIn("sound_capacity_unconfirmed", {warning["type"] for warning in package["warnings"]})
+
+  def test_build_dxsp_package_preserves_imported_pcm_sound_files(self):
+    pcm_payload = base64.b64encode(b"\x00\x01\x02").decode("ascii")
+    package = build_dxsd_package({
+      "chip_id": "digsight_5323",
+      "package_name": "5323导入音效",
+      "slots": [
+        {
+          "slot_id": 1,
+          "slot_name": "启动音",
+          "function_key": 1,
+          "sound_files": [
+            {
+              "file_id": 0,
+              "file_name": "SwitchAOn.wav",
+              "content_base64": pcm_payload,
+              "content_encoding": "pcm",
+            },
+          ],
+        },
+      ],
+    })
+    xml = base64.b64decode(package["content_base64"]).decode("utf-8")
+
+    self.assertEqual(package["file_name"], "5323导入音效.dxsp")
+    self.assertIn("<Decoder_Moudle>5323</Decoder_Moudle>", xml)
+    self.assertIn("<File_0>0</File_0>", xml)
+    self.assertIn("<File_ID>0</File_ID>", xml)
+    self.assertIn("<File_Length>3</File_Length>", xml)
+    self.assertIn(f"<File_Data>{pcm_payload}</File_Data>", xml)
+    self.assertNotIn("metadata_only_sound", {warning["type"] for warning in package["warnings"]})
+
+  def test_build_dxsp_package_preserves_legacy_loop_type_and_three_sound_files(self):
+    start_payload = base64.b64encode(b"\x80\x81").decode("ascii")
+    loop_payload = base64.b64encode(b"\x82\x83").decode("ascii")
+    end_payload = base64.b64encode(b"\x84\x85").decode("ascii")
+    package = build_dxsd_package({
+      "chip_id": "digsight_5323",
+      "package_name": "5323循环音效",
+      "slots": [
+        {
+          "slot_id": 4,
+          "slot_name": "循环风机",
+          "legacy_user_type": 2,
+          "legacy_user_volume": 180,
+          "legacy_user_files": [0, 3, 4],
+          "sound_files": [
+            {"file_id": 0, "file_name": "start.wav", "content_base64": start_payload, "content_encoding": "pcm"},
+            {"file_id": 3, "file_name": "loop.wav", "content_base64": loop_payload, "content_encoding": "pcm"},
+            {"file_id": 4, "file_name": "end.wav", "content_base64": end_payload, "content_encoding": "pcm"},
+          ],
+        },
+      ],
+    })
+    xml = base64.b64decode(package["content_base64"]).decode("utf-8")
+
+    self.assertEqual(package["file_name"], "5323循环音效.dxsp")
+    self.assertIn("<User_Function_Name>循环风机</User_Function_Name>", xml)
+    self.assertIn("<User_Type>2</User_Type>", xml)
+    self.assertIn("<User_Volume>180</User_Volume>", xml)
+    self.assertIn("<File_0>0</File_0>", xml)
+    self.assertIn("<File_1>3</File_1>", xml)
+    self.assertIn("<File_2>4</File_2>", xml)
+    self.assertIn("<File_ID>0</File_ID>", xml)
+    self.assertIn("<File_ID>3</File_ID>", xml)
+    self.assertIn("<File_ID>4</File_ID>", xml)
+    self.assertNotIn("dxsp_missing_sound_file_payload", {warning["type"] for warning in package["warnings"]})
 
   def test_build_dxsd_package_preserves_edited_graph_payload(self):
     sound_payload = base64.b64encode(wav_bytes()).decode("ascii")

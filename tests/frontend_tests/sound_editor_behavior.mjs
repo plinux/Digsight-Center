@@ -37,6 +37,25 @@ function dataUriBytes(url) {
 const state = controller.createSoundEditorState();
 assert.equal(state.activeSlotId, 0);
 assert.deepEqual(state.customSounds, []);
+assert.deepEqual(state.expandedPropertyItemKeys, []);
+assert.equal(controller.isSoundPropertyItemExpanded(state, "node:1:1"), false);
+assert.equal(controller.toggleSoundPropertyItemExpansion(state, "node:1:1"), true);
+assert.equal(controller.isSoundPropertyItemExpanded(state, "node:1:1"), true);
+assert.deepEqual(state.expandedPropertyItemKeys, ["node:1:1"]);
+assert.equal(controller.toggleSoundPropertyItemExpansion(state, "connector:1:7"), true);
+assert.equal(controller.isSoundPropertyItemExpanded(state, "connector:1:7"), true);
+assert.deepEqual(state.expandedPropertyItemKeys, ["node:1:1", "connector:1:7"]);
+assert.equal(controller.toggleSoundPropertyItemExpansion(state, "node:1:1"), false);
+assert.equal(controller.isSoundPropertyItemExpanded(state, "node:1:1"), false);
+assert.deepEqual(state.expandedPropertyItemKeys, ["connector:1:7"]);
+assert.deepEqual(state.expandedPropertySectionKeys, []);
+assert.equal(controller.isSoundPropertySectionExpanded(state, "section:1:nodes"), false);
+assert.equal(controller.toggleSoundPropertySectionExpansion(state, "section:1:nodes"), true);
+assert.equal(controller.isSoundPropertySectionExpanded(state, "section:1:nodes"), true);
+assert.deepEqual(state.expandedPropertySectionKeys, ["section:1:nodes"]);
+assert.equal(controller.toggleSoundPropertySectionExpansion(state, "section:1:nodes"), false);
+assert.equal(controller.isSoundPropertySectionExpanded(state, "section:1:nodes"), false);
+assert.deepEqual(state.expandedPropertySectionKeys, []);
 assert.equal(controller.hasPendingSoundExport(state), false);
 assert.equal(state.pendingSoundExport, false);
 assert.equal(Object.hasOwn(state, "editRevision"), false);
@@ -62,6 +81,15 @@ state.chipProfiles = [
     label: "动芯 5313",
     storage_bytes: 32,
     fixed_slot_count: 28,
+    supported_decoder_modules: ["5313"],
+    audio_format: {sample_rate_hz: 11025, bits: 8, channels: 1},
+  },
+  {
+    chip_id: "digsight_5323",
+    label: "动芯 5323",
+    storage_bytes: 32,
+    fixed_slot_count: 28,
+    supported_decoder_modules: ["5323"],
     audio_format: {sample_rate_hz: 11025, bits: 8, channels: 1},
   },
 ];
@@ -91,6 +119,12 @@ const summary = {
   ],
   connectors: [
     {connector_id: 7, slot_id: 1, source_node_key: "1:0", target_node_key: "1:1", judgment_count: 1, action_count: 0},
+  ],
+  judgments: [
+    {judgment_id: 8, connector_id: 7, register_type: 1, operation_type: 128, parameter_value: 65535},
+  ],
+  actions: [
+    {action_id: 9, connector_id: 7, register_type: 30, operation_config: 128, parameter_value: 65535},
   ],
   sound_files: [
     {
@@ -147,6 +181,75 @@ assert.deepEqual(
 );
 assert.equal(controller.formatBitCount(123456789), "123,456,789");
 assert.equal(controller.formatMegabitCount(128 * 1024 * 1024), "128.00Mb");
+
+const legacyDxspState = controller.createSoundEditorState();
+legacyDxspState.chipProfiles = state.chipProfiles;
+legacyDxspState.chipId = "digsight_5323";
+controller.applyDxsdSummary(legacyDxspState, {
+  project_format: "dxsp_legacy",
+  base_info: {decoder_module: "5323", sound_name: "5323 legacy"},
+  slots: [
+    {slot_id: 1, slot_name: "启动音", is_use: true, legacy_user_type: 2, legacy_user_volume: 180, legacy_user_files: [0, 3, 4], legacy_file_ids: [0, 3, 4]},
+    {slot_id: 2, slot_name: "风笛", is_use: true, legacy_file_ids: [3]},
+  ],
+  nodes: [],
+  connectors: [],
+  sound_files: [
+    {
+      file_id: 0,
+      file_name: "SwitchAOn.wav",
+      duration_seconds: 0.2,
+      pcm_bytes: 4,
+      content_base64: "AAAA",
+      content_encoding: "pcm",
+      preview_format: {sample_rate_hz: 11025, bits: 8, channels: 1},
+    },
+    {file_id: 3, file_name: "Horn.wav", duration_seconds: 0.6, pcm_bytes: 8},
+    {file_id: 4, file_name: "HornEnd.wav", duration_seconds: 0.4, pcm_bytes: 6},
+  ],
+  function_mappings: [
+    {slot_id: 1, function_number: 1, function_key: "F1"},
+    {slot_id: 2, function_number: 2, function_key: "F2"},
+  ],
+});
+assert.equal(legacyDxspState.chipId, "digsight_5323");
+assert.equal(legacyDxspState.projectViewModel.slots.length, 28);
+assert.equal(legacyDxspState.selectedSlots.find((slot) => Number(slot.slotId) === 1).sound.fileId, 0);
+assert.equal(legacyDxspState.selectedSlots.find((slot) => Number(slot.slotId) === 1).sound.fileName, "SwitchAOn.wav");
+assert.equal(legacyDxspState.selectedSlots.find((slot) => Number(slot.slotId) === 1).legacyUserType, 2);
+assert.equal(legacyDxspState.selectedSlots.find((slot) => Number(slot.slotId) === 1).legacyUserVolume, 180);
+assert.deepEqual(legacyDxspState.selectedSlots.find((slot) => Number(slot.slotId) === 1).legacyUserFiles, [0, 3, 4]);
+assert.equal(controller.projectSoundFiles(legacyDxspState).some((entry) => Number(entry.file_id) === 0), true);
+assert.deepEqual(
+  controller.soundUsageForProject(legacyDxspState).find((entry) => Number(entry.file_id) === 0).used_by,
+  ["Slot 1"]
+);
+assert.deepEqual(
+  controller.soundUsageForProject(legacyDxspState).find((entry) => Number(entry.file_id) === 4).used_by,
+  ["Slot 1"]
+);
+controller.setLegacyDxspSlotFile(legacyDxspState, 1, 2, "");
+assert.deepEqual(legacyDxspState.selectedSlots.find((slot) => Number(slot.slotId) === 1).legacyUserFiles, [0, 3, null]);
+controller.setLegacyDxspSlotFile(legacyDxspState, 1, 2, 4);
+controller.updateLegacyDxspSlotField(legacyDxspState, 1, "legacyUserVolume", 190);
+assert.equal(legacyDxspState.selectedSlots.find((slot) => Number(slot.slotId) === 1).legacyUserVolume, 190);
+const legacyDxspPayload = controller.buildSoundPackagePayload({
+  chipId: "digsight_5323",
+  packageName: "5323 legacy",
+  state: legacyDxspState,
+});
+assert.equal(legacyDxspPayload.slots[0].legacy_user_type, 2);
+assert.equal(legacyDxspPayload.slots[0].legacy_user_volume, 190);
+assert.deepEqual(legacyDxspPayload.slots[0].legacy_user_files, [0, 3, 4]);
+assert.equal(legacyDxspPayload.slots[0].sound.file_name, "SwitchAOn.wav");
+assert.equal(legacyDxspPayload.slots[0].sound.content_base64, "AAAA");
+assert.equal(legacyDxspPayload.slots[0].sound_files[0].file_id, 0);
+assert.equal(legacyDxspPayload.slots[0].sound_files[0].content_base64, "AAAA");
+assert.equal(legacyDxspPayload.slots[0].sound_files[0].content_encoding, "pcm");
+assert.deepEqual(legacyDxspPayload.slots[0].sound_files.map((entry) => entry.file_id), [0, 3, 4]);
+assert.equal(legacyDxspPayload.slots[1].sound.file_name, "Horn.wav");
+assert.equal(legacyDxspPayload.slots[2].sound.file_name, "");
+
 state.chipId = "digsight_6003";
 controller.ensureDefaultSoundEditorSelection(state);
 assert.equal(controller.soundCapacityUsageForState(state).totalBytes, 64 * 1024 * 1024 / 8);
@@ -217,9 +320,17 @@ assert.equal(state.projectViewModel.nodesBySlot.get(1).length, 3);
 assert.equal(controller.hasPendingSoundExport(state), true);
 controller.markSoundEditorExported(state);
 controller.updateSoundNodeField(state, "1:2", "nodeName", "播放新音效");
+controller.updateSoundNodeField(state, "1:2", "nodeType", "2");
+controller.updateSoundNodeField(state, "1:2", "nodeConfig", "17");
 controller.updateSoundNodeField(state, "1:2", "soundVolume", "180");
+controller.updateSoundNodeField(state, "1:2", "x", "321.5");
+controller.updateSoundNodeField(state, "1:2", "y", "142.25");
 assert.equal(state.projectSummary.nodes.find((node) => node.node_key === "1:2").node_name, "播放新音效");
+assert.equal(state.projectSummary.nodes.find((node) => node.node_key === "1:2").node_type, 2);
+assert.equal(state.projectSummary.nodes.find((node) => node.node_key === "1:2").node_config, 17);
 assert.equal(state.projectSummary.nodes.find((node) => node.node_key === "1:2").sound_volume, 180);
+assert.equal(state.projectSummary.nodes.find((node) => node.node_key === "1:2").x, 321.5);
+assert.equal(state.projectSummary.nodes.find((node) => node.node_key === "1:2").y, 142.25);
 controller.resizeSoundNode(state, "1:2", 168, 96);
 assert.deepEqual(
   {
@@ -252,6 +363,24 @@ assert.equal(
 assert.equal(
   state.projectSummary.connectors.find((connector) => connector.connector_id === addedConnector.connector_id).target_node_key,
   "1:2"
+);
+const addedJudgment = controller.addSoundConnectorJudgment(state, addedConnector.connector_id);
+assert.equal(addedJudgment.connector_id, addedConnector.connector_id);
+assert.equal(
+  state.projectSummary.connectors.find((connector) => connector.connector_id === addedConnector.connector_id).judgment_count,
+  1
+);
+controller.updateSoundConnectorJudgmentField(state, addedConnector.connector_id, addedJudgment.judgment_id, "registerType", "8");
+controller.updateSoundConnectorJudgmentField(state, addedConnector.connector_id, addedJudgment.judgment_id, "operationType", "128");
+controller.updateSoundConnectorJudgmentField(state, addedConnector.connector_id, addedJudgment.judgment_id, "parameterValue", "65535");
+assert.deepEqual(
+  state.projectSummary.judgments.find((judgment) => judgment.judgment_id === addedJudgment.judgment_id),
+  {judgment_id: addedJudgment.judgment_id, connector_id: addedConnector.connector_id, register_type: 8, operation_type: 128, parameter_value: 65535}
+);
+assert.equal(controller.deleteSoundConnectorJudgment(state, addedConnector.connector_id, addedJudgment.judgment_id), true);
+assert.equal(
+  state.projectSummary.connectors.find((connector) => connector.connector_id === addedConnector.connector_id).judgment_count,
+  0
 );
 assert.equal(controller.hasPendingSoundExport(state), true);
 const selectedInRect = controller.selectSoundItemsInRect(state, 1, {x1: 170, y1: 50, x2: 520, y2: 220});
@@ -346,7 +475,7 @@ assert.equal(
 controller.openSoundFileEditor(state, 9);
 assert.equal(state.editingSoundFileId, 9);
 controller.closeSoundFileEditor(state);
-assert.equal(state.editingSoundFileId, 0);
+assert.equal(state.editingSoundFileId, null);
 assert.equal(controller.deleteUnusedSoundFile(state, 9), true);
 assert.equal(controller.hasPendingSoundExport(state), true);
 controller.markSoundEditorExported(state);
@@ -419,6 +548,8 @@ assert.equal(payload.slots[0].sound.content_base64, "CCCC");
 assert.equal(payload.slots[0].nodes.some((node) => node.node_id === 2 && node.node_name === "播放新音效"), true);
 assert.equal(payload.slots[0].nodes.some((node) => node.node_id === 2 && node.width === 168 && node.height === 96), true);
 assert.equal(payload.slots[0].connectors.some((connector) => connector.target_node_id === 2), true);
+assert.equal(payload.slots[0].judgments.some((judgment) => judgment.judgment_id === 8 && judgment.operation_type === 128), true);
+assert.equal(payload.slots[0].actions.some((action) => action.action_id === 9 && action.operation_config === 128), true);
 assert.equal(payload.slots[0].sound_files.some((file) => Number(file.file_id) === 20), true);
 
 const fallbackState = controller.createSoundEditorState();

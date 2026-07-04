@@ -9,12 +9,14 @@ export function createSoundEditorState() {
     selectedConnectorId: 0,
     selectedNodeKeys: [],
     selectedConnectorIds: [],
+    expandedPropertyItemKeys: [],
+    expandedPropertySectionKeys: [],
     selectedSlots: [],
     customSounds: [],
     canvasViewport: {zoom: 1, offsetX: 0, offsetY: 0},
     canvasSelectionMode: false,
     canvasContextMenu: {open: false, x: 0, y: 0},
-    editingSoundFileId: 0,
+    editingSoundFileId: null,
     pendingSoundExport: false,
     isExportingSoundPackage: false,
     changedDuringSoundExport: false,
@@ -59,6 +61,46 @@ export function markSoundEditorExportFailed(state) {
 
 export function hasPendingSoundExport(state) {
   return Boolean(state?.pendingSoundExport || state?.isExportingSoundPackage);
+}
+
+export function isSoundPropertyItemExpanded(state, itemKey) {
+  const key = String(itemKey || "");
+  return key ? soundPropertyItemKeys(state).includes(key) : false;
+}
+
+export function toggleSoundPropertyItemExpansion(state, itemKey) {
+  const key = String(itemKey || "");
+  if (!key) {
+    return false;
+  }
+  const keys = soundPropertyItemKeys(state);
+  const index = keys.indexOf(key);
+  if (index >= 0) {
+    keys.splice(index, 1);
+    return false;
+  }
+  keys.push(key);
+  return true;
+}
+
+export function isSoundPropertySectionExpanded(state, sectionKey) {
+  const key = String(sectionKey || "");
+  return key ? soundPropertySectionKeys(state).includes(key) : false;
+}
+
+export function toggleSoundPropertySectionExpansion(state, sectionKey) {
+  const key = String(sectionKey || "");
+  if (!key) {
+    return false;
+  }
+  const keys = soundPropertySectionKeys(state);
+  const index = keys.indexOf(key);
+  if (index >= 0) {
+    keys.splice(index, 1);
+    return false;
+  }
+  keys.push(key);
+  return true;
 }
 
 export function setSoundCanvasZoom(state, nextZoom) {
@@ -160,7 +202,12 @@ export function buildSoundPackagePayload({chipId, packageName, selectedSlots, st
       },
       nodes: slot.nodes || [],
       connectors: slot.connectors || [],
-      sound_files: slot.soundFiles || slot.sound_files || []
+      judgments: slot.judgments || [],
+      actions: slot.actions || [],
+      sound_files: slot.soundFiles || slot.sound_files || [],
+      legacy_user_type: slot.legacyUserType ?? slot.legacy_user_type ?? null,
+      legacy_user_volume: slot.legacyUserVolume ?? slot.legacy_user_volume ?? null,
+      legacy_user_files: legacyUserFilesForSlot(slot)
     }))
   };
 }
@@ -168,15 +215,15 @@ export function buildSoundPackagePayload({chipId, packageName, selectedSlots, st
 export function projectSoundFiles(state) {
   const byId = new Map();
   for (const file of state.projectSummary?.sound_files || []) {
-    const fileId = Number(file.file_id || 0);
-    if (!fileId) {
+    const fileId = soundFileId(file.file_id ?? file.fileId);
+    if (fileId === null) {
       continue;
     }
     byId.set(fileId, normalizeProjectSoundFile(file, "dxsd"));
   }
   for (const sound of state.customSounds || []) {
-    const fileId = Number(sound.fileId ?? sound.file_id ?? 0);
-    if (!fileId) {
+    const fileId = soundFileId(sound.fileId ?? sound.file_id);
+    if (fileId === null) {
       continue;
     }
     byId.set(fileId, normalizeProjectSoundFile({
@@ -209,16 +256,16 @@ export function soundPreviewUrl(file) {
 }
 
 export function openSoundFileEditor(state, fileId) {
-  state.editingSoundFileId = Number(fileId || 0);
+  state.editingSoundFileId = soundFileId(fileId);
 }
 
 export function closeSoundFileEditor(state) {
-  state.editingSoundFileId = 0;
+  state.editingSoundFileId = null;
 }
 
 export function deleteUnusedSoundFile(state, fileId) {
-  const numericFileId = Number(fileId || 0);
-  if (!numericFileId) {
+  const numericFileId = soundFileId(fileId);
+  if (numericFileId === null) {
     return false;
   }
   const usage = soundUsageForProject(state).find((file) => Number(file.file_id) === numericFileId);
@@ -241,8 +288,8 @@ export function deleteUnusedSoundFile(state, fileId) {
 }
 
 export function replaceSoundFile(state, fileId, sound) {
-  const numericFileId = Number(fileId || 0);
-  if (!numericFileId || !sound) {
+  const numericFileId = soundFileId(fileId);
+  if (numericFileId === null || !sound) {
     return null;
   }
   const replacement = {
@@ -284,8 +331,8 @@ export function soundUsageForProject(state) {
     {...file, used_by: []}
   ]));
   for (const node of state.projectSummary?.nodes || []) {
-    const fileId = Number(node.file_id || 0);
-    if (!fileId) {
+    const fileId = assignedSoundFileId(node.file_id);
+    if (fileId === null) {
       continue;
     }
     if (!byId.has(fileId)) {
@@ -299,13 +346,23 @@ export function soundUsageForProject(state) {
     byId.get(fileId).used_by.push(`Slot ${Number(node.slot_id || 0)} / 节点 ${Number(node.node_id || 0)}`);
   }
   if (!(state.projectSummary?.nodes || []).length) {
-    for (const slot of state.selectedSlots || []) {
-      const fileId = Number(slot.sound?.fileId ?? slot.sound?.file_id ?? 0);
-      if (!fileId) {
-        continue;
+    const selectedBySlotId = new Map((state.selectedSlots || []).map((slot) => [
+      Number(slot.slotId ?? slot.slot_id ?? 0),
+      slot
+    ]));
+    const slots = state.projectSummary?.slots?.length ? state.projectSummary.slots : (state.selectedSlots || []);
+    for (const slot of slots) {
+      const slotId = Number(slot.slot_id ?? slot.slotId ?? 0);
+      const selected = selectedBySlotId.get(slotId) || slot;
+      const fileIds = new Set(legacySoundFileIdsForSlot(slot));
+      const selectedFileId = selectedSoundFileId(selected.sound);
+      if (selectedFileId !== null) {
+        fileIds.add(selectedFileId);
       }
-      ensureSoundUsageEntry(byId, fileId, slot.sound);
-      byId.get(fileId).used_by.push(`Slot ${Number(slot.slotId || slot.slot_id || 0)}`);
+      for (const fileId of fileIds) {
+        ensureSoundUsageEntry(byId, fileId, selected.sound || soundFileById(state, fileId) || {});
+        byId.get(fileId).used_by.push(`Slot ${slotId}`);
+      }
     }
   }
   return Array.from(byId.values()).sort((left, right) => Number(left.file_id) - Number(right.file_id));
@@ -370,8 +427,8 @@ export function formatMegabitCount(bits) {
 export function deleteUnusedSoundFiles(state) {
   const unusedFileIds = soundUsageForProject(state)
     .filter((file) => !(file.used_by || []).length)
-    .map((file) => Number(file.file_id || 0))
-    .filter(Boolean);
+    .map((file) => soundFileId(file.file_id))
+    .filter((fileId) => fileId !== null);
   let deletedCount = 0;
   for (const fileId of unusedFileIds) {
     if (deleteUnusedSoundFile(state, fileId)) {
@@ -404,16 +461,28 @@ export function clearSoundSlot(state, slotId) {
   if (summarySlot) {
     summarySlot.is_use = false;
     summarySlot.slot_start_node = 0;
+    summarySlot.legacy_user_type = 0;
+    summarySlot.legacy_user_volume = 0;
+    summarySlot.legacy_user_files = [null, null, null];
+    summarySlot.legacy_file_ids = [];
   }
   const selectedSlot = (state.selectedSlots || []).find((slot) => Number(slot.slotId) === numericSlotId);
   if (selectedSlot) {
     selectedSlot.sound = {};
     selectedSlot.functionNumber = null;
+    selectedSlot.legacyUserType = 0;
+    selectedSlot.legacyUserVolume = 0;
+    selectedSlot.legacyUserFiles = [null, null, null];
   }
   state.selectedNodeKey = "";
   state.selectedConnectorId = 0;
   state.selectedNodeKeys = [];
   state.selectedConnectorIds = [];
+  state.expandedPropertyItemKeys = soundPropertyItemKeys(state)
+    .filter((itemKey) => !itemKey.startsWith(`node:${numericSlotId}:`)
+      && !itemKey.startsWith(`connector:${numericSlotId}:`));
+  state.expandedPropertySectionKeys = soundPropertySectionKeys(state)
+    .filter((sectionKey) => !sectionKey.startsWith(`section:${numericSlotId}:`));
   refreshSoundProjectViewModel(state);
   const changed = beforeNodeCount !== state.projectSummary.nodes.length
     || beforeConnectorCount !== state.projectSummary.connectors.length
@@ -478,6 +547,13 @@ export function copySoundSelection(state) {
     .filter((connector) => selectedConnectorIds.has(Number(connector.connector_id || 0))
       || (nodeIdSet.has(Number(connector.source_node_id || 0)) && nodeIdSet.has(Number(connector.target_node_id || 0))))
     .map((connector) => ({...connector}));
+  const selectedConnectorIdSet = new Set(selectedConnectors.map((connector) => Number(connector.connector_id || 0)));
+  const selectedJudgments = (state.projectSummary?.judgments || [])
+    .filter((judgment) => selectedConnectorIdSet.has(Number(judgment.connector_id || 0)))
+    .map((judgment) => ({...judgment}));
+  const selectedActions = (state.projectSummary?.actions || [])
+    .filter((action) => selectedConnectorIdSet.has(Number(action.connector_id || 0)))
+    .map((action) => ({...action}));
   if (!selectedNodes.length && !selectedConnectors.length) {
     state.soundClipboard = null;
     return 0;
@@ -485,7 +561,9 @@ export function copySoundSelection(state) {
   state.soundClipboard = {
     slotId: Number(state.activeSlotId || selectedNodes[0]?.slot_id || selectedConnectors[0]?.slot_id || 0),
     nodes: selectedNodes,
-    connectors: selectedConnectors
+    connectors: selectedConnectors,
+    judgments: selectedJudgments,
+    actions: selectedActions
   };
   return selectedNodes.length + selectedConnectors.length;
 }
@@ -520,24 +598,51 @@ export function pasteSoundSelection(state, targetSlotId = state.activeSlotId, of
   }
   let pastedConnectorCount = 0;
   const nextConnectorIds = [];
+  const connectorIdMap = new Map();
   for (const sourceConnector of state.soundClipboard.connectors || []) {
     const sourceNodeId = idMap.get(Number(sourceConnector.source_node_id || 0));
     const targetNodeId = idMap.get(Number(sourceConnector.target_node_id || 0));
     if (sourceNodeId === undefined || targetNodeId === undefined) {
       continue;
     }
+    const connectorId = nextConnectorId(state);
     const connector = {
       ...sourceConnector,
-      connector_id: nextConnectorId(state),
+      connector_id: connectorId,
       slot_id: numericSlotId,
       source_node_id: sourceNodeId,
       target_node_id: targetNodeId,
       source_node_key: keyMap.get(sourceConnector.source_node_key) || `${numericSlotId}:${sourceNodeId}`,
       target_node_key: keyMap.get(sourceConnector.target_node_key) || `${numericSlotId}:${targetNodeId}`
     };
+    connectorIdMap.set(Number(sourceConnector.connector_id || 0), connectorId);
     state.projectSummary.connectors.push(connector);
     nextConnectorIds.push(Number(connector.connector_id));
     pastedConnectorCount += 1;
+  }
+  state.projectSummary.judgments ||= [];
+  for (const sourceJudgment of state.soundClipboard.judgments || []) {
+    const connectorId = connectorIdMap.get(Number(sourceJudgment.connector_id || 0));
+    if (!connectorId) {
+      continue;
+    }
+    state.projectSummary.judgments.push({
+      ...sourceJudgment,
+      judgment_id: nextJudgmentId(state),
+      connector_id: connectorId
+    });
+  }
+  state.projectSummary.actions ||= [];
+  for (const sourceAction of state.soundClipboard.actions || []) {
+    const connectorId = connectorIdMap.get(Number(sourceAction.connector_id || 0));
+    if (!connectorId) {
+      continue;
+    }
+    state.projectSummary.actions.push({
+      ...sourceAction,
+      action_id: nextActionId(state),
+      connector_id: connectorId
+    });
   }
   setSoundSelection(state, nextNodes.map((node) => node.node_key), nextConnectorIds);
   refreshSoundProjectViewModel(state);
@@ -556,16 +661,26 @@ export function deleteSoundSelection(state) {
     .map((node) => Number(node.node_id || 0)));
   const beforeNodes = (state.projectSummary?.nodes || []).length;
   const beforeConnectors = (state.projectSummary?.connectors || []).length;
+  const deletedConnectorIds = new Set();
   state.projectSummary.nodes = (state.projectSummary?.nodes || [])
     .filter((node) => !selectedNodeKeys.has(node.node_key));
   state.projectSummary.connectors = (state.projectSummary?.connectors || [])
     .filter((connector) => {
       if (selectedConnectorIds.has(Number(connector.connector_id || 0))) {
+        deletedConnectorIds.add(Number(connector.connector_id || 0));
         return false;
       }
-      return !selectedNodeIds.has(Number(connector.source_node_id || 0))
-        && !selectedNodeIds.has(Number(connector.target_node_id || 0));
+      const deleteByNode = selectedNodeIds.has(Number(connector.source_node_id || 0))
+        || selectedNodeIds.has(Number(connector.target_node_id || 0));
+      if (deleteByNode) {
+        deletedConnectorIds.add(Number(connector.connector_id || 0));
+      }
+      return !deleteByNode;
     });
+  state.projectSummary.judgments = (state.projectSummary?.judgments || [])
+    .filter((judgment) => !deletedConnectorIds.has(Number(judgment.connector_id || 0)));
+  state.projectSummary.actions = (state.projectSummary?.actions || [])
+    .filter((action) => !deletedConnectorIds.has(Number(action.connector_id || 0)));
   setSoundSelection(state, [], []);
   refreshSoundProjectViewModel(state);
   markSoundEditorChanged(state);
@@ -619,21 +734,30 @@ export function saveActiveSlotToLibrary(state, category) {
   if (!slotId || !slot) {
     return null;
   }
+  const soundFileIds = soundFileIdsForSlot(state, slotId);
+  const connectors = (state.projectSummary?.connectors || [])
+    .filter((connector) => Number(connector.slot_id) === slotId)
+    .map((connector) => ({...connector}));
+  const connectorIds = new Set(connectors.map((connector) => Number(connector.connector_id || 0)));
   const entry = {
     slot_library_id: `slot-template-${Date.now()}-${slotId}`,
     category: String(category || "power_unit"),
     label: slot.slotName || slot.slot_name || `Slot ${slotId}`,
     source_slot_id: slotId,
     nodes: (state.projectSummary?.nodes || []).filter((node) => Number(node.slot_id) === slotId).map((node) => ({...node})),
-    connectors: (state.projectSummary?.connectors || []).filter((connector) => Number(connector.slot_id) === slotId).map((connector) => ({...connector})),
-    sound_file_ids: Array.from(new Set((state.projectSummary?.nodes || [])
-      .filter((node) => Number(node.slot_id) === slotId)
-      .map((node) => Number(node.file_id || 0))
-      .filter(Boolean))),
+    connectors,
+    judgments: (state.projectSummary?.judgments || [])
+      .filter((judgment) => connectorIds.has(Number(judgment.connector_id || 0)))
+      .map((judgment) => ({...judgment})),
+    actions: (state.projectSummary?.actions || [])
+      .filter((action) => connectorIds.has(Number(action.connector_id || 0)))
+      .map((action) => ({...action})),
+    legacy_user_type: slot.legacyUserType ?? slot.legacy_user_type ?? null,
+    legacy_user_volume: slot.legacyUserVolume ?? slot.legacy_user_volume ?? null,
+    legacy_user_files: legacyUserFilesForSlot(summarySlotById(state, slotId) || slot),
+    sound_file_ids: Array.from(soundFileIds),
     sound_files: projectSoundFiles(state)
-      .filter((file) => (state.projectSummary?.nodes || []).some((node) => {
-        return Number(node.slot_id) === slotId && Number(node.file_id || 0) === Number(file.file_id || 0);
-      }))
+      .filter((file) => soundFileIds.has(soundFileId(file.file_id)))
       .map((file) => ({...file}))
   };
   state.slotLibrary ||= {categories: defaultSlotLibraryCategories(), slots: []};
@@ -671,6 +795,7 @@ export function applySlotLibraryEntry(state, entryId, targetSlotId = state.activ
   ensureSoundProjectSummary(state, numericSlotId);
   const fileIdMap = restoreSlotLibrarySoundFiles(state, entry.sound_files || []);
   const nodeIdMap = new Map();
+  const connectorIdMap = new Map();
   for (const sourceNode of entry.nodes || []) {
     const nodeId = nextNodeIdForSlot(state, numericSlotId);
     nodeIdMap.set(Number(sourceNode.node_id || 0), nodeId);
@@ -678,7 +803,7 @@ export function applySlotLibraryEntry(state, entryId, targetSlotId = state.activ
       ...sourceNode,
       slot_id: numericSlotId,
       node_id: nodeId,
-      file_id: fileIdMap.get(Number(sourceNode.file_id || 0)) || sourceNode.file_id,
+      file_id: fileIdMap.get(soundFileId(sourceNode.file_id)) ?? sourceNode.file_id,
       node_key: `${numericSlotId}:${nodeId}`
     });
   }
@@ -688,9 +813,11 @@ export function applySlotLibraryEntry(state, entryId, targetSlotId = state.activ
     if (sourceNodeId === undefined || targetNodeId === undefined) {
       continue;
     }
+    const connectorId = nextConnectorId(state);
+    connectorIdMap.set(Number(sourceConnector.connector_id || 0), connectorId);
     state.projectSummary.connectors.push({
       ...sourceConnector,
-      connector_id: nextConnectorId(state),
+      connector_id: connectorId,
       slot_id: numericSlotId,
       source_node_id: sourceNodeId,
       target_node_id: targetNodeId,
@@ -698,15 +825,49 @@ export function applySlotLibraryEntry(state, entryId, targetSlotId = state.activ
       target_node_key: `${numericSlotId}:${targetNodeId}`
     });
   }
+  state.projectSummary.judgments ||= [];
+  for (const sourceJudgment of entry.judgments || []) {
+    const connectorId = connectorIdMap.get(Number(sourceJudgment.connector_id || 0));
+    if (!connectorId) {
+      continue;
+    }
+    state.projectSummary.judgments.push({
+      ...sourceJudgment,
+      judgment_id: nextJudgmentId(state),
+      connector_id: connectorId
+    });
+  }
+  state.projectSummary.actions ||= [];
+  for (const sourceAction of entry.actions || []) {
+    const connectorId = connectorIdMap.get(Number(sourceAction.connector_id || 0));
+    if (!connectorId) {
+      continue;
+    }
+    state.projectSummary.actions.push({
+      ...sourceAction,
+      action_id: nextActionId(state),
+      connector_id: connectorId
+    });
+  }
   syncSelectedSlotSoundFromNode(state, numericSlotId, firstPlayableNodeForSlot(state, numericSlotId));
   const selectedSlot = state.selectedSlots.find((slot) => Number(slot.slotId) === numericSlotId);
   if (selectedSlot) {
     selectedSlot.slotName = entry.label || selectedSlot.slotName;
+    selectedSlot.legacyUserType = entry.legacy_user_type ?? selectedSlot.legacyUserType;
+    selectedSlot.legacyUserVolume = entry.legacy_user_volume ?? selectedSlot.legacyUserVolume;
+    selectedSlot.legacyUserFiles = legacyUserFilesForSlot(entry);
   }
   const summarySlot = summarySlotById(state, numericSlotId);
   if (summarySlot) {
     summarySlot.slot_name = entry.label || summarySlot.slot_name;
     summarySlot.is_use = Boolean((entry.nodes || []).length);
+    if (entry.legacy_user_type !== null && entry.legacy_user_type !== undefined) {
+      summarySlot.legacy_user_type = entry.legacy_user_type;
+      summarySlot.legacy_user_volume = entry.legacy_user_volume;
+      summarySlot.legacy_user_files = legacyUserFilesForSlot(entry);
+      summarySlot.legacy_file_ids = summarySlot.legacy_user_files.filter((fileId) => fileId !== null);
+      summarySlot.is_use = Boolean(summarySlot.is_use || summarySlot.legacy_user_type || summarySlot.legacy_file_ids.length);
+    }
   }
   refreshSoundProjectViewModel(state);
   markSoundEditorChanged(state);
@@ -717,16 +878,16 @@ function restoreSlotLibrarySoundFiles(state, soundFiles) {
   const fileIdMap = new Map();
   const existingFiles = projectSoundFiles(state);
   for (const sourceFile of soundFiles || []) {
-    const sourceFileId = Number(sourceFile.file_id || 0);
-    if (!sourceFileId) {
+    const sourceFileId = soundFileId(sourceFile.file_id);
+    if (sourceFileId === null) {
       continue;
     }
     const existing = existingFiles.find((file) => {
-      return Number(file.file_id || 0) === sourceFileId
+      return soundFileId(file.file_id) === sourceFileId
         || (file.file_name && file.file_name === sourceFile.file_name && file.content_base64 === sourceFile.content_base64);
     });
     if (existing) {
-      fileIdMap.set(sourceFileId, Number(existing.file_id || sourceFileId));
+      fileIdMap.set(sourceFileId, soundFileId(existing.file_id) ?? sourceFileId);
       continue;
     }
     const nextFileId = nextSoundFileId(state);
@@ -742,13 +903,15 @@ function restoreSlotLibrarySoundFiles(state, soundFiles) {
   return fileIdMap;
 }
 
-export function setNodeSoundFile(state, nodeKey, fileId) {
+export function setNodeSoundFile(state, nodeKey, fileId, options = {}) {
   const node = (state.projectSummary?.nodes || []).find((entry) => entry.node_key === nodeKey);
   if (!node) {
     return;
   }
-  node.file_id = Number(fileId || 0);
-  state.selectedNodeKey = nodeKey;
+  node.file_id = soundFileId(fileId) ?? 0;
+  if (options.selectNode !== false) {
+    state.selectedNodeKey = nodeKey;
+  }
   state.projectViewModel = createSoundProjectViewModel(state.projectSummary);
   syncSelectedSlotSoundFromNode(state, Number(node.slot_id || 0), node);
   markSoundEditorChanged(state);
@@ -793,8 +956,10 @@ export function updateSoundNodeField(state, nodeKey, fieldName, value) {
     nodeType: ["node_type", boundedNumber(value, 0, 999)],
     fileId: ["file_id", boundedNumber(value, 0, 9999)],
     nodeConfig: ["node_config", boundedNumber(value, 0, 999999)],
-    repeatAmount: ["repeat_amount", boundedNumber(value, 0, 9999)],
+    repeatAmount: ["repeat_amount", boundedNumber(value, 0, 999)],
     soundVolume: ["sound_volume", boundedNumber(value, 0, 255)],
+    x: ["x", boundedFloat(value, 20, 5000)],
+    y: ["y", boundedFloat(value, 20, 5000)],
     width: ["width", boundedNumber(value, 80, 500)],
     height: ["height", boundedNumber(value, 56, 300)]
   };
@@ -907,6 +1072,66 @@ export function updateSoundConnectorField(state, connectorId, fieldName, value) 
   markSoundEditorChanged(state);
 }
 
+export function addSoundConnectorJudgment(state, connectorId) {
+  ensureSoundProjectSummaryBase(state);
+  const connector = (state.projectSummary.connectors || []).find((entry) => Number(entry.connector_id) === Number(connectorId));
+  if (!connector) {
+    return null;
+  }
+  const judgment = {
+    judgment_id: nextJudgmentId(state),
+    connector_id: Number(connector.connector_id || 0),
+    register_type: 255,
+    operation_type: 0,
+    parameter_value: 0
+  };
+  state.projectSummary.judgments.push(judgment);
+  refreshSoundProjectViewModel(state);
+  markSoundEditorChanged(state);
+  return judgment;
+}
+
+export function updateSoundConnectorJudgmentField(state, connectorId, judgmentId, fieldName, value) {
+  const judgment = (state.projectSummary?.judgments || [])
+    .find((entry) => Number(entry.connector_id) === Number(connectorId)
+      && Number(entry.judgment_id) === Number(judgmentId));
+  if (!judgment) {
+    return;
+  }
+  const mapping = {
+    registerType: ["register_type", boundedNumber(value, 0, 255)],
+    operationType: ["operation_type", boundedNumber(value, 0, 255)],
+    parameterValue: ["parameter_value", boundedNumber(value, 0, 65535)]
+  };
+  const entry = mapping[fieldName];
+  if (!entry) {
+    return;
+  }
+  const [targetField, nextValue] = entry;
+  if (judgment[targetField] === nextValue) {
+    return;
+  }
+  judgment[targetField] = nextValue;
+  refreshSoundProjectViewModel(state);
+  markSoundEditorChanged(state);
+}
+
+export function deleteSoundConnectorJudgment(state, connectorId, judgmentId) {
+  if (!state.projectSummary?.judgments?.length) {
+    return false;
+  }
+  const beforeCount = state.projectSummary.judgments.length;
+  state.projectSummary.judgments = state.projectSummary.judgments.filter((entry) => {
+    return Number(entry.connector_id) !== Number(connectorId) || Number(entry.judgment_id) !== Number(judgmentId);
+  });
+  const deleted = beforeCount !== state.projectSummary.judgments.length;
+  if (deleted) {
+    refreshSoundProjectViewModel(state);
+    markSoundEditorChanged(state);
+  }
+  return deleted;
+}
+
 export function updateSoundConnectorEndpoint(state, connectorId, endpoint, nodeKey) {
   const fieldName = endpoint === "source" ? "sourceNodeKey" : endpoint === "target" ? "targetNodeKey" : "";
   if (!fieldName) {
@@ -942,9 +1167,13 @@ export function applyDxsdSummary(state, summary) {
     slotId: slot.slot_id,
     slotName: slot.slot_name,
     functionNumber: functionNumberForViewSlot(slot),
+    legacyUserType: legacyUserTypeForSlot(slot),
+    legacyUserVolume: legacyUserVolumeForSlot(slot),
+    legacyUserFiles: legacyUserFilesForSlot(slot),
     sound: soundForSlot(summary, state.projectViewModel, slot.slot_id)
   }));
   ensureFixedSoundSlotsForChip(state);
+  hydrateSelectedSlotSounds(state);
   state.activeSlotId = state.projectViewModel.slots[0]?.slot_id || 0;
   markSoundEditorChanged(state);
 }
@@ -1115,6 +1344,26 @@ function effectiveSelectedConnectorIds(state) {
     ids.add(Number(state.selectedConnectorId));
   }
   return ids;
+}
+
+function soundPropertyItemKeys(state) {
+  if (!Array.isArray(state.expandedPropertyItemKeys)) {
+    state.expandedPropertyItemKeys = [];
+  }
+  state.expandedPropertyItemKeys = state.expandedPropertyItemKeys
+    .map((itemKey) => String(itemKey || ""))
+    .filter(Boolean);
+  return state.expandedPropertyItemKeys;
+}
+
+function soundPropertySectionKeys(state) {
+  if (!Array.isArray(state.expandedPropertySectionKeys)) {
+    state.expandedPropertySectionKeys = [];
+  }
+  state.expandedPropertySectionKeys = state.expandedPropertySectionKeys
+    .map((sectionKey) => String(sectionKey || ""))
+    .filter(Boolean);
+  return state.expandedPropertySectionKeys;
 }
 
 function selectedSlotForLibrary(state, slotId) {
@@ -1326,7 +1575,7 @@ export function wireSoundEditorEvents({
   });
   elements.soundReplaceUploadInput?.addEventListener("change", async () => {
     const file = elements.soundReplaceUploadInput.files?.[0];
-    if (!file || !state.editingSoundFileId) {
+    if (!file || state.editingSoundFileId === null) {
       return;
     }
     try {
@@ -1395,7 +1644,9 @@ function packageSlotsForState(state, selectedSlots) {
     const slotId = Number(slot.slot_id || slot.slotId || 0);
     const selected = selectedBySlotId.get(slotId) || {};
     const node = firstPlayableNodeForSlot(state, slotId);
-    const projectFile = soundFileById(state, Number(node?.file_id || 0));
+    const legacyFileIds = legacySoundFileIdsForSlot(selected, slot);
+    const legacyFileId = legacyFileIds[0] ?? null;
+    const projectFile = soundFileById(state, assignedSoundFileId(node?.file_id) ?? legacyFileId);
     const sound = projectFile ? normalizeSelectedSound(projectFile) : normalizeSelectedSound(selected.sound || {});
     const nodes = (state.projectSummary?.nodes || [])
       .filter((entry) => Number(entry.slot_id) === slotId)
@@ -1403,7 +1654,17 @@ function packageSlotsForState(state, selectedSlots) {
     const connectors = (state.projectSummary?.connectors || [])
       .filter((entry) => Number(entry.slot_id) === slotId)
       .map(packageConnector);
-    const referencedFileIds = new Set(nodes.map((entry) => Number(entry.file_id || 0)).filter(Boolean));
+    const connectorIds = new Set(connectors.map((entry) => Number(entry.connector_id || 0)));
+    const judgments = (state.projectSummary?.judgments || [])
+      .filter((entry) => connectorIds.has(Number(entry.connector_id || 0)))
+      .map(packageJudgment);
+    const actions = (state.projectSummary?.actions || [])
+      .filter((entry) => connectorIds.has(Number(entry.connector_id || 0)))
+      .map(packageAction);
+    const referencedFileIds = new Set(nodes.map((entry) => assignedSoundFileId(entry.file_id)).filter((fileId) => fileId !== null));
+    for (const fileId of legacyFileIds) {
+      referencedFileIds.add(fileId);
+    }
     const soundFiles = Array.from(referencedFileIds)
       .map((fileId) => soundFileById(state, fileId))
       .filter(Boolean)
@@ -1415,7 +1676,12 @@ function packageSlotsForState(state, selectedSlots) {
       sound,
       nodes,
       connectors,
-      soundFiles
+      judgments,
+      actions,
+      soundFiles,
+      legacyUserType: selected.legacyUserType ?? slot.legacy_user_type ?? slot.legacyUserType ?? null,
+      legacyUserVolume: selected.legacyUserVolume ?? slot.legacy_user_volume ?? slot.legacyUserVolume ?? null,
+      legacyUserFiles: legacyUserFilesForSlot(selected, slot)
     };
   });
 }
@@ -1458,24 +1724,43 @@ function packageConnector(connector) {
   };
 }
 
+function packageJudgment(judgment) {
+  return {
+    judgment_id: Number(judgment.judgment_id || 0),
+    connector_id: Number(judgment.connector_id || 0),
+    register_type: Number(judgment.register_type || 0),
+    operation_type: Number(judgment.operation_type || 0),
+    parameter_value: Number(judgment.parameter_value || 0)
+  };
+}
+
+function packageAction(action) {
+  return {
+    action_id: Number(action.action_id || 0),
+    connector_id: Number(action.connector_id || 0),
+    register_type: Number(action.register_type || 0),
+    operation_config: Number(action.operation_config || 0),
+    parameter_value: Number(action.parameter_value || 0)
+  };
+}
+
 function packageSoundFile(file) {
   return {
-    file_id: Number(file.file_id || 0),
+    file_id: soundFileId(file.file_id ?? file.fileId) ?? 0,
     file_name: file.file_name || "",
     content_base64: file.content_base64 || "",
+    content_encoding: file.content_encoding || "",
     duration_seconds: Number(file.duration_seconds || 0),
     pcm_bytes: Number(file.pcm_bytes || 0)
   };
 }
 
 function soundPackageContentBase64(sound) {
-  const contentBase64 = sound?.contentBase64 || sound?.content_base64 || "";
-  const contentEncoding = String(sound?.contentEncoding || sound?.content_encoding || "").toLowerCase();
-  return contentEncoding === "pcm" ? "" : contentBase64;
+  return sound?.contentBase64 || sound?.content_base64 || "";
 }
 
 function normalizeProjectSoundFile(file, source) {
-  const fileId = Number(file.file_id || file.fileId || 0);
+  const fileId = soundFileId(file.file_id ?? file.fileId) ?? 0;
   return {
     file_id: fileId,
     file_name: file.file_name || file.fileName || `sound-${fileId}.wav`,
@@ -1492,7 +1777,11 @@ function normalizeProjectSoundFile(file, source) {
 }
 
 function soundFileById(state, fileId) {
-  return projectSoundFiles(state).find((file) => Number(file.file_id) === Number(fileId)) || null;
+  const numericFileId = soundFileId(fileId);
+  if (numericFileId === null) {
+    return null;
+  }
+  return projectSoundFiles(state).find((file) => Number(file.file_id) === numericFileId) || null;
 }
 
 function ensureSoundUsageEntry(byId, fileId, sound) {
@@ -1515,15 +1804,15 @@ function ensureSoundUsageEntry(byId, fileId, sound) {
 
 function nextSoundFileId(state) {
   const ids = [
-    ...(state.projectSummary?.sound_files || []).map((file) => Number(file.file_id || 0)),
-    ...(state.customSounds || []).map((sound) => Number(sound.fileId ?? sound.file_id ?? 0))
-  ];
+    ...(state.projectSummary?.sound_files || []).map((file) => soundFileId(file.file_id)),
+    ...(state.customSounds || []).map((sound) => soundFileId(sound.fileId ?? sound.file_id))
+  ].filter((fileId) => fileId !== null);
   return Math.max(0, ...ids) + 1;
 }
 
 function ensureSoundFileEntry(state, sound) {
-  const existingFileId = Number(sound.file_id ?? sound.fileId ?? 0);
-  if (existingFileId) {
+  const existingFileId = soundFileId(sound.file_id ?? sound.fileId);
+  if (existingFileId !== null) {
     return soundFileById(state, existingFileId) || normalizeProjectSoundFile({
       ...sound,
       file_id: existingFileId,
@@ -1605,6 +1894,9 @@ function createDefaultSelectedSoundSlot(slotId, summarySlot = null, functionNumb
     slotId,
     slotName: summarySlot?.slot_name || `Slot ${slotId}`,
     functionNumber: normalizeSlotFunctionNumber(functionNumber),
+    legacyUserType: legacyUserTypeForSlot(summarySlot),
+    legacyUserVolume: legacyUserVolumeForSlot(summarySlot),
+    legacyUserFiles: legacyUserFilesForSlot(summarySlot),
     sound: {}
   };
 }
@@ -1630,6 +1922,8 @@ function ensureSoundProjectSummaryBase(state) {
   state.projectSummary.slots ||= [];
   state.projectSummary.nodes ||= [];
   state.projectSummary.connectors ||= [];
+  state.projectSummary.judgments ||= [];
+  state.projectSummary.actions ||= [];
   state.projectSummary.sound_files ||= [];
   state.projectSummary.function_mappings ||= [];
 }
@@ -1662,16 +1956,38 @@ function summarySlotById(state, slotId) {
 
 function refreshSoundProjectViewModel(state) {
   if (state.projectSummary) {
+    refreshConnectorCounts(state);
     state.projectSummary.counts = {
       ...(state.projectSummary.counts || {}),
       slots: (state.projectSummary.slots || []).length,
       nodes: (state.projectSummary.nodes || []).length,
       connectors: (state.projectSummary.connectors || []).length,
+      judgments: (state.projectSummary.judgments || []).length,
+      actions: (state.projectSummary.actions || []).length,
       sound_files: (state.projectSummary.sound_files || []).length,
       cv_entries: (state.projectSummary.cv_entries || []).length
     };
   }
   state.projectViewModel = createSoundProjectViewModel(state.projectSummary);
+}
+
+function refreshConnectorCounts(state) {
+  const judgmentCounts = countByConnectorId(state.projectSummary?.judgments || []);
+  const actionCounts = countByConnectorId(state.projectSummary?.actions || []);
+  for (const connector of state.projectSummary?.connectors || []) {
+    const connectorId = Number(connector.connector_id || 0);
+    connector.judgment_count = judgmentCounts.get(connectorId) || 0;
+    connector.action_count = actionCounts.get(connectorId) || 0;
+  }
+}
+
+function countByConnectorId(entries) {
+  const counts = new Map();
+  for (const entry of entries || []) {
+    const connectorId = Number(entry.connector_id || 0);
+    counts.set(connectorId, (counts.get(connectorId) || 0) + 1);
+  }
+  return counts;
 }
 
 function upsertFunctionMapping(state, slotId, functionNumber) {
@@ -1712,6 +2028,16 @@ function nextConnectorId(state) {
   return Math.max(0, ...ids) + 1;
 }
 
+function nextJudgmentId(state) {
+  const ids = (state.projectSummary?.judgments || []).map((judgment) => Number(judgment.judgment_id || 0));
+  return Math.max(0, ...ids) + 1;
+}
+
+function nextActionId(state) {
+  const ids = (state.projectSummary?.actions || []).map((action) => Number(action.action_id || 0));
+  return Math.max(0, ...ids) + 1;
+}
+
 function defaultFileIdForNewNode(state, slotId, nodeId, existingNodeCount) {
   if (Number(nodeId || 0) === 0) {
     return 0;
@@ -1729,6 +2055,14 @@ function boundedNumber(value, minimum, maximum) {
     return minimum;
   }
   return Math.min(maximum, Math.max(minimum, Math.round(number)));
+}
+
+function boundedFloat(value, minimum, maximum) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return minimum;
+  }
+  return Math.min(maximum, Math.max(minimum, number));
 }
 
 function normalizeSlotFunctionNumber(value) {
@@ -1770,14 +2104,18 @@ function syncSelectedSlotSoundFromNode(state, slotId, node) {
   if (!slot) {
     return;
   }
-  const file = soundFileById(state, Number(node?.file_id || 0));
+  const file = soundFileById(state, assignedSoundFileId(node?.file_id));
   slot.sound = file ? normalizeSelectedSound(file) : {};
 }
 
 function normalizeSelectedSound(sound) {
+  if (!hasSelectedSoundPayload(sound)) {
+    return {};
+  }
+  const fileId = soundFileId(sound.fileId ?? sound.file_id) ?? 0;
   return {
     libraryId: sound.sound_id || sound.libraryId || "",
-    fileId: Number(sound.fileId ?? sound.file_id ?? 0),
+    fileId,
     fileName: sound.fileName || sound.file_name || sound.label || "sound.pcm",
     contentBase64: sound.contentBase64 || sound.content_base64 || "",
     contentEncoding: sound.contentEncoding || sound.content_encoding || "",
@@ -1785,17 +2123,231 @@ function normalizeSelectedSound(sound) {
   };
 }
 
+function hasSelectedSoundPayload(sound) {
+  if (!sound || typeof sound !== "object") {
+    return false;
+  }
+  return [
+    sound.sound_id,
+    sound.libraryId,
+    sound.library_id,
+    sound.fileId,
+    sound.file_id,
+    sound.fileName,
+    sound.file_name,
+    sound.label,
+    sound.contentBase64,
+    sound.content_base64
+  ].some((value) => value !== null && value !== undefined && String(value).trim() !== "");
+}
+
+function hydrateSelectedSlotSounds(state) {
+  for (const slot of state.selectedSlots || []) {
+    const summarySlot = summarySlotById(state, slot.slotId);
+    if (summarySlot) {
+      slot.legacyUserType = legacyUserTypeForSlot(summarySlot);
+      slot.legacyUserVolume = legacyUserVolumeForSlot(summarySlot);
+      slot.legacyUserFiles = legacyUserFilesForSlot(summarySlot);
+    }
+    if (selectedSoundFileId(slot.sound) !== null) {
+      continue;
+    }
+    const sound = soundForSlot(state.projectSummary, state.projectViewModel, slot.slotId);
+    if (selectedSoundFileId(sound) !== null) {
+      slot.sound = sound;
+    }
+  }
+}
+
 function soundForSlot(summary, viewModel, slotId) {
+  const legacySlot = (summary?.slots || []).find((entry) => Number(entry.slot_id) === Number(slotId));
+  const legacyFileId = firstLegacySoundFileId(legacySlot);
+  if (legacyFileId !== null) {
+    const legacyFile = viewModel.soundFilesById.get(legacyFileId);
+    return normalizeSelectedSound(legacyFile || {file_id: legacyFileId, file_name: ""});
+  }
   const node = (viewModel.nodesBySlot.get(Number(slotId)) || []).find((entry) => Number(entry.file_id) > 0);
-  const file = viewModel.soundFilesById.get(Number(node?.file_id || 0));
-  return {
-    libraryId: "",
-    fileId: Number(file?.file_id || 0),
-    fileName: file?.file_name || "",
-    contentBase64: file?.content_base64 || file?.contentBase64 || "",
-    contentEncoding: file?.content_encoding || file?.contentEncoding || "",
-    previewFormat: file?.preview_format || file?.previewFormat || null
-  };
+  if (!node) {
+    return {};
+  }
+  const file = viewModel.soundFilesById.get(Number(node.file_id));
+  return file ? normalizeSelectedSound(file) : {};
+}
+
+function soundFileId(value) {
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return null;
+  }
+  const numericFileId = Number(value);
+  return Number.isFinite(numericFileId) ? numericFileId : null;
+}
+
+function assignedSoundFileId(value) {
+  const fileId = soundFileId(value);
+  return fileId === null || fileId === 255 ? null : fileId;
+}
+
+function firstLegacySoundFileId(slot) {
+  return legacySoundFileIdsForSlot(slot)[0] ?? null;
+}
+
+function soundFileIdsForSlot(state, slotId) {
+  const numericSlotId = Number(slotId || 0);
+  const fileIds = new Set();
+  for (const node of state.projectSummary?.nodes || []) {
+    if (Number(node.slot_id) !== numericSlotId) {
+      continue;
+    }
+    const fileId = assignedSoundFileId(node.file_id);
+    if (fileId !== null) {
+      fileIds.add(fileId);
+    }
+  }
+  for (const legacyFileId of legacySoundFileIdsForSlot(summarySlotById(state, numericSlotId))) {
+    fileIds.add(legacyFileId);
+  }
+  const selected = (state.selectedSlots || []).find((slot) => Number(slot.slotId) === numericSlotId);
+  const selectedFileId = selectedSoundFileId(selected?.sound);
+  if (selectedFileId !== null) {
+    fileIds.add(selectedFileId);
+  }
+  return fileIds;
+}
+
+export function updateLegacyDxspSlotField(state, slotId, fieldName, value) {
+  const numericSlotId = Number(slotId || state.activeSlotId || 0);
+  const selected = (state.selectedSlots || []).find((slot) => Number(slot.slotId) === numericSlotId);
+  const summarySlot = summarySlotById(state, numericSlotId);
+  if (!selected && !summarySlot) {
+    return;
+  }
+  if (fieldName === "legacyUserType") {
+    const nextType = boundedNumber(value, 0, 255);
+    const resetFiles = nextType === 0;
+    if (selected) {
+      selected.legacyUserType = nextType;
+      if (resetFiles) {
+        selected.legacyUserFiles = [null, null, null];
+      }
+    }
+    if (summarySlot) {
+      summarySlot.legacy_user_type = nextType;
+      if (resetFiles) {
+        summarySlot.legacy_user_files = [null, null, null];
+        summarySlot.legacy_file_ids = [];
+      }
+      summarySlot.is_use = Boolean(nextType || legacySoundFileIdsForSlot(summarySlot).length);
+    }
+  } else if (fieldName === "legacyUserVolume") {
+    const nextVolume = boundedNumber(value, 0, 255);
+    if (selected) {
+      selected.legacyUserVolume = nextVolume;
+    }
+    if (summarySlot) {
+      summarySlot.legacy_user_volume = nextVolume;
+    }
+  } else {
+    return;
+  }
+  refreshSoundProjectViewModel(state);
+  markSoundEditorChanged(state);
+}
+
+export function setLegacyDxspSlotFile(state, slotId, fileIndex, fileId) {
+  const numericSlotId = Number(slotId || state.activeSlotId || 0);
+  const numericIndex = boundedNumber(fileIndex, 0, 2);
+  const selected = (state.selectedSlots || []).find((slot) => Number(slot.slotId) === numericSlotId);
+  const summarySlot = summarySlotById(state, numericSlotId);
+  if (!selected && !summarySlot) {
+    return;
+  }
+  const nextFileId = assignedSoundFileId(fileId);
+  const nextFiles = legacyUserFilesForSlot(summarySlot || selected);
+  nextFiles[numericIndex] = nextFileId;
+  if (summarySlot) {
+    summarySlot.legacy_user_files = nextFiles;
+    summarySlot.legacy_file_ids = nextFiles.filter((entry) => entry !== null);
+    summarySlot.is_use = Boolean((summarySlot.legacy_file_ids || []).length || legacyUserTypeForSlot(summarySlot));
+  }
+  if (selected) {
+    selected.legacyUserFiles = nextFiles;
+    selected.sound = soundForSlot(state.projectSummary, state.projectViewModel, numericSlotId);
+  }
+  hydrateSelectedSlotSounds(state);
+  refreshSoundProjectViewModel(state);
+  markSoundEditorChanged(state);
+}
+
+function legacySoundFileIdsForSlot(...slots) {
+  const fileIds = new Set();
+  for (const slot of slots) {
+    const explicitUserType = slot?.legacyUserType ?? slot?.legacy_user_type;
+    if (explicitUserType !== null && explicitUserType !== undefined && String(explicitUserType).trim() !== "" && boundedNumber(explicitUserType, 0, 255) === 0) {
+      continue;
+    }
+    for (const fileId of legacyUserFilesForSlot(slot)) {
+      if (fileId !== null) {
+        fileIds.add(fileId);
+      }
+    }
+    for (const value of slot?.legacy_file_ids || []) {
+      const fileId = assignedSoundFileId(value);
+      if (fileId !== null) {
+        fileIds.add(fileId);
+      }
+    }
+  }
+  return Array.from(fileIds);
+}
+
+function legacyUserFilesForSlot(...slots) {
+  for (const slot of slots) {
+    const rawFiles = slot?.legacyUserFiles || slot?.legacy_user_files;
+    if (Array.isArray(rawFiles)) {
+      return normalizeLegacyUserFiles(rawFiles);
+    }
+  }
+  for (const slot of slots) {
+    const legacyFileIds = slot?.legacy_file_ids;
+    if (Array.isArray(legacyFileIds) && legacyFileIds.length) {
+      return normalizeLegacyUserFiles(legacyFileIds);
+    }
+  }
+  return [null, null, null];
+}
+
+function normalizeLegacyUserFiles(values) {
+  const normalized = [];
+  for (const value of (values || []).slice(0, 3)) {
+    normalized.push(assignedSoundFileId(value));
+  }
+  while (normalized.length < 3) {
+    normalized.push(null);
+  }
+  return normalized;
+}
+
+function legacyUserTypeForSlot(slot) {
+  const value = slot?.legacyUserType ?? slot?.legacy_user_type;
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return legacySoundFileIdsForSlot(slot).length ? 1 : 0;
+  }
+  return boundedNumber(value, 0, 255);
+}
+
+function legacyUserVolumeForSlot(slot) {
+  const value = slot?.legacyUserVolume ?? slot?.legacy_user_volume;
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return legacyUserTypeForSlot(slot) ? 255 : 0;
+  }
+  return boundedNumber(value, 0, 255);
+}
+
+function selectedSoundFileId(sound) {
+  if (!sound || typeof sound !== "object") {
+    return null;
+  }
+  return assignedSoundFileId(sound.fileId ?? sound.file_id);
 }
 
 function validateWavFileName(file) {
