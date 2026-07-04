@@ -50,6 +50,7 @@ class CvProgrammingService:
     )
     if classification.value is not None:
       return ServiceResult.success(self._cv_read_success_payload(
+        controller,
         context,
         classification,
         cv_number,
@@ -135,13 +136,13 @@ class CvProgrammingService:
         pom_address=pom_address,
       )
 
-  def _cv_read_success_payload(self, context: dict, classification, cv_number: int, request_frame: bytes, pom_address) -> dict:
+  def _cv_read_success_payload(self, controller: dict, context: dict, classification, cv_number: int, request_frame: bytes, pom_address) -> dict:
     support = self.service_support
     value = classification.value
     data = {
       "cv": cv_number,
       "value": value.value,
-      "method": "dxdcnet_programmer_main_track_pom_read" if pom_address is not None else "dxdcnet_programmer_direct_read",
+      "method": self._cv_method_name(controller, "read", pom_address),
       "programming_target": context.get("programming_target", models.PROGRAMMING_TARGET_PROGRAMMING_TRACK),
       "request_hex": support.request_debug(request_frame),
       "response": support.frame_debug(classification.value_frame),
@@ -604,7 +605,7 @@ class CvProgrammingService:
     data = {
       "cv": cv_number,
       "value": value,
-      "method": "dxdcnet_programmer_main_track_pom_write" if pom_address is not None else "dxdcnet_programmer_direct_write",
+      "method": self._cv_method_name(controller, "write", pom_address),
       "programming_target": context.get("programming_target", models.PROGRAMMING_TARGET_PROGRAMMING_TRACK),
       "request_hex": support.request_debug(request_frame),
       "response": support.frame_debug(classification.ack_frame),
@@ -630,6 +631,12 @@ class CvProgrammingService:
       if readback_failure is not None:
         return readback_failure
     return ServiceResult.success(data)
+
+  def _cv_method_name(self, controller: dict | None, action: str, pom_address) -> str:
+    adapter = self.adapter_for(controller or {}) if controller else None
+    prefix = str(getattr(adapter, "cv_method_prefix", "controller_programmer") or "controller_programmer")
+    target = "main_track_pom" if pom_address is not None else "direct"
+    return f"{prefix}_{target}_{action}"
 
   def _verify_cv_write_readback(
     self,

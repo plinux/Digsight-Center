@@ -21,8 +21,9 @@ class TrackPowerService:
         status=409,
         debug={"warnings": ["dc_power_requires_dc_control"]},
       )
-    profiles = controller.get("track_profiles", models.default_track_profiles())
-    profile = profiles.get(track_mode, models.default_track_profiles().get(track_mode, {}))
+    default_profiles = models.default_track_profiles()
+    profiles = controller.get("track_profiles", default_profiles)
+    profile = profiles.get(track_mode, default_profiles.get(track_mode, {}))
     output_value = track_output_value(track_mode, profile, powered)
     direction = "forward"
     if track_mode == models.TRACK_MODE_DC:
@@ -254,14 +255,16 @@ class TrackPowerService:
     controller["controller_unreachable_reason"] = ""
     controller["last_controller_seen_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
     self.service_support.mark_safety_snapshot_fresh(controller, booster_status_fresh=True)
-    voltage = stored_status["output_voltage_v"]
-    current = stored_status["output_current_a"]
+    voltage = stored_status.get("output_voltage_v")
+    current = stored_status.get("output_current_a")
+    temperature = stored_status.get("temperature_c")
+    track_power_w = round(voltage * current, 3) if voltage is not None and current is not None else None
     controller["telemetry"] = {
       **controller.get("telemetry", {}),
-      "temperature_c": stored_status["temperature_c"],
+      "temperature_c": temperature,
       "track_voltage_v": voltage,
       "track_current_a": current,
-      "track_power_w": round(voltage * current, 3),
+      "track_power_w": track_power_w,
     }
     return stored_status
 
@@ -274,11 +277,11 @@ def validate_dc_direction(value) -> str:
 
 
 def validate_dc_voltage(controller: dict, value) -> float:
-  profiles = controller.get("track_profiles", models.default_track_profiles())
-  profile = profiles.get(models.TRACK_MODE_DC, models.default_track_profiles()[models.TRACK_MODE_DC])
-  max_voltage = float(
-    profile.get("max_target_voltage_v") or models.default_track_profiles()[models.TRACK_MODE_DC]["max_target_voltage_v"]
-  )
+  default_profiles = models.default_track_profiles()
+  default_dc_profile = default_profiles[models.TRACK_MODE_DC]
+  profiles = controller.get("track_profiles", default_profiles)
+  profile = profiles.get(models.TRACK_MODE_DC, default_dc_profile)
+  max_voltage = float(profile.get("max_target_voltage_v") or default_dc_profile["max_target_voltage_v"])
   voltage = float(value)
   if voltage < 0 or voltage > max_voltage:
     raise ValueError(f"DC voltage must be 0..{max_voltage} V")
@@ -293,8 +296,7 @@ def track_output_value(track_mode: str, profile: dict, powered: bool) -> int:
   if not powered:
     return 0
   if track_mode == models.TRACK_MODE_DC:
-    voltage = float(
-      profile.get("target_voltage_v") or models.default_track_profiles()[models.TRACK_MODE_DC]["target_voltage_v"]
-    )
+    default_dc_profile = models.default_track_profiles()[models.TRACK_MODE_DC]
+    voltage = float(profile.get("target_voltage_v") or default_dc_profile["target_voltage_v"])
     return dc_output_value(voltage)
   return max(0, min(255, int(profile.get("output_value", 0))))

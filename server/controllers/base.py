@@ -20,6 +20,9 @@ class ControllerCapabilities:
   cv_programming: bool
   loco_control: bool
   controller_settings: bool
+  railcom_settings: bool = False
+  profile_settings_on_track_mode: bool = False
+  sound_editor: bool = False
 
   def to_dict(self) -> dict:
     return {
@@ -29,6 +32,9 @@ class ControllerCapabilities:
       "cv_programming": self.cv_programming,
       "loco_control": self.loco_control,
       "controller_settings": self.controller_settings,
+      "railcom_settings": self.railcom_settings,
+      "profile_settings_on_track_mode": self.profile_settings_on_track_mode,
+      "sound_editor": self.sound_editor,
     }
 
 
@@ -159,6 +165,8 @@ class LocoSpeedRequest:
   speed: int
   direction: str
   client_id: int
+  control_protocol: str = "dcc"
+  speed_steps: int = 128
 
 
 @dataclass(frozen=True)
@@ -167,12 +175,16 @@ class LocoFunctionRequest:
   function_states: dict
   function_number: int
   client_id: int
+  control_protocol: str = "dcc"
+  speed_steps: int = 128
 
 
 @dataclass(frozen=True)
 class LocoControlGrantRequest:
   address: int
   client_id: int
+  control_protocol: str = "dcc"
+  speed_steps: int = 128
 
 
 @dataclass

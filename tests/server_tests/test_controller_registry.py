@@ -104,6 +104,7 @@ class ControllerRegistryTest(unittest.TestCase):
       "display_name": "Fake Controller",
       "protocol": "FakeProtocol",
       "default_ip": "",
+      "configured_ip": "",
       "config_file_name": "Fake_Controller_Config.json",
       "config_file": "config/controllers/Fake_Controller_Config.json",
       "config_public_path": "/config/controllers/Fake_Controller_Config.json",
@@ -114,6 +115,9 @@ class ControllerRegistryTest(unittest.TestCase):
         "cv_programming": False,
         "loco_control": False,
         "controller_settings": False,
+        "railcom_settings": False,
+        "profile_settings_on_track_mode": False,
+        "sound_editor": False,
       },
       "transport_descriptor": {
         "kind": "udp",

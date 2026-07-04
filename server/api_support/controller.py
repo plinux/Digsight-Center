@@ -9,6 +9,7 @@ from server import models, response
 from server.app_state import AppStateStore, default_state
 from server.api_support import http_helpers
 from server.controller_probe import probe_ip, probe_ip_with_runner
+from server.controller_safety import invalidate_controller_safety
 from server.controllers.base import (
   ControllerInfoReadRequest,
   ControllerOperationNotSupported,
@@ -145,6 +146,7 @@ class ControllerApiSupport:
     cv_safety = self.cached_cv_safety(controller)
     controller_reachable = bool(controller.get("controller_reachable", False))
     short_circuit = bool(booster_status.get("short_circuit") or booster_status.get("current_alarm"))
+    default_config = self._controller_default_config(adapter.kind)
     return {
       "ip": controller.get("ip"),
       "controller_kind": adapter.kind,
@@ -167,13 +169,38 @@ class ControllerApiSupport:
       "safety_snapshot": controller.get("safety_snapshot", {}),
       "telemetry": controller.get("telemetry", {}),
       "device_info": controller.get("device_info", {}),
+      "info_sections": copy.deepcopy(getattr(adapter, "info_sections", [])),
+      "settings": copy.deepcopy(controller.get("settings", {})),
+      "default_settings": copy.deepcopy(default_config.get("settings", {})),
+      "track_output_setting_specs": copy.deepcopy(getattr(adapter, "track_output_setting_specs", [])),
+      "railcom_setting": self._railcom_setting_payload(adapter, controller),
       "track_profiles": controller.get("track_profiles", models.default_track_profiles()),
+      "default_track_profiles": copy.deepcopy(default_config.get("track_profiles", models.default_track_profiles())),
+      "default_track_output_settings": self._default_track_output_settings(adapter, default_config),
       "safe_for_cv": cv_safety["safe_for_cv"],
       "programming_track_status": cv_safety["programming_track_status"],
       "cv_safety_warnings": cv_safety["warnings"],
       "read_capability": {
         "ready": not readiness_warnings,
         "warnings": readiness_warnings,
+      },
+    }
+
+  def _controller_default_config(self, controller_kind: str) -> dict:
+    if self.context.state_store and hasattr(self.context.state_store, "controller_default_config_for_kind"):
+      return self.context.state_store.controller_default_config_for_kind(controller_kind)
+    return AppStateStore.default_controller_config(self.context.controller_registry, controller_kind)
+
+  @staticmethod
+  def _default_track_output_settings(adapter, default_config: dict) -> dict:
+    default_settings = default_config.get("settings") if isinstance(default_config.get("settings"), dict) else {}
+    setting_keys = tuple(getattr(adapter, "track_output_setting_keys", ()))
+    return {
+      "track_profiles": copy.deepcopy(default_config.get("track_profiles", models.default_track_profiles())),
+      "settings": {
+        key: copy.deepcopy(default_settings[key])
+        for key in setting_keys
+        if key in default_settings
       },
     }
 
@@ -229,11 +256,14 @@ class ControllerApiSupport:
     except ValueError as exc:
       return response.failure("invalid_controller_settings", "控制器参数无效", str(exc)), 400
     device_results = []
-    if parsed["apply_to_device"] and parsed["requested_profile_modes"]:
+    requested_device_changes = parsed["requested_profile_modes"] or parsed["requested_setting_keys"]
+    if parsed["apply_to_device"] and requested_device_changes:
       device_results, error_response = self._apply_controller_settings_to_device(
         candidate_controller,
         parsed["next_profiles"],
         parsed["requested_profile_modes"],
+        parsed["next_settings"],
+        parsed["requested_setting_keys"],
       )
       if error_response:
         return error_response
@@ -251,15 +281,39 @@ class ControllerApiSupport:
     except (TypeError, ValueError) as exc:
       return response.failure("invalid_controller_track_mode", "轨道模式无效", str(exc)), 400
     candidate_controller = copy.deepcopy(state["controller"])
+    profile = candidate_controller.get("track_profiles", {}).get(next_track_mode)
+    if isinstance(profile, dict) and profile.get("enabled") is False:
+      return response.failure(
+        "unsupported_controller_track_mode",
+        "当前控制器不支持该模式",
+        f"{next_track_mode} is disabled by current controller profile",
+      ), 400
     previous_track_mode = candidate_controller.get("track_mode", models.TRACK_MODE_N)
     if next_track_mode != previous_track_mode:
       self.context.invalidate_controller_runtime_safety(candidate_controller, reason="track_mode_changed")
     candidate_controller["track_mode"] = next_track_mode
+    device_results = []
+    adapter = self.controller_adapter(candidate_controller)
+    if (
+      next_track_mode != previous_track_mode
+      and getattr(adapter.capabilities, "profile_settings_on_track_mode", False)
+    ):
+      device_results, error_response = self._apply_controller_settings_to_device(
+        candidate_controller,
+        candidate_controller.get("track_profiles", {}),
+        {next_track_mode},
+        candidate_controller.get("settings", {}),
+        set(),
+      )
+      if error_response:
+        return error_response
     state["controller"] = candidate_controller
     self.context.save(state)
     return response.success({
+      "applied_to_device": bool(device_results),
+      "device_results": device_results,
       "track_mode": next_track_mode,
-      "warnings": ["saved_locally_only"],
+      "warnings": [] if device_results else ["saved_locally_only"],
     }), 200
 
   def track_power(self, body: bytes, state: dict):
@@ -366,6 +420,10 @@ class ControllerApiSupport:
       )
     except ControllerProtocolNotSupported as exc:
       return http_helpers.service_result(self.controller_service.protocol_not_supported_response(exc))
+    except TimeoutError as exc:
+      return self._controller_read_info_failure(state, exc, status=504)
+    except (OSError, ValueError) as exc:
+      return self._controller_read_info_failure(state, exc, status=502)
     parsed = adapter.parse_controller_info(controller, read_request, read_info_result)
     controller["last_read_info_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
     self.context.save(state)
@@ -380,6 +438,20 @@ class ControllerApiSupport:
         "requests": read_info_result.requests,
       },
     ), 200
+
+  def _controller_read_info_failure(self, state: dict, exc: Exception, *, status: int):
+    controller = state["controller"]
+    invalidate_controller_safety(controller, reason="controller_read_info_failed")
+    self.context.save(state)
+    return response.failure(
+      "controller_read_info_failed",
+      "读取控制器信息失败",
+      str(exc),
+      {
+        "controller_kind": controller.get("kind"),
+        "exception_type": type(exc).__name__,
+      },
+    ), status
 
   def fresh_booster_status_failure(self, controller: dict):
     if self.context.default_safety_snapshot(controller)["booster_status_fresh"]:
@@ -433,6 +505,7 @@ class ControllerApiSupport:
       transport_settings = self._parse_transport_settings(request, controller, next_adapter, kind_changed)
       mode_settings = self._parse_controller_mode_settings(request, controller)
       profile_settings = self._parse_track_profile_settings(request, controller)
+      private_settings = self._parse_controller_private_settings(request, controller, next_adapter)
       apply_to_device = http_helpers.optional_json_bool(request, "apply_to_device")
     except (TypeError, ValueError) as exc:
       return None, (response.failure("invalid_controller_settings", "控制器参数无效", str(exc)), 400)
@@ -444,6 +517,7 @@ class ControllerApiSupport:
       **transport_settings,
       **mode_settings,
       **profile_settings,
+      **private_settings,
     }, None
 
   def _next_controller_kind_and_adapter(self, request: dict, previous_kind: str):
@@ -507,11 +581,59 @@ class ControllerApiSupport:
     for mode, profile in request.get("track_profiles", {}).items():
       normalized_mode = models.validate_profile_mode(mode)
       requested_profile_modes.add(normalized_mode)
-      next_profiles[normalized_mode] = models.validate_track_profile(normalized_mode, profile)
+      profile_defaults = next_profiles.get(normalized_mode) or current_profiles.get(normalized_mode) or {}
+      next_profiles[normalized_mode] = models.validate_track_profile(normalized_mode, profile, defaults=profile_defaults)
     return {
       "requested_profile_modes": requested_profile_modes,
       "next_profiles": next_profiles,
     }
+
+  def _parse_controller_private_settings(self, request: dict, controller: dict, adapter) -> dict:
+    requested_setting_keys = set()
+    current_settings = controller.get("settings") if isinstance(controller.get("settings"), dict) else {}
+    next_settings = self._default_controller_settings_for_adapter(adapter)
+    next_settings.update(self._controller_settings_supported_by_adapter(current_settings, adapter))
+    if "settings" in request:
+      if not isinstance(request["settings"], dict):
+        raise ValueError("settings must be an object")
+      for key, value in request["settings"].items():
+        if key == "railcom_enabled":
+          if not isinstance(value, bool):
+            raise ValueError("settings.railcom_enabled must be true or false")
+          normalized_value = value
+        else:
+          normalize_setting = getattr(adapter, "normalize_controller_private_setting", None)
+          if not callable(normalize_setting):
+            raise ValueError(f"unsupported controller setting: {key}")
+          normalized_value = normalize_setting(key, value)
+        requested_setting_keys.add(key)
+        next_settings[key] = normalized_value
+    return {
+      "requested_setting_keys": requested_setting_keys,
+      "next_settings": next_settings,
+    }
+
+  @classmethod
+  def _controller_settings_supported_by_adapter(cls, settings: dict, adapter) -> dict:
+    allowed_keys = cls._controller_setting_keys_supported_by_adapter(adapter)
+    return {
+      key: copy.deepcopy(value)
+      for key, value in (settings or {}).items()
+      if key in allowed_keys
+    }
+
+  @staticmethod
+  def _default_controller_settings_for_adapter(adapter) -> dict:
+    return copy.deepcopy(getattr(adapter, "default_settings", {}) or {})
+
+  @staticmethod
+  def _controller_setting_keys_supported_by_adapter(adapter) -> set[str]:
+    allowed_keys = set(getattr(adapter, "default_settings", {}) or {})
+    allowed_keys.update(getattr(adapter, "track_output_setting_keys", ()) or ())
+    allowed_keys.update(getattr(adapter, "device_private_setting_keys", ()) or ())
+    if getattr(adapter.capabilities, "railcom_settings", False):
+      allowed_keys.add("railcom_enabled")
+    return allowed_keys
 
   def _build_controller_settings_candidate(self, controller: dict, parsed: dict) -> dict:
     kind_changed = parsed["next_kind"] != parsed["previous_kind"]
@@ -532,6 +654,16 @@ class ControllerApiSupport:
     apply_controller_transport_runtime(parsed["next_adapter"], candidate_controller)
     candidate_controller["track_mode"] = parsed["next_track_mode"]
     candidate_controller["programming_target"] = parsed["next_programming_target"]
+    candidate_settings = (
+      self._controller_settings_supported_by_adapter(
+        candidate_controller.get("settings") if isinstance(candidate_controller.get("settings"), dict) else {},
+        parsed["next_adapter"],
+      )
+      if kind_changed
+      else {}
+    )
+    candidate_settings.update(parsed["next_settings"])
+    candidate_controller["settings"] = candidate_settings
     if not kind_changed:
       if controller_transport_identity(candidate_controller) != controller_transport_identity(controller):
         self.context.invalidate_controller_runtime_safety(candidate_controller, reason="controller_transport_changed")
@@ -564,12 +696,32 @@ class ControllerApiSupport:
     candidate_controller = copy.deepcopy(default_state(target_registry)["controller"])
     candidate_controller.update(copy.deepcopy(target_config))
     candidate_controller["kind"] = kind
+    candidate_settings = self._default_controller_settings_for_adapter(target_registry.get(kind))
+    candidate_settings.update(self._controller_settings_supported_by_adapter(
+      candidate_controller.get("settings") if isinstance(candidate_controller.get("settings"), dict) else {},
+      target_registry.get(kind),
+    ))
+    candidate_controller["settings"] = candidate_settings
     return candidate_controller
 
-  def _apply_controller_settings_to_device(self, candidate_controller: dict, next_profiles: dict, requested_profile_modes: set):
-    unsupported = self.controller_capability_failure(candidate_controller, "controller_settings", "controller_settings")
-    if unsupported:
-      return [], unsupported
+  def _apply_controller_settings_to_device(
+    self,
+    candidate_controller: dict,
+    next_profiles: dict,
+    requested_profile_modes: set,
+    next_settings: dict,
+    requested_setting_keys: set,
+  ):
+    adapter = self.controller_adapter(candidate_controller)
+    device_setting_keys = self._device_controller_setting_keys(adapter, requested_setting_keys)
+    if requested_profile_modes:
+      unsupported = self.controller_capability_failure(candidate_controller, "controller_settings", "controller_settings")
+      if unsupported:
+        return [], unsupported
+    if device_setting_keys and not getattr(adapter.capabilities, "railcom_settings", False):
+      return [], http_helpers.service_result(self.controller_service.operation_not_supported_response(
+        ControllerOperationNotSupported("controller_private_settings", candidate_controller.get("kind", ""))
+      ))
     readiness_warnings = self.controller_service.controller_readiness_warnings(candidate_controller)
     if readiness_warnings:
       adapter = self.controller_adapter(candidate_controller)
@@ -580,11 +732,10 @@ class ControllerApiSupport:
         {"warnings": readiness_warnings},
       ), 409)
     try:
-      return self._apply_track_profile_parameters_to_controller(
-        candidate_controller,
-        next_profiles,
-        sorted(requested_profile_modes),
-      ), None
+      return [
+        *self._apply_track_profile_parameters_if_requested(candidate_controller, next_profiles, requested_profile_modes),
+        *self._apply_controller_private_settings_if_requested(candidate_controller, next_settings, device_setting_keys),
+      ], None
     except ControllerOperationNotSupported as exc:
       return [], (response.failure(
         "controller_settings_not_supported",
@@ -602,6 +753,11 @@ class ControllerApiSupport:
         exc.debug,
       ), 502)
 
+  @staticmethod
+  def _device_controller_setting_keys(adapter, requested_setting_keys: set) -> set:
+    device_setting_keys = {"railcom_enabled", *set(getattr(adapter, "device_private_setting_keys", ()))}
+    return set(requested_setting_keys) & device_setting_keys
+
   def _controller_settings_response_payload(self, candidate_controller: dict, parsed: dict, device_results: list) -> dict:
     warnings = [] if device_results else ["saved_locally_only"]
     return {
@@ -612,9 +768,30 @@ class ControllerApiSupport:
       "transport": copy.deepcopy(candidate_controller["transport"]),
       "track_mode": parsed["next_track_mode"],
       "programming_target": parsed["next_programming_target"],
+      "settings": copy.deepcopy(candidate_controller.get("settings", {})),
       "track_profiles": parsed["next_profiles"],
       "warnings": warnings,
     }
+
+  def _apply_track_profile_parameters_if_requested(self, controller: dict, profiles: dict, modes: set) -> list[dict]:
+    if not modes:
+      return []
+    return self._apply_track_profile_parameters_to_controller(controller, profiles, sorted(modes))
+
+  def _apply_controller_private_settings_if_requested(self, controller: dict, settings: dict, keys: set) -> list[dict]:
+    if not keys:
+      return []
+    adapter = self.controller_adapter(controller)
+    apply_private_settings = getattr(adapter, "apply_controller_private_settings", None)
+    if not callable(apply_private_settings):
+      raise ControllerOperationNotSupported("controller_private_settings", controller.get("kind", ""))
+    return apply_private_settings(
+      self.controller_service.controller_session_for_adapter(adapter, controller),
+      controller,
+      settings,
+      sorted(keys),
+      transport=self.context.controller_transport,
+    )
 
   def _apply_track_profile_parameters_to_controller(self, controller: dict, profiles: dict, modes: list[str]) -> list[dict]:
     adapter = self.controller_adapter(controller)
@@ -625,6 +802,74 @@ class ControllerApiSupport:
       modes,
       transport=self.context.controller_transport,
     )
+
+  def _railcom_setting_payload(self, adapter, controller: dict) -> dict:
+    settings = controller.get("settings") if isinstance(controller.get("settings"), dict) else {}
+    device_info = controller.get("device_info") if isinstance(controller.get("device_info"), dict) else {}
+    current_value, source = self._railcom_value_from_controller(settings, device_info)
+    railcomplus_value, railcomplus_source = self._railcomplus_value_from_controller(settings, device_info)
+    available = self._railcom_setting_available(adapter, controller, current_value)
+    writable = bool(available and getattr(adapter.capabilities, "railcom_settings", False))
+    payload = {
+      "available": available,
+      "writable": writable,
+      "enabled": current_value,
+      "source": source,
+      "message": "" if writable else self._railcom_unwritable_message(adapter),
+    }
+    if self._railcomplus_setting_available(adapter, controller, railcomplus_value):
+      payload["railcomplus"] = {
+        "available": True,
+        "writable": writable and controller_protocol(adapter, controller) == models.CONTROLLER_PROTOCOL_ECOS,
+        "enabled": railcomplus_value,
+        "source": railcomplus_source,
+        "message": "" if writable else self._railcom_unwritable_message(adapter),
+      }
+    return payload
+
+  @staticmethod
+  def _railcom_value_from_controller(settings: dict, device_info: dict) -> tuple[bool | None, str]:
+    if device_info.get("railcom_enabled") is not None:
+      return bool(device_info["railcom_enabled"]), "device_info"
+    if "railcom" in device_info:
+      return _optional_bool_from_device_value(device_info.get("railcom")), "device_info"
+    if "railcom_enabled" in settings:
+      return bool(settings["railcom_enabled"]), "settings"
+    return None, ""
+
+  @staticmethod
+  def _railcomplus_value_from_controller(settings: dict, device_info: dict) -> tuple[bool | None, str]:
+    if device_info.get("railcomplus_enabled") is not None:
+      return bool(device_info["railcomplus_enabled"]), "device_info"
+    if "railcomplus" in device_info:
+      return _optional_bool_from_device_value(device_info.get("railcomplus")), "device_info"
+    if "railcomplus_enabled" in settings:
+      return bool(settings["railcomplus_enabled"]), "settings"
+    return None, ""
+
+  @staticmethod
+  def _railcom_setting_available(adapter, controller: dict, current_value) -> bool:
+    if getattr(adapter.capabilities, "railcom_settings", False):
+      return True
+    protocol = controller_protocol(adapter, controller)
+    return protocol in {
+      models.CONTROLLER_PROTOCOL_DXDCNET,
+      models.CONTROLLER_PROTOCOL_ECOS,
+      models.CONTROLLER_PROTOCOL_Z21_LAN,
+    } or current_value is not None
+
+  @staticmethod
+  def _railcomplus_setting_available(adapter, controller: dict, current_value) -> bool:
+    return controller_protocol(adapter, controller) == models.CONTROLLER_PROTOCOL_ECOS
+
+  @staticmethod
+  def _railcom_unwritable_message(adapter) -> str:
+    protocol = str(getattr(adapter, "protocol", "") or "")
+    if protocol == models.CONTROLLER_PROTOCOL_Z21_LAN:
+      return "当前 Z21 控制器配置未开放 RailCom 写入。"
+    if protocol == models.CONTROLLER_PROTOCOL_ECOS:
+      return "当前 ECoS 控制器配置未开放 RailCom 写入。"
+    return "当前控制器适配器尚未实现 RailCom 写入。"
 
 
 def controller_transport_identity(
@@ -644,3 +889,19 @@ def validate_controller_ip(ip_value) -> str:
   if address.version != 4:
     raise ValueError("controller IP must be IPv4")
   return str(address)
+
+
+def _optional_bool_from_device_value(value):
+  if isinstance(value, bool):
+    return value
+  if value is None or value == "":
+    return None
+  try:
+    return bool(int(value))
+  except (TypeError, ValueError):
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "on", "enabled", "开启"}:
+      return True
+    if normalized in {"false", "off", "disabled", "关闭"}:
+      return False
+    return None

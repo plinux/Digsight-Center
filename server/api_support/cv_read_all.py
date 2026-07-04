@@ -123,7 +123,7 @@ class CvReadAllApiSupport:
       controller,
       cv_number,
       client_id,
-      timeout_seconds=float(controller.get("cv_read_all_timeout_seconds", 1.0)),
+      timeout_seconds=float(controller.get("cv_read_all_timeout_seconds", controller.get("cv_timeout_seconds", 10.0))),
       max_packets=8,
       cv_context=cv_context,
     )

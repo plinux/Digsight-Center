@@ -323,6 +323,11 @@ class AppStateStore:
     config, _error = self.controller_config_for_kind_with_error(controller_kind)
     return config
 
+  def controller_default_config_for_kind(self, controller_kind: str) -> Dict[str, Any]:
+    with self._save_lock:
+      kind = self._registered_controller_kind_or_default(controller_kind)
+      return self._controller_default_config(kind)
+
   def controller_config_for_kind_with_error(self, controller_kind: str) -> tuple[Dict[str, Any], Dict[str, Any] | None]:
     with self._save_lock:
       kind = self._registered_controller_kind_or_default(controller_kind)
@@ -447,11 +452,20 @@ class AppStateStore:
     for mode, profile in controller.get("track_profiles", {}).items():
       if mode in track_profiles:
         profile_defaults = track_profile_defaults[mode]
-        track_profiles[mode] = models.validate_track_profile(mode, profile)
-        track_profiles[mode]["output_value"] = profile_defaults["output_value"]
-        track_profiles[mode]["current_param"] = profile_defaults["current_param"]
-        track_profiles[mode]["max_target_voltage_v"] = profile_defaults["max_target_voltage_v"]
-        track_profiles[mode]["max_target_current_limit_ma"] = profile_defaults["max_target_current_limit_ma"]
+        track_profiles[mode] = models.validate_track_profile(mode, profile, defaults=profile_defaults)
+        for fixed_key in (
+          "output_value",
+          "current_param",
+          "min_target_voltage_v",
+          "max_target_voltage_v",
+          "max_target_current_limit_ma",
+        ):
+          if fixed_key in profile_defaults:
+            track_profiles[mode][fixed_key] = profile_defaults[fixed_key]
+          else:
+            track_profiles[mode].pop(fixed_key, None)
+        for key, value in profile_defaults.items():
+          track_profiles[mode].setdefault(key, value)
     return track_profiles
 
   def _normalize_controller_transport(self, controller: Dict[str, Any]) -> list[str]:
@@ -473,6 +487,11 @@ class AppStateStore:
     )
     controller["track_mode"] = track_mode
     controller["programming_target"] = programming_target
+    enabled_track_mode = self._first_enabled_track_mode(controller["track_profiles"], fallback=models.TRACK_MODE_N)
+    selected_profile = controller["track_profiles"].get(track_mode)
+    if isinstance(selected_profile, dict) and selected_profile.get("enabled") is False:
+      controller["track_mode"] = enabled_track_mode
+      invalid_runtime_fields.append("track_mode")
     if track_mode_invalid:
       invalid_runtime_fields.append("track_mode")
     if programming_target_invalid:
@@ -480,14 +499,22 @@ class AppStateStore:
     apply_controller_transport_runtime(adapter, controller)
     return invalid_runtime_fields
 
+  @staticmethod
+  def _first_enabled_track_mode(track_profiles: Dict[str, Any], *, fallback: str) -> str:
+    for mode in (models.TRACK_MODE_N, models.TRACK_MODE_HO, models.TRACK_MODE_G, models.TRACK_MODE_DC):
+      profile = track_profiles.get(mode)
+      if not isinstance(profile, dict) or profile.get("enabled") is not False:
+        return mode
+    return fallback
+
   def _with_defaults(self, state: Dict[str, Any], *, allow_state_controller_config: bool = False) -> Dict[str, Any]:
     defaults = default_state(self.controller_registry)
     controller_defaults = defaults["controller"]
-    track_profile_defaults = controller_defaults["track_profiles"]
     merged = dict(defaults)
     merged.update(state)
     state_controller = self._state_controller_dict(state)
     controller_kind = self._controller_kind_for_config(state_controller, controller_defaults)
+    track_profile_defaults = self._controller_default_config(controller_kind).get("track_profiles", controller_defaults["track_profiles"])
     controller, controller_config_error = self._controller_with_config(
       controller_kind,
       controller_defaults,

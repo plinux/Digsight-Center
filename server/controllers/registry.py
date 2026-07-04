@@ -64,12 +64,14 @@ class ControllerRegistry:
     protocol = controller_protocol(adapter, config)
     config_file_name = validate_descriptor_file_name(adapter.config_file_name, "controller config_file_name")
     transport_descriptor = adapter.transport_descriptor.to_dict()
+    configured_ip = str((config or {}).get("ip") or getattr(adapter, "default_ip", ""))
     return {
       "kind": adapter.kind,
       "label": display_name,
       "display_name": display_name,
       "protocol": protocol,
       "default_ip": getattr(adapter, "default_ip", ""),
+      "configured_ip": configured_ip,
       "config_file_name": config_file_name,
       "config_file": f"{CONTROLLER_CONFIG_RELATIVE_PREFIX}{config_file_name}",
       "config_public_path": f"{CONTROLLER_CONFIG_PUBLIC_PREFIX}{config_file_name}",

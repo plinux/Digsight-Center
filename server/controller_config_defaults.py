@@ -1,5 +1,6 @@
 """Controller configuration defaults shared by runtime state and SQLite seeds."""
 
+import copy
 from typing import Any, Dict
 
 from server import models
@@ -34,8 +35,10 @@ CONTROLLER_CONFIG_COMMON_FIELD_DESCRIPTIONS = {
   "transport.kind": "传输类型；具体字段由当前控制器 adapter 解释。",
   "track_profiles.<mode>.mode": "轨道输出模式标识，取 n、ho、g 或 dc。",
   "track_profiles.<mode>.name": "轨道输出模式显示名称。",
+  "track_profiles.<mode>.enabled": "该模式是否可在当前控制器上选择；不支持的模式会在页面上禁用，并由后端拒绝切换。",
   "track_profiles.<mode>.output_value": "下发给控制器的轨道输出值；具体含义由当前控制器 adapter 定义，不是实时电压读数。",
   "track_profiles.<mode>.target_voltage_v": "该模式的目标/配置电压，供界面和 DC 输出换算使用；不是控制器实时回报电压。",
+  "track_profiles.<mode>.min_target_voltage_v": "该模式允许配置的目标电压下限。",
   "track_profiles.<mode>.max_target_voltage_v": "该模式允许配置的目标电压上限。",
   "track_profiles.<mode>.current_param": "该模式的限流参数标识；具体取值由当前控制器 adapter 定义。",
   "track_profiles.<mode>.target_current_limit_ma": "该模式的目标/配置限流值，保存后可写入控制器；不是实时电流读数。",
@@ -46,6 +49,27 @@ CONTROLLER_CONFIG_COMMON_FIELD_DESCRIPTIONS = {
 def controller_field_descriptions(adapter=None) -> Dict[str, str]:
   descriptions = dict(CONTROLLER_CONFIG_COMMON_FIELD_DESCRIPTIONS)
   descriptions.update(getattr(adapter, "field_descriptions", {}) or {})
+  profile_defaults = getattr(adapter, "default_track_profiles", None)
+  if isinstance(profile_defaults, dict):
+    profile_keys = {
+      key
+      for profile in profile_defaults.values()
+      if isinstance(profile, dict)
+      for key in profile
+    }
+    for profile_key in (
+      "output_value",
+      "current_param",
+      "target_voltage_v",
+      "min_target_voltage_v",
+      "max_target_voltage_v",
+      "min_target_current_limit_ma",
+      "target_current_limit_ma",
+      "max_target_current_limit_ma",
+      "current_step_ma",
+    ):
+      if profile_key not in profile_keys:
+        descriptions.pop(f"track_profiles.<mode>.{profile_key}", None)
   return descriptions
 
 
@@ -67,9 +91,9 @@ def controller_default_config(controller_registry, controller_kind: str) -> Dict
     "field_descriptions": controller_field_descriptions(adapter),
     "ip": default_ip,
     "protocol": protocol,
-    "settings": {},
+    "settings": copy.deepcopy(getattr(adapter, "default_settings", {}) or {}),
     "transport": transport_descriptor.default_config(),
-    "track_profiles": models.default_track_profiles(),
+    "track_profiles": getattr(adapter, "default_track_profiles", None) or models.default_track_profiles(),
   }
 
 

@@ -61,6 +61,7 @@ from server.controllers.base import (
   ControllerFrameList,
   ControllerInfoReadRequest,
   ControllerInfoReadResult,
+  ControllerOperationNotSupported,
   ControllerParameterWriteError,
   ControllerTransportDescriptor,
   CvCommandRequest,
@@ -72,6 +73,11 @@ from server.controllers.base import (
   LocoSpeedRequest,
   TrackOutputRequest,
   TrackOutputResult,
+)
+from server.controllers.common import (
+  INFO_SECTION_DEVICE,
+  INFO_SECTION_WORK,
+  controller_info_sections,
 )
 from server.controllers.dxdcnet_constants import (
   CURRENT_LIMIT_PARAM_TO_MODE,
@@ -88,12 +94,14 @@ class DigsightDXDCNetControllerAdapter:
   label = "动芯 拾Pro"
   default_display_name = "动芯 拾Pro"
   protocol = models.CONTROLLER_PROTOCOL_DXDCNET
+  cv_method_prefix = "dxdcnet_programmer"
   supported_protocols = (models.CONTROLLER_PROTOCOL_DXDCNET,)
   config_file_name = "Digsight_D9000.json"
   default_ip = models.CONTROLLER_DEFAULT_IP
   runtime_transport_fields = ("udp_port", "local_udp_port", "udp_checksum_algorithm")
   field_descriptions = {
     "protocol": "该控制器使用的通讯协议名称；动芯拾Pro当前使用 DXDCNet。",
+    "settings.railcom_enabled": "RailCom 开关；动芯 D9000 参数 0x03 使用 0x80 表示开、0x00 表示关。",
     "transport.kind": "传输类型；动芯拾Pro的 DXDCNet 协议当前使用 udp。",
     "transport.udp_port": "控制器远端 UDP 端口；动芯拾Pro当前默认使用 12000。",
     "transport.local_udp_port": "本机绑定的 UDP 端口；动芯拾Pro真实硬件通讯当前使用 6667。",
@@ -107,6 +115,8 @@ class DigsightDXDCNetControllerAdapter:
     cv_programming=True,
     loco_control=True,
     controller_settings=True,
+    railcom_settings=True,
+    sound_editor=True,
   )
   transport_descriptor = ControllerTransportDescriptor(
     kind="udp",
@@ -119,6 +129,40 @@ class DigsightDXDCNetControllerAdapter:
     metadata={
       "checksum_algorithms": (models.DXDCNET_DEFAULT_CHECKSUM_ALGORITHM,),
       "allow_zero_local_udp_port": False,
+    },
+  )
+  info_sections = controller_info_sections(
+    {
+      "title": INFO_SECTION_DEVICE,
+      "rows": [
+        {"label": "设备名称", "path": "device_info.device_name"},
+        {"label": "出厂编号", "path": "device_info.factory_number"},
+        {"label": "MAC", "path": "device_info.mac_address", "format": "mac"},
+        {"label": "内核版本", "path": "device_info.core_version"},
+        {"label": "无线版本", "path": "device_info.wireless_version"},
+        {"label": "RAILCOM", "path": "device_info.railcom_enabled", "format": "boolean"},
+        {"label": "屏幕亮度", "path": "device_info.screen_brightness"},
+        {
+          "label": "屏幕方向",
+          "path": "device_info.screen_direction_raw",
+          "format": "screen_direction",
+          "label_path": "device_info.screen_direction_label",
+        },
+        {"label": "硬件版本", "path": "device_info.hardware_version"},
+        {"label": "软件版本", "path": "device_info.software_version"},
+        {"label": "固件版本", "path": "device_info.firmware_version"},
+      ],
+    },
+    {
+      "title": INFO_SECTION_WORK,
+      "rows": [
+        {"label": "轨道电源", "path": "booster_status.power_on", "format": "power_state"},
+        {"label": "短路状态", "path": "booster_status.short_circuit", "format": "short_circuit_state"},
+        {"label": "温度", "path": "telemetry.temperature_c", "unit": "℃"},
+        {"label": "电压", "path": "telemetry.track_voltage_v", "unit": "V"},
+        {"label": "电流", "path": "telemetry.track_current_a", "unit": "A"},
+        {"label": "功率", "path": "telemetry.track_power_w", "unit": "W"},
+      ],
     },
   )
 
@@ -485,6 +529,7 @@ class DigsightDXDCNetControllerAdapter:
     *,
     transport=None,
   ) -> LocoControlGrantResult:
+    self._ensure_dcc_128_loco_request(request)
     request_frame = build_loco_control_request_frame(address=request.address, client_id=request.client_id)
     frames = self._request_loco_control_frames(
       session_manager,
@@ -516,6 +561,7 @@ class DigsightDXDCNetControllerAdapter:
     *,
     transport=None,
   ) -> LocoCommandResult:
+    self._ensure_dcc_128_loco_request(request)
     request_frames, extra = self._build_loco_speed_frames(request)
     feedback, collected_frames = self._send_loco_feedback_frames(
       session_manager,
@@ -542,6 +588,7 @@ class DigsightDXDCNetControllerAdapter:
     *,
     transport=None,
   ) -> LocoCommandResult:
+    self._ensure_dcc_128_loco_request(request)
     request_frames, extra = self._build_loco_function_frames(request)
     feedback, collected_frames = self._send_loco_feedback_frames(
       session_manager,
@@ -630,6 +677,12 @@ class DigsightDXDCNetControllerAdapter:
       client_id=request.client_id,
       function_number=request.function_number,
     ), {}
+
+  def _ensure_dcc_128_loco_request(self, request) -> None:
+    protocol = models.validate_control_protocol(request.control_protocol)
+    steps = models.validate_speed_steps(protocol, request.speed_steps)
+    if protocol != models.CONTROL_PROTOCOL_DCC or steps != models.DEFAULT_SPEED_STEPS:
+      raise ControllerOperationNotSupported(f"loco_protocol_{protocol}_{steps}", self.kind)
 
   def _build_loco_control_ack_matcher(self, address: int):
     def matches(raw: bytes) -> bool:
@@ -750,6 +803,80 @@ class DigsightDXDCNetControllerAdapter:
         "read_request_hex": read_frame.hex(" "),
       })
     return results
+
+  def apply_controller_private_settings(self, session_manager, controller: dict, settings: dict, keys: list[str], *, transport=None) -> list[dict]:
+    results = []
+    for key in keys:
+      if key != "railcom_enabled":
+        raise ControllerOperationNotSupported(f"controller_setting:{key}", self.kind)
+      results.append(self._apply_railcom_setting(
+        session_manager,
+        controller,
+        bool(settings.get("railcom_enabled")),
+        transport=transport,
+      ))
+    return results
+
+  def _apply_railcom_setting(self, session_manager, controller: dict, enabled: bool, *, transport=None) -> dict:
+    client_id = self.controller_client_id(controller)
+    raw_value = 0x80 if enabled else 0x00
+    write_frame = build_parameter_write_frame(client_id, DEVICE_TYPE_COMMAND_STATION, 0, PARAM_RAILCOM, raw_value)
+    read_frame = build_parameter_read_frame(client_id, DEVICE_TYPE_COMMAND_STATION, 0, PARAM_RAILCOM)
+    write_frames = self.exchange(
+      session_manager,
+      controller,
+      write_frame,
+      timeout_seconds=float(controller.get("parameter_write_timeout_seconds", 0.25)),
+      max_packets=4,
+      transport=transport,
+    )
+    read_frames = self.exchange(
+      session_manager,
+      controller,
+      read_frame,
+      timeout_seconds=float(controller.get("parameter_readback_timeout_seconds", 0.25)),
+      max_packets=8,
+      stop_when=build_raw_frame_matcher(CMD_PARAMETER_VALUE, DEVICE_TYPE_COMMAND_STATION),
+      transport=transport,
+    )
+    parameter_frame = first_matching_frame(read_frames, CMD_PARAMETER_VALUE, DEVICE_TYPE_COMMAND_STATION)
+    if parameter_frame is None:
+      raise ControllerParameterWriteError(
+        "RailCom 参数写入后未读到确认回包",
+        {
+          "setting": "railcom_enabled",
+          "param_address": PARAM_RAILCOM,
+          "expected_raw_value": raw_value,
+          "write_request_hex": write_frame.hex(" "),
+          "read_request_hex": read_frame.hex(" "),
+          "write_responses": self._debug_responses(write_frames),
+          "read_responses": self._debug_responses(read_frames),
+        },
+      )
+    parsed = parse_parameter_response(parameter_frame.payload)
+    if parsed["param_address"] != PARAM_RAILCOM or int(parsed["value"]) != raw_value:
+      raise ControllerParameterWriteError(
+        "RailCom 参数读回值不一致",
+        {
+          "setting": "railcom_enabled",
+          "param_address": PARAM_RAILCOM,
+          "expected_raw_value": raw_value,
+          "actual": parsed,
+          "write_request_hex": write_frame.hex(" "),
+          "read_request_hex": read_frame.hex(" "),
+        },
+      )
+    controller.setdefault("device_info", {})["railcom_enabled"] = enabled
+    controller["device_info"]["railcom_raw"] = raw_value
+    controller["device_info"]["railcom_source"] = "dxdcnet_param_0x03"
+    return {
+      "setting": "railcom_enabled",
+      "param_address": PARAM_RAILCOM,
+      "raw_value": raw_value,
+      "enabled": enabled,
+      "write_request_hex": write_frame.hex(" "),
+      "read_request_hex": read_frame.hex(" "),
+    }
 
   def controller_client_id(self, controller: dict) -> int:
     client_id = int(controller.get("client_id", 1))

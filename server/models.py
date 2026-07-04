@@ -2,10 +2,18 @@
 
 CONTROLLER_DEFAULT_IP = "0.0.0.0"
 CONTROLLER_KIND_DIGSIGHT = "digsight_controller"
+CONTROLLER_KIND_ECOS_50200 = "ecos_50200_controller"
+CONTROLLER_KIND_Z21_STD = "z21_std_controller"
+CONTROLLER_KIND_Z21_START = "z21_start_controller"
+CONTROLLER_KIND_Z21_XL = "z21_xl_controller"
 CONTROLLER_PROTOCOL_DXDCNET = "DXDCNet"
+CONTROLLER_PROTOCOL_ECOS = "ECoS"
+CONTROLLER_PROTOCOL_Z21_LAN = "Z21LAN"
 DXDCNET_DEFAULT_UDP_PORT = 12000
 DXDCNET_DEFAULT_LOCAL_UDP_PORT = 6667
 DXDCNET_DEFAULT_CHECKSUM_ALGORITHM = "xor"
+ECOS_DEFAULT_TCP_PORT = 15471
+Z21_DEFAULT_UDP_PORT = 21105
 CONTROLLER_INFO_STATUS_TIMEOUT_SECONDS = 0.4
 CONTROLLER_INFO_POLL_TIMEOUT_SECONDS = 0.25
 TRACK_MODE_N = "n"
@@ -38,6 +46,21 @@ SERVICE_MODE_LIMIT_MA = 250
 DCC_ADDRESS_MIN = 1
 DCC_ADDRESS_MAX = 9999
 CONSIST_MAX_MEMBERS = 8
+CONTROL_PROTOCOL_DCC = "dcc"
+CONTROL_PROTOCOL_MOTOROLA = "motorola"
+CONTROL_PROTOCOL_M4 = "m4"
+DEFAULT_CONTROL_PROTOCOL = CONTROL_PROTOCOL_DCC
+DEFAULT_SPEED_STEPS = 128
+CONTROL_PROTOCOL_SPEED_STEPS = {
+  CONTROL_PROTOCOL_DCC: {14, 28, 128},
+  CONTROL_PROTOCOL_MOTOROLA: {1, 2, 28},
+  CONTROL_PROTOCOL_M4: {128},
+}
+CONTROL_PROTOCOL_SPEED_STEP_COUNTS = {
+  CONTROL_PROTOCOL_DCC: {14: 14, 28: 28, 128: 126},
+  CONTROL_PROTOCOL_MOTOROLA: {1: 14, 2: 27, 28: 28},
+  CONTROL_PROTOCOL_M4: {128: 126},
+}
 SCREEN_DIRECTION_LABELS = {
   0x00: "左",
   0x01: "上",
@@ -82,6 +105,43 @@ def validate_programming_target(programming_target: str) -> str:
   if normalized not in PROGRAMMING_TARGETS:
     raise ValueError("programming target must be programming_track or main_track")
   return normalized
+
+
+def validate_control_protocol(control_protocol: str) -> str:
+  normalized = str(control_protocol or DEFAULT_CONTROL_PROTOCOL).strip().lower()
+  if normalized not in CONTROL_PROTOCOL_SPEED_STEPS:
+    allowed = ", ".join(sorted(CONTROL_PROTOCOL_SPEED_STEPS))
+    raise ValueError(f"control protocol must be one of: {allowed}")
+  return normalized
+
+
+def validate_speed_steps(control_protocol: str, speed_steps) -> int:
+  protocol = validate_control_protocol(control_protocol)
+  try:
+    normalized = int(speed_steps or DEFAULT_SPEED_STEPS)
+  except (TypeError, ValueError) as exc:
+    raise ValueError("speed steps must be an integer") from exc
+  allowed = CONTROL_PROTOCOL_SPEED_STEPS[protocol]
+  if normalized not in allowed:
+    allowed_text = ", ".join(str(value) for value in sorted(allowed))
+    raise ValueError(f"{protocol} speed steps must be one of: {allowed_text}")
+  return normalized
+
+
+def speed_step_count(control_protocol: str, speed_steps) -> int:
+  protocol = validate_control_protocol(control_protocol)
+  normalized = validate_speed_steps(protocol, speed_steps)
+  return CONTROL_PROTOCOL_SPEED_STEP_COUNTS[protocol][normalized]
+
+
+def scale_loco_speed_for_steps(speed: int, control_protocol: str, speed_steps: int) -> int:
+  speed_value = int(speed)
+  if speed_value <= 0:
+    return 0
+  target_max = speed_step_count(control_protocol, speed_steps)
+  if target_max == 126:
+    return max(1, min(126, speed_value))
+  return max(1, min(target_max, round(speed_value * target_max / 126)))
 
 
 def default_track_profiles() -> dict:
@@ -129,28 +189,53 @@ def default_track_profiles() -> dict:
   }
 
 
-def validate_track_profile(mode: str, profile: dict) -> dict:
+def validate_track_profile(mode: str, profile: dict, defaults: dict | None = None) -> dict:
   normalized = validate_profile_mode(mode)
-  defaults = default_track_profiles()[normalized]
+  fallback_defaults = default_track_profiles()[normalized]
+  defaults = dict(defaults or fallback_defaults)
   result = dict(defaults)
   if "target_voltage_v" in profile:
     result["target_voltage_v"] = profile["target_voltage_v"]
-  if "target_current_limit_ma" in profile:
+  supports_current_limit = "target_current_limit_ma" in defaults or "max_target_current_limit_ma" in defaults
+  if supports_current_limit and "target_current_limit_ma" in profile:
     result["target_current_limit_ma"] = profile["target_current_limit_ma"]
-  voltage = float(result["target_voltage_v"])
-  if voltage <= 0 or voltage > defaults["max_target_voltage_v"]:
-    raise ValueError(f"{defaults['name']} target voltage must be > 0 and <= {defaults['max_target_voltage_v']} V")
-  current_limit = result.get("target_current_limit_ma")
-  if current_limit in ("", None):
-    result["target_current_limit_ma"] = None
+  supports_voltage = "target_voltage_v" in defaults or "max_target_voltage_v" in defaults
+  if supports_voltage:
+    voltage = float(result["target_voltage_v"])
+    min_voltage = float(defaults.get("min_target_voltage_v", 0))
+    max_voltage = float(defaults.get("max_target_voltage_v", fallback_defaults["max_target_voltage_v"]))
+    if voltage <= 0 or voltage < min_voltage or voltage > max_voltage:
+      raise ValueError(f"{defaults['name']} target voltage must be {min_voltage}..{max_voltage} V")
+    result["target_voltage_v"] = voltage
   else:
-    current_limit = int(current_limit)
-    if current_limit < CURRENT_STEP_MA or current_limit > defaults["max_target_current_limit_ma"]:
-      raise ValueError(f"{defaults['name']} target current limit must be {CURRENT_STEP_MA}..{defaults['max_target_current_limit_ma']} mA")
-    if current_limit % CURRENT_STEP_MA != 0:
-      raise ValueError(f"{defaults['name']} target current limit must use {CURRENT_STEP_MA} mA steps")
-    result["target_current_limit_ma"] = current_limit
-  result["target_voltage_v"] = voltage
-  result["output_value"] = defaults["output_value"]
-  result["current_param"] = defaults["current_param"]
+    result.pop("target_voltage_v", None)
+    result.pop("min_target_voltage_v", None)
+    result.pop("max_target_voltage_v", None)
+  if supports_current_limit:
+    current_limit = result.get("target_current_limit_ma")
+    if current_limit in ("", None):
+      result["target_current_limit_ma"] = None
+    else:
+      current_limit = int(current_limit)
+      min_current = int(defaults.get("min_target_current_limit_ma", CURRENT_STEP_MA))
+      max_current = int(defaults.get("max_target_current_limit_ma", fallback_defaults["max_target_current_limit_ma"]))
+      current_step = int(defaults.get("current_step_ma", CURRENT_STEP_MA))
+      if current_limit < min_current or current_limit > max_current:
+        raise ValueError(f"{defaults['name']} target current limit must be {min_current}..{max_current} mA")
+      if current_limit % current_step != 0:
+        raise ValueError(f"{defaults['name']} target current limit must use {current_step} mA steps")
+      result["target_current_limit_ma"] = current_limit
+  else:
+    result.pop("min_target_current_limit_ma", None)
+    result.pop("target_current_limit_ma", None)
+    result.pop("max_target_current_limit_ma", None)
+    result.pop("current_step_ma", None)
+  if "output_value" in defaults:
+    result["output_value"] = defaults["output_value"]
+  else:
+    result.pop("output_value", None)
+  if "current_param" in defaults:
+    result["current_param"] = defaults["current_param"]
+  else:
+    result.pop("current_param", None)
   return result
