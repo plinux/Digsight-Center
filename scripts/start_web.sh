@@ -134,6 +134,8 @@ for trusted_host in trusted_hosts:
 package_paths = [
   str(Path(project_root) / "packages" / "train-dcc" / "src"),
   str(Path(project_root) / "packages" / "digsight-dxdcnet" / "src"),
+  str(Path(project_root) / "packages" / "esu-ecos" / "src"),
+  str(Path(project_root) / "packages" / "z21-lan" / "src"),
 ]
 env = os.environ.copy()
 existing_python_path = env.get("PYTHONPATH", "")

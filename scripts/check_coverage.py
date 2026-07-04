@@ -70,6 +70,8 @@ def local_package_pythonpath_entries() -> list[str]:
     str(PROJECT_ROOT),
     str(PROJECT_ROOT / "packages" / "train-dcc" / "src"),
     str(PROJECT_ROOT / "packages" / "digsight-dxdcnet" / "src"),
+    str(PROJECT_ROOT / "packages" / "esu-ecos" / "src"),
+    str(PROJECT_ROOT / "packages" / "z21-lan" / "src"),
   ]
 
 

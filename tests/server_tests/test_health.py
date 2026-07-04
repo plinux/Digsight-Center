@@ -117,6 +117,8 @@ class HealthTest(unittest.TestCase):
     self.assertIn('"PYTHONPATH"', content)
     self.assertIn('"packages" / "train-dcc" / "src"', content)
     self.assertIn('"packages" / "digsight-dxdcnet" / "src"', content)
+    self.assertIn('"packages" / "esu-ecos" / "src"', content)
+    self.assertIn('"packages" / "z21-lan" / "src"', content)
 
   def test_public_document_entry_files_exist(self):
     self.assertTrue((PROJECT_ROOT / "README.md").is_file())
@@ -212,11 +214,13 @@ class HealthTest(unittest.TestCase):
     self.assertEqual(entries[0], str(PROJECT_ROOT))
     self.assertIn(str(PROJECT_ROOT / "packages" / "train-dcc" / "src"), entries)
     self.assertIn(str(PROJECT_ROOT / "packages" / "digsight-dxdcnet" / "src"), entries)
+    self.assertIn(str(PROJECT_ROOT / "packages" / "esu-ecos" / "src"), entries)
+    self.assertIn(str(PROJECT_ROOT / "packages" / "z21-lan" / "src"), entries)
 
     env = helper.coverage_environment({"PYTHONPATH": "existing-path"})
     pythonpath_entries = env["PYTHONPATH"].split(helper.os.pathsep)
-    self.assertEqual(pythonpath_entries[:3], entries)
-    self.assertEqual(pythonpath_entries[3], "existing-path")
+    self.assertEqual(pythonpath_entries[:len(entries)], entries)
+    self.assertEqual(pythonpath_entries[len(entries)], "existing-path")
 
   def test_gateway_main_constructs_server_and_prints_lan_hint(self):
     calls = []
