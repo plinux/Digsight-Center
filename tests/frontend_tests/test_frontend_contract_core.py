@@ -431,7 +431,7 @@ class FrontendCoreContractTest(SourceAssertionsMixin, unittest.TestCase):
     self.assertIn('table.className = "controller-info-table";', source)
     self.assertIn("appendInfoTableRow", source)
     self.assertIn("row.append(labelCell, valueCell, nextLabelCell, nextValueCell);", source)
-    self.assertIn('disabled: mode === "dc"', source)
+    self.assertIn('disabled: disabled || mode === "dc"', source)
     self.assertIn("attrValue === false", helper_source)
 
   def test_track_profiles_use_two_column_grid(self):

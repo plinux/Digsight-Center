@@ -134,6 +134,12 @@ export function syncControllerDescriptorControls(elements, appState) {
   elements.controllerIp.value = appState.controller.ip || controllerDescriptor(appState.capabilities, controllerKind).default_ip || "";
 }
 
+export function syncSelectedControllerEndpointInput(elements, appState) {
+  const kind = selectedControllerKind(appState, elements);
+  const descriptor = controllerDescriptor(appState.capabilities, kind);
+  elements.controllerIp.value = descriptor.configured_ip || descriptor.default_ip || "";
+}
+
 function selectedControllerKind(appState, elements) {
   return elements?.controllerKindSelect?.value || appState.controller.kind || appState.capabilities.default_controller_kind || "";
 }
