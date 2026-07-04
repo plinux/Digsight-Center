@@ -292,6 +292,7 @@
         <li><a href="#vehicle-control">车辆控制</a></li>
         <li><a href="#vehicle-editor">车辆编辑</a></li>
         <li><a href="#config-import">配置导入</a></li>
+        <li><a href="#sound-editor">音效编辑</a></li>
         <li><a href="#cv">CV 编程</a></li>
         <li><a href="#settings">控制器设置</a></li>
         <li><a href="#consist">重联与编组</a></li>
@@ -323,7 +324,7 @@
 
       <section id="header">
         <h2>顶部控制区</h2>
-        <p>顶部区域始终显示控制器类型、控制器 IP、通电/断电、运行状态、CV 编程目标、轨道模式和遥测信息。页面不再要求手工“连接/断开”；需要和设备通讯时，前端会先把当前控制器类型和 IP 同步给后端。</p>
+        <p>顶部区域始终显示控制器类型、控制器 IP、通电/断电、运行状态、CV 编程目标、轨道模式和遥测信息。页面滚动时顶部控制区会固定在窗口上方，便于随时查看状态摘要、错误详情和控制器遥测。页面不再要求手工“连接/断开”；需要和设备通讯时，前端会先把当前控制器类型和 IP 同步给后端。</p>
         <table>
           <tr>
             <th>区域</th>
@@ -331,11 +332,11 @@
           </tr>
           <tr>
             <td>控制器品牌型号</td>
-            <td>选择控制器配置。当前下拉框显示控制器配置文件中的 <code>display_name</code>，默认是 <code>动芯 拾Pro</code>；后续新增控制器时仍使用同一入口。</td>
+            <td>选择控制器配置。下拉框显示控制器配置文件中的 <code>display_name</code>；当前默认是 <code>动芯 拾Pro</code>，也可选择 ESU ECoS 50200 或 Z21 系列控制器配置。</td>
           </tr>
           <tr>
             <td>IP</td>
-            <td>目标控制器地址。当前默认控制器为动芯 拾Pro，使用 <code>DXDCNet</code> 协议；修改地址后会让旧的控制器状态和 CV 安全快照失效。</td>
+            <td>目标控制器地址。修改地址后会让旧的控制器状态和 CV 安全快照失效；具体协议、端口和信息表由当前控制器配置决定。</td>
           </tr>
           <tr>
             <td>通电 / 断电</td>
@@ -361,7 +362,7 @@
         <div class="note">
           指示灯状态：蓝色表示已连通但轨道未上电，绿色表示已连通且轨道已上电，黄色闪烁表示正在读写或上下电，红色闪烁表示短路或过流，红色常亮表示未能连通。
         </div>
-        <p>打开页面后，先确认控制器型号和 IP，执行读取控制器状态。状态读取成功后，再点击通电。页面不会在启动时自动给轨道通电。</p>
+        <p>打开页面后，前端会自动读取一次当前控制器状态。确认控制器型号和 IP 正确后，可以根据需要再次点击“读取控制器”刷新状态；页面不会在启动时自动给轨道通电。</p>
         <a class="top-link" href="#top">返回顶部</a>
       </section>
 
@@ -432,7 +433,8 @@
         <div class="cards">
           <div class="card">
             <h3>基本信息</h3>
-            <p>可编辑车辆名称、完整名称、车辆类型、能源类型或车厢子类、车辆编号、比例、最高速度、铁路公司/局段、模型品牌、货号、芯片型号、备注、分类和图片。</p>
+            <p>可编辑车辆名称、完整名称、车辆类型、能源类型或车厢子类、车辆编号、比例、控制协议、速度级、最高速度、铁路公司/局段、模型品牌、货号、芯片型号、备注、分类和图片。</p>
+            <p>控制协议和速度级会随车辆保存。默认使用 <code>DCC 128</code>；Z21 和 ECoS 会按车辆字段组装 DCC、Motorola 或 M4 等控制器命令，动芯 D9000/拾Pro 只允许已验证的 DCC 128 控制路径。</p>
           </div>
           <div class="card">
             <h3>功能表</h3>
@@ -461,6 +463,31 @@
           <li>导入上传、Z21 数据库和图片都有大小限制；超限时页面会显示结构化错误，不会继续写入本地数据库。</li>
           <li>清空车辆库会删除本地车辆图片文件，但不会修改控制器配置文件、CV 配置文件或厂家 profile。</li>
         </ul>
+        <a class="top-link" href="#top">返回顶部</a>
+      </section>
+
+      <section id="sound-editor">
+        <h2>音效编辑</h2>
+        <p>音效编辑页面用于本地查看和生成动芯音效工程草稿。该入口不跟随当前选择的控制器，目标芯片由页面上的“芯片”下拉框决定；当前支持动芯 `.dxsd` 和 5313/5323 旧 `.dxsp` 工程。它不会连接控制器，也不会把文件直接刷写到真实 DCC 芯片；刷写仍应使用官方或已验证的烧录工具。</p>
+        <h3>导入音效工程</h3>
+        <p>点击“导入音效工程”，选择本地 `.dxsd` 或 5313/5323 旧 `.dxsp` 音效工程；官方下载 `.zip` 只是下载容器，需要先解压出工程文件后再导入。页面会根据工程中的芯片型号自动选择对应芯片 profile，并显示工程名称、Slot 数量、节点数量、连接数量、音频文件数量、音效空间和已解析的功能键映射。60 系 6003/6005/6006/6008 按 64Mb 音效空间计算并固定 16 个 Slot；8 系 8004 按 128Mb 计算，8003/8005/8006/8008 按 256Mb 计算并固定 64 个 Slot；5313/5323 固定 28 个 Slot，但容量仍未确认。固定 Slot 会按芯片型号预创建，不提供新增或删除 Slot 入口，只编辑 Slot 内容、节点、连接和音频引用；60 系工程里的 CV 默认表可能仍包含 Slot17-Slot60 默认值，页面只把实际存在的 Slot 显示为可编辑映射。手动切换到 Slot 更少或容量更小的芯片时，页面会提示将删除目标芯片不支持的 Slot 或存在容量不足风险；确认后才执行裁剪。每个 Slot 行右侧都有功能键输入框，留空表示未映射，0 表示 F0，1-68 对应 DCC 功能键 F1-F68；导出 `.dxsd` 时未映射写 255，F0 写 0。5313/5323 的 `.dxsp` 使用旧 `Project_Base_Info` 和 `User_Sound_Table` 表结构，页面会按前 28 个用户音效行生成 Slot 摘要；旧格式没有 DXSD 节点图时，不会伪造节点和连接，而是在右侧 Slot 属性中编辑播放方式、音量和 File_0/File_1/File_2。循环发声会显示为启动段、循环段和结束段。</p>
+        <p>节点图上方提供缩小、放大、100%、框选、添加节点和添加连接按钮，鼠标滚轮也可以缩放。编辑区域整体限制在窗口内，Slot 列表、节点画布和右侧属性面板分别在内部滚动，不会因为下方新增节点而继续撑高页面；Slot 列表和右侧属性面板边缘可以拖动调宽。按住画布空白区域拖动可以平移节点图；点亮“框选”后，拖动鼠标框选节点和连接，右键可复制、粘贴或删除，未复制内容时粘贴菜单会置灰。节点超出当前可视区域时，画布会显示横向和纵向滚动条。只选中 Slot 且没有选中具体节点或连接时，右侧属性面板会显示 Slot 属性，以及默认折叠的“Slot 内节点”“Slot 内连接”两个栏目；点击箭头可展开或收起单个节点、单个连接或整个栏目。选中节点后可以直接拖动它调整位置，也可以拖动节点右下角手柄调整大小；右侧属性面板会切换为只显示该节点属性，并可精确修改节点名称、类型、重复次数、音量、尺寸和音效文件，其中类型、重复次数和音量并排显示。选中连接后，右侧属性面板只显示该连接属性，可以修改源节点、目标节点、连接类型、源端口和 Judgment 判断，也可以在画布上拖动连接端点重新接到其它节点。属性面板中的“清空 Slot”会删除当前 Slot 的全部节点、连接和功能键映射，使它恢复为空 Slot；“入库”按钮可把当前 Slot 保存到动力单元、鸣笛、机械单元、行驶音效、联控音效或广播音效分类，并保存该 Slot 引用的音频文件副本。生成工程时会带上这些编辑后的 Slot、节点、连接和相关音频文件信息；5313/5323 旧 `.dxsp` 会按旧 `User_Sound_Table` 写回播放方式、音量和 File_0/File_1/File_2，循环发声会保留启动段、循环段和结束段三段引用。</p>
+        <h3>选择或上传音效</h3>
+        <ul>
+          <li>内置音效库当前提供发动机、电动机、喇叭、轮轨、手台、车站广播和到站提醒等分类的元数据条目，便于先完成 Slot 编排；未提供真实音频数据的条目会在生成时作为警告列出。</li>
+          <li>“上传音效”只接受 `.wav` 文件。页面会解析 WAV header，并按当前芯片 profile 校验采样率、位深和声道数；例如 60/80 系列默认要求 44100Hz、单声道，8 系按 16-bit，6 系按 12-bit，5313/5323 默认要求 11025Hz、8-bit、单声道。</li>
+          <li>页面按工程音频和用户上传 WAV 的 PCM data 字节统计已用空间；已确认容量的芯片会显示“已用 / 总计 / 剩余”，容量未知的芯片只显示已用空间和未确认提示。容量使用 Mb、小写 b 并保留两位小数，音效文件大小直接显示 bit 整数并使用三位分隔。</li>
+          <li>选择 Slot 后点击音效条目，会把该条目挂到当前 Slot 的播放节点；也可以选中画布上的节点，在右侧属性面板用“音效文件”下拉框替换该节点引用的音频。当前节点引用的音效如果包含可播放数据，属性面板会显示试听按钮；只选中 Slot 时，可在“Slot 内节点”的展开项中试听对应节点音效。</li>
+          <li>“当前音效包文件”区域会列出工程内音频和用户上传音频，并显示每个文件被哪些 Slot 和节点使用。除“操作”外，各列都可以点击表头排序。包含音频数据的文件可以直接点击播放图标试听；播放后按钮会切换为暂停图标，再点一次暂停，再点一次从暂停位置继续。导入工程内的裸 PCM 音频会在试听时临时包装成浏览器可播放的 WAV，不改变导出工程使用的原始音频数据。未被任何 Slot 或节点引用的文件可以直接删除，也可以点击“一键删除未使用音效”批量删除；已经被引用的文件删除按钮会置灰。每行“入库”按钮可把当前音效保存到音效库分类，保存后的 WAV 会写入运行态音效库，刷新页面后仍可使用。</li>
+          <li>每个音效文件都有“编辑”按钮。编辑时可以按分类或关键词过滤系统音效，用紧凑卡片选择一个条目替换，也可以上传新的 WAV 替换；替换会保留原 file ID 和引用关系。</li>
+          <li>底部库区分成左右两栏：左侧是音效库，可按分类和关键词筛选系统音效、自定义上传音效和从工程保存出来的音效；右侧是 Slot 库，可按 Slot 类型和关键词筛选，并把保存过的 Slot 模板应用到当前 Slot。保存到音效库的 WAV 和保存到 Slot 库的模板会写入 <code>data/sound-library.json</code>，不随页面刷新丢失。</li>
+        </ul>
+        <h3>生成工程草稿</h3>
+        <p>选择芯片 profile 并填写包名后，点击“生成音效包”。网关会根据当前 Slot、节点、连接、CV 映射和上传音频生成工程 XML，并以 base64 文件内容返回给浏览器下载。导出文件后缀按芯片系列决定：60/80 系列为 `.dxsd`，5313/5323 为 `.dxsp`。生成时会再次校验 WAV 格式；对已确认容量的芯片，音频 data 总大小超过容量会被拒绝；容量未知的芯片只给出警告，不强制拦截。固定 Slot 中未使用的位置只生成必要的工程记录，不会生成占位音频。</p>
+        <p>导入音效工程、上传或替换音效、删除未引用音效、修改 Slot、添加或修改节点、拖动节点、调整节点大小、添加或修改连接、拖动连接端点、切换芯片 profile 或修改包名后，页面都会记为存在未导出编辑。关闭或刷新浏览器页面前，如果这些修改还没有通过“生成音效包”导出，浏览器会弹出确认提示；成功生成并下载后，在下一次修改前不会再提示。</p>
+        <div class="danger">
+          音效编辑生成的是本地工程草稿，不等同于已验证可刷写的最终芯片镜像。把工程写入真实芯片前，应先用目标芯片和官方工具验证容量、格式和烧录流程。
+        </div>
         <a class="top-link" href="#top">返回顶部</a>
       </section>
 
@@ -498,10 +525,10 @@
         <h2>控制器设置</h2>
         <figure>
           <img src="assets/manual-controller-settings.png" alt="控制器设置页面截图">
-          <figcaption>控制器设置页面：左侧是控制器信息，右侧是轨道输出参数。</figcaption>
+          <figcaption>控制器设置页面：可保存每个比例的目标轨道参数；Z21 标准版和 Z21 XL 会在切换比例时同步对应主轨电压，ECoS 会写入对应比例的限流值。</figcaption>
         </figure>
-        <p>“读取控制器”会按当前控制器类型调用对应 adapter。当前动芯 D9000/拾Pro adapter 使用 <code>DXDCNet</code> 协议执行只读查询，刷新设备名称、MAC、硬件版本、软件版本、无线版本、RAILCOM、屏幕亮度、屏幕方向、温度、电压、电流和功率等缓存信息。</p>
-        <p>N/HO/G/DC 的限流参数会通过动芯参数写入命令下发到控制器，写入后再读取同一参数校验；如果读回值不一致，页面会报错且不会把本地缓存当作已生效。N/HO/G 电压输出值仍按已验证固定枚举处理；DC 控制页会把电压条数值转换为运行态 DXDCNet 轨道输出值。</p>
+        <p>“读取控制器”会按当前控制器类型调用对应 adapter，并按该 adapter 声明的信息表显示结果。动芯 D9000/拾Pro adapter 使用 <code>DXDCNet</code> 协议刷新设备名称、MAC、版本、RAILCOM、屏幕参数、轨道电源、短路状态、温度、电压、电流和功率等缓存信息；ESU ECoS 50200 配置使用 <code>ECoS</code> TCP 协议读取 50200/50210/50220 共用的基础对象信息和 System booster 的状态、电流、电压、温度、限流值；Z21、z21 start 和 Z21 XL 配置使用 <code>Z21LAN</code> UDP 协议读取硬件、固件、广播标志和系统状态。Z21 系统状态中，<code>supply_voltage</code> 是电源适配器/输入电压，<code>vcc_voltage</code> 才是内部电压并等同轨道输出电压；主轨电流会同时显示瞬时值和 <code>filtered_main_track_current</code> 平滑值。电源状态和短路状态会显示为中文，例如“通电/断电”和“无短路/发现短路”。</p>
+        <p>N/HO/G/DC 的限流参数当前可通过动芯参数写入命令下发到控制器，写入后再读取同一参数校验；如果读回值不一致，页面会报错且不会把本地缓存当作已生效。动芯 RailCom 开关使用 D9000 参数 <code>0x03</code>，写入 <code>0x80</code> 表示开启，写入 <code>0x00</code> 表示关闭，页面保存后同样读回校验。Z21 系列可使用官方 LAN_X 轨道通断电命令、数码车辆速度/方向/功能键命令、Service Mode CV 和主轨 POM byte 读写；ESU ECoS 可使用 PC Interface 的轨道电源、数码车辆速度/方向/功能键、编程轨 direct CV 读写和 System booster <code>limit[mA]</code> 限流写入。Z21 与 ECoS 不支持本系统 DC 模式，顶部 DC 按钮会禁用，鼠标悬停会提示“本控制器不支持DC模式”，轨道输出参数中不显示 DC 项。Z21 标准版和 Z21 XL 会先把 N/HO/G 主轨目标电压保存到本地控制器配置；用户切换到相应比例时，后端通过 MMDCC 写入该比例主轨输出电压，同时写入独立固定的编程轨电压，写入后重新读取 <code>0x0016</code> 校验。z21 start 只保存本地目标电压。ESU ECoS 输出电压由硬件电源设置，页面只显示控制器回报的只读电压遥测；轨道输出参数只显示 N/HO/G 限流输入，默认 4000mA；短路检测延迟是本地配置，默认 0ms，悬停提示会列出 DCC 兼容 Booster、LDT Booster 和 Märklin 6017 Booster 的建议值。轨道输出参数区域的“重置”按钮会把当前控制器可编辑参数恢复为数据库默认值，不影响控制器 IP、CV 配置或车辆库。Z21 的 RailCom 开关通过 Common Settings 写入并读回校验；ECoS 的 RailCom 和 RailComPlus 开关通过基础对象 <code>1</code> 写入并读回校验。关闭 ECoS RailCom 会同步关闭 RailComPlus，单独开启 RailComPlus 时页面会同时启用 RailCom。动芯 N/HO/G 电压输出值仍按已验证固定枚举处理；动芯 DC 控制页会把电压条数值转换为运行态 DXDCNet 轨道输出值。</p>
         <a class="top-link" href="#top">返回顶部</a>
       </section>
 
@@ -526,7 +553,7 @@
           <li>CV、地址、芯片信息、车辆控制和编组控制支持 N/HO/G 的 DCC 数码模式。</li>
           <li>G 比例与 N/HO 使用同一 DCC 数码路径，并受相同服务端安全门约束；DC 不使用数码车辆控制和 CV 编程路径，只能使用独立 DC 控制面板。</li>
           <li>DC 模式只适用于可承受 DC 输出的车辆或负载；在确认目标设备支持前，不要执行 DC 上电、方向切换、电压调整或急停实测。</li>
-          <li>修改 IP、UDP 端口、本地端口、校验算法、轨道模式或 CV 编程目标，或者控制器通讯失败，都会让旧安全快照失效。</li>
+          <li>修改 IP、通信端口、校验算法、轨道模式或 CV 编程目标，或者控制器通讯失败，都会让旧安全快照失效。</li>
         </ul>
         <a class="top-link" href="#top">返回顶部</a>
       </section>
@@ -547,8 +574,18 @@
           </tr>
           <tr>
             <td><code>config/controllers/Digsight_D9000.json</code></td>
-            <td>动芯 D9000/拾Pro 控制器运行态配置，保存控制器显示名、使用协议、控制器 IP、UDP 目标端口、本地 UDP 端口、校验算法、轨道输出参数和控制器私有设置。页面顶部控制器下拉框显示这里的 <code>display_name</code>，IP 输入框读取和写入这里。首次启动时如果文件不存在，网关会从本地 SQLite 控制器默认配置生成它。</td>
+            <td>动芯 D9000/拾Pro 控制器运行态配置，保存控制器显示名、使用协议、控制器 IP、UDP 目标端口、本地 UDP 端口、校验算法、轨道输出参数和控制器私有设置，例如 <code>settings.railcom_enabled</code>。页面顶部控制器下拉框显示这里的 <code>display_name</code>，IP 输入框读取和写入这里。首次启动时如果文件不存在，网关会从本地 SQLite 控制器默认配置生成它。</td>
             <td>可以手工修改；默认 IP 为 <code>0.0.0.0</code>，表示未配置真实控制器。这个 JSON 是运行态文件，公开仓库不跟踪。真实硬件测试优先使用测试专用环境变量。</td>
+          </tr>
+          <tr>
+            <td><code>config/controllers/ESU_ECoS_50200.json</code></td>
+            <td>ESU ECoS 50200/50210/50220 共用控制器运行态配置，保存显示名、<code>ECoS</code> 协议、控制器 IP 和 TCP <code>15471</code> 端口。</td>
+            <td>可以手工修改；当前开放控制器信息、轨道通断电、数码车辆速度/方向/功能键、编程轨 direct CV 读写和 System booster 限流写入，不支持 DC 模式。ECoS 输出电压由硬件电源设置，页面只显示控制器回报的只读电压遥测；轨道输出参数只显示 N/HO/G 限流输入，默认 4000mA；短路检测延迟保存为本地配置，默认 0ms，真实写入等待 PC Interface 字段确认。</td>
+          </tr>
+          <tr>
+            <td><code>config/controllers/Z21.json</code><br><code>config/controllers/Z21_Start.json</code><br><code>config/controllers/Z21_XL.json</code></td>
+            <td>Z21 LAN 控制器运行态配置，保存显示名、<code>Z21LAN</code> 协议、控制器 IP、UDP <code>21105</code> 端口和型号相关的比例/目标电压提示。</td>
+            <td>可以手工修改；当前开放控制器信息、轨道通断电、数码车辆速度/方向/功能键、Service Mode CV 和主轨 POM byte 读写，不支持 DC 模式，电流/限流配置项不显示。Z21 是官方标准版名称，也就是常说的黑盒版本；Z21 标准版和 Z21 XL 保存 N/HO/G 主轨目标电压时只更新本地配置，切换到对应比例时会写入 MMDCC 主轨输出电压和独立固定的编程轨电压并读回校验，z21 start 只保存本地目标电压。N/HO/G 主轨目标电压和编程轨电压默认均为 16V。</td>
           </tr>
           <tr>
             <td><code>config/cv/manufacturers.json</code></td>
@@ -573,8 +610,8 @@
         </table>
 
         <h3>控制器配置</h3>
-        <p><code>data/app-state.json</code> 会在首次启动时自动创建，只保存当前选择的控制器类型和页面运行态。页面顶部控制器名称、IP、端口和协议来自当前控制器自己的配置文件；当前动芯 D9000/拾Pro 使用 <code>config/controllers/Digsight_D9000.json</code>。如果该文件不存在，网关会先从 <code>data/vehicles.sqlite3</code> 中的控制器默认配置生成它。</p>
-        <p>每种控制器使用自己的运行态配置文件，公开仓库不跟踪这些 JSON。控制器显示名、使用协议、IP、端口和校验算法都从该文件读取；后续如果厂商固件改变默认端口，优先手工修改对应控制器配置文件，不需要改代码。当前已知的 D9000 默认通信参数为目标 UDP <code>12000</code>、本地 UDP <code>6667</code>、校验算法 <code>xor</code>，当前协议字段为 <code>DXDCNet</code>。同一种协议可以被多个控制器配置复用，后续新增 ECoS 等协议时也写在对应控制器配置文件里。</p>
+        <p><code>data/app-state.json</code> 会在首次启动时自动创建，只保存当前选择的控制器类型和页面运行态。页面顶部控制器名称、IP、端口和协议来自当前控制器自己的配置文件；当前内置 <code>config/controllers/Digsight_D9000.json</code>、<code>config/controllers/ESU_ECoS_50200.json</code>、<code>config/controllers/Z21.json</code>、<code>config/controllers/Z21_Start.json</code> 和 <code>config/controllers/Z21_XL.json</code>。如果文件不存在，网关会先从 <code>data/vehicles.sqlite3</code> 中的控制器默认配置生成它。</p>
+        <p>每种控制器使用自己的运行态配置文件，公开仓库不跟踪这些 JSON。控制器显示名、使用协议、IP、端口和校验算法都从该文件读取；后续如果厂商固件改变默认端口，优先手工修改对应控制器配置文件，不需要改代码。当前已知的 D9000 默认通信参数为目标 UDP <code>12000</code>、本地 UDP <code>6667</code>、校验算法 <code>xor</code>，协议字段为 <code>DXDCNet</code>；ESU ECoS 50200/50210/50220 共用 TCP <code>15471</code> 和 <code>ECoS</code> 协议；Z21 系列使用 UDP <code>21105</code> 和 <code>Z21LAN</code> 协议。</p>
         <p>如果当前控制器配置文件不是合法 JSON，页面会保留损坏文件，不会自动覆盖。状态栏会提示“当前控制器配置文件无效”，详情建议手工修复该 JSON 文件，或点击顶部“重置”恢复默认配置。重置前的确认框会列出本次会重置的文件；通常只有当前控制器配置文件，只有 <code>data/app-state.json</code> 也被检测为损坏时才会同时列入。</p>
         <pre><code>{
   "controller": {
@@ -587,7 +624,9 @@
   "display_name": "动芯 拾Pro",
   "field_descriptions": {
     "ip": "控制器 IP 地址；0.0.0.0 是安全占位值，真实使用前需要改成控制器实际地址。",
-    "track_profiles.&lt;mode&gt;.target_voltage_v": "该模式的目标/配置电压，供界面和 DC 输出换算使用；不是控制器实时回报电压。",
+    "settings.programming_track_voltage_v": "Z21 标准版和 Z21 XL 的独立编程轨电压，默认 16V；切换 N/HO/G 比例时会随主轨目标电压一起写入 MMDCC 设置。",
+    "settings.short_circuit_detection_delay_ms": "ECoS 短路检测延迟本地配置，默认 0ms；当前不下发到 ECoS PC Interface。",
+    "track_profiles.&lt;mode&gt;.target_voltage_v": "该模式的目标/配置电压；动芯用于界面和 DC 输出换算，Z21 标准版和 Z21 XL 会在切换到对应比例时写入 MMDCC 主轨电压；不是控制器实时回报电压。",
     "track_profiles.&lt;mode&gt;.target_current_limit_ma": "该模式的目标/配置限流值，保存后可写入控制器；不是实时电流读数。"
   },
   "ip": "0.0.0.0",
@@ -607,12 +646,12 @@
   }
 }</code></pre>
         <ul>
-          <li><code>kind</code> 是控制器类型，当前可用值为 <code>digsight_controller</code>。</li>
-          <li><code>display_name</code> 是页面控制器下拉框显示的名称；默认使用官方销售名称“动芯 拾Pro”。</li>
-          <li><code>protocol</code> 是该控制器使用的通讯协议；当前动芯 D9000/拾Pro 使用 <code>DXDCNet</code>，后续其它控制器可以声明复用同一协议或使用 ECoS 等其它协议。</li>
+          <li><code>kind</code> 是控制器类型，当前可用值包括 <code>digsight_controller</code>、<code>ecos_50200_controller</code>、<code>z21_std_controller</code>、<code>z21_start_controller</code> 和 <code>z21_xl_controller</code>。</li>
+          <li><code>display_name</code> 是页面控制器下拉框显示的名称；动芯默认使用官方销售名称“动芯 拾Pro”。</li>
+          <li><code>protocol</code> 是该控制器使用的通讯协议；当前动芯 D9000/拾Pro 使用 <code>DXDCNet</code>，ESU ECoS 50200/50210/50220 使用 <code>ECoS</code>，Z21 系列使用 <code>Z21LAN</code>。</li>
           <li><code>field_descriptions</code> 是配置文件内的字段说明。JSON 不支持语法注释，所以用普通 JSON 字段保存说明文本，程序读取控制器配置时不会把它当作运行参数。通用字段说明保持协议中立，具体控制器可以在自己的 adapter 中补充专用说明。</li>
           <li><code>ip</code> 在控制器配置文件中，是目标控制器地址；默认 <code>0.0.0.0</code> 只是安全占位，不代表真实控制器。</li>
-          <li><code>transport</code> 保存控制器通信配置；D9000 当前使用 <code>udp</code> transport，已知默认值为目标 UDP <code>12000</code>、本地 UDP <code>6667</code>、校验算法 <code>xor</code>，如果手工改错可以按示例改回。</li>
+          <li><code>transport</code> 保存控制器通信配置；D9000 当前使用 <code>udp</code> transport，已知默认值为目标 UDP <code>12000</code>、本地 UDP <code>6667</code>、校验算法 <code>xor</code>。ECoS 使用 <code>tcp_port</code>，Z21 使用 <code>udp_port</code> 和可选 <code>local_udp_port</code>。</li>
           <li><code>settings</code> 用于保存该控制器独有的配置；未来新增控制器时，每种控制器使用自己的配置文件。</li>
           <li><code>track_mode</code> 可为 <code>n</code>、<code>ho</code>、<code>g</code> 或 <code>dc</code>。</li>
           <li><code>programming_target</code> 可为 <code>programming_track</code> 或 <code>main_track</code>。</li>
@@ -745,8 +784,8 @@
             <td>当前控制器类型、轨道模式、CV 编程目标、遥测缓存和页面运行状态。</td>
           </tr>
           <tr>
-            <td><code>config/controllers/Digsight_D9000.json</code></td>
-            <td>动芯 D9000/拾Pro 控制器运行态配置；缺失时由 SQLite 控制器默认配置生成，公开仓库不跟踪。</td>
+            <td><code>config/controllers/*.json</code></td>
+            <td>当前选择控制器的运行态配置；缺失时由 SQLite 控制器默认配置生成，公开仓库不跟踪。当前内置动芯 D9000/拾Pro、ESU ECoS 50200 和 Z21 系列配置。</td>
           </tr>
           <tr>
             <td><code>data/vehicles.sqlite3</code></td>
@@ -771,9 +810,9 @@
       <section id="testing">
         <h2>测试与验证</h2>
         <p>默认测试只使用 mock 和仓库内 <code>tests/fixtures/</code> 样例，不需要真实控制器，也不需要本机私有文件。不要把真实控制器 IP 或本地文件路径写进测试代码、README 或本手册。</p>
-        <p>使用 Python 3.10+ 解释器执行测试；下面用 <code>python3</code> 表示已经满足版本要求的解释器。如果系统默认 <code>python3</code> 低于 3.10，请替换为 <code>python3.10</code>、<code>python3.11</code> 或其它符合要求的命令。测试可以直接使用仓库内的本地协议 package，不需要先执行 editable install；运行测试前把项目根目录和两个 package 的 <code>src</code> 目录加入 <code>PYTHONPATH</code> 即可。</p>
+        <p>使用 Python 3.10+ 解释器执行测试；下面用 <code>python3</code> 表示已经满足版本要求的解释器。如果系统默认 <code>python3</code> 低于 3.10，请替换为 <code>python3.10</code>、<code>python3.11</code> 或其它符合要求的命令。测试可以直接使用仓库内的本地协议 package，不需要先执行 editable install；运行测试前把项目根目录和各 package 的 <code>src</code> 目录加入 <code>PYTHONPATH</code> 即可。</p>
         <pre><code>python3 -m pip install -r requirements-dev.txt
-export PYTHONPATH="$PWD:$PWD/packages/train-dcc/src:$PWD/packages/digsight-dxdcnet/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$PWD:$PWD/packages/train-dcc/src:$PWD/packages/digsight-dxdcnet/src:$PWD/packages/esu-ecos/src:$PWD/packages/z21-lan/src${PYTHONPATH:+:$PYTHONPATH}"
 python3 -m unittest discover -s tests -v
 python3 scripts/check_coverage.py
 for file in assets/js/*.js; do node --check "$file" || exit 1; done
@@ -786,7 +825,7 @@ python3 -m unittest tests.server_tests.test_controller_probe -v</code></pre>
 export DIGSIGHT_TEST_Z21_N_FILE="&lt;n-z21-file-path&gt;"
 python3 -m unittest tests.server_tests.test_optional_external_inputs -v</code></pre>
         <ul>
-          <li><code>config/controllers/Digsight_D9000.json</code> 是动芯 D9000/拾Pro 的运行态配置文件；页面运行读取这里的控制器显示名、协议、IP 和通信端口。文件缺失时由 SQLite 默认配置生成，公开仓库不跟踪。</li>
+          <li><code>config/controllers/*.json</code> 是各控制器的运行态配置文件；页面运行读取这里的控制器显示名、协议、IP 和通信端口。文件缺失时由 SQLite 默认配置生成，公开仓库不跟踪。</li>
           <li><code>DIGSIGHT_TEST_D9000_IP</code> 是真实硬件探测测试的可选控制器地址；未设置时对应测试会跳过。</li>
           <li><code>DIGSIGHT_TEST_Z21_HO_FILE</code> 和 <code>DIGSIGHT_TEST_Z21_N_FILE</code> 是可选外部样本；未设置时对应测试会跳过。</li>
           <li>外部文件测试只验证导入器能读取用户提供的文件，并检查基础摘要和轨道模式；具体车辆数量仍应由你的样本和业务预期决定。</li>
