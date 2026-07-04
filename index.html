@@ -108,15 +108,15 @@
           <div id="soundProjectSummary" class="sound-project-summary"></div>
         </div>
         <div class="sound-editor-actions">
-          <input id="soundDxsdFileInput" type="file" accept=".dxsd,.xml,text/xml">
-          <button id="soundImportDxsdButton" type="button">导入 DXSD</button>
+          <input id="soundDxsdFileInput" type="file" accept=".dxsd,.dxsp">
+          <button id="soundImportDxsdButton" type="button">导入音效工程</button>
           <label>芯片
             <select id="soundChipSelect"></select>
           </label>
           <label>工程名
             <input id="soundPackageName" value="新音效工程">
           </label>
-          <button id="soundGeneratePackageButton" class="primary" type="button">生成 DXSD</button>
+          <button id="soundGeneratePackageButton" class="primary" type="button">生成音效包</button>
         </div>
       </div>
       <div class="sound-editor-layout">
@@ -131,14 +131,22 @@
       </div>
       <section id="soundFileInventoryPanel" class="sound-file-inventory" aria-label="当前音效包文件"></section>
       <section class="sound-library-section" aria-label="音效库">
-        <div class="sound-library-toolbar">
-          <h2>音效库</h2>
-          <select id="soundLibraryCategory" aria-label="音效分类"></select>
-          <input id="soundLibrarySearch" placeholder="搜索音效">
-          <input id="soundUploadInput" type="file" accept="audio/*,.wav,.pcm" multiple>
-          <input id="soundReplaceUploadInput" type="file" accept=".wav,audio/wav,audio/x-wav">
+        <div id="soundLibraryPanel" class="sound-library-grid">
+          <div class="sound-library-column">
+            <div class="sound-library-toolbar">
+              <h2>音效库</h2>
+              <select id="soundLibraryCategory" aria-label="音效分类"></select>
+              <input id="soundLibrarySearch" placeholder="搜索音效">
+              <input id="soundUploadInput" type="file" accept="audio/*,.wav,.pcm" multiple>
+              <input id="soundReplaceUploadInput" type="file" accept=".wav,audio/wav,audio/x-wav">
+            </div>
+            <div id="soundLibraryItems" class="sound-library-grid-inner"></div>
+          </div>
+          <div class="sound-library-column">
+            <div id="soundSlotLibraryHeader" class="sound-slot-library-header"></div>
+            <div id="soundSlotLibraryItems" class="sound-library-grid-inner"></div>
+          </div>
         </div>
-        <div id="soundLibraryPanel" class="sound-library-grid"></div>
       </section>
       <dialog id="soundFileEditorDialog" class="sound-file-editor-dialog" aria-label="编辑音效文件">
         <div id="soundFileEditorDialogContent"></div>

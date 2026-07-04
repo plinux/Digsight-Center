@@ -170,6 +170,10 @@ def _trusted_request_netloc(headers) -> tuple[str, str] | None:
   return _trusted_host_netloc(headers.get("Host", ""))
 
 
+def _file_name_from_header(headers, fallback: str) -> str:
+  return unquote(headers.get("X-File-Name", fallback)) or fallback
+
+
 def _trusted_url_netloc(value: str) -> tuple[str, str] | None:
   parsed = urlparse(value)
   if parsed.scheme not in {"http", "https"}:
@@ -461,7 +465,7 @@ class DigsightHandler(SimpleHTTPRequestHandler):
     return self._handle_api_mutation(method, path, body)
 
   def _handle_import_config_mutation(self, body: bytes) -> None:
-    file_name = self.headers.get("X-File-Name", "import.config")
+    file_name = _file_name_from_header(self.headers, "import.config")
     format_name = (self.headers.get("X-Import-Format") or "").strip()
     if not format_name:
       self._send_json(
@@ -479,6 +483,11 @@ class DigsightHandler(SimpleHTTPRequestHandler):
       self._send_json(400, response.failure("invalid_import_options", "导入选项无效", str(exc)))
       return
     response_body, status = self._handle_config_import_mutation(format_name, file_name, body, import_options)
+    self._send_json(status, response_body)
+
+  def _handle_sound_project_import_mutation(self, body: bytes) -> None:
+    file_name = _file_name_from_header(self.headers, "sound.dxsd")
+    response_body, status = gateway_context().api_router.sound_editor_api.import_dxsd(body, file_name)
     self._send_json(status, response_body)
 
   def _handle_json_mutation_request(self, method: str) -> None:
@@ -504,6 +513,9 @@ class DigsightHandler(SimpleHTTPRequestHandler):
       return
     if spec["gateway_handler"] == "import_config":
       self._handle_import_config_mutation(body)
+      return
+    if spec["gateway_handler"] == "sound_project_import":
+      self._handle_sound_project_import_mutation(body)
       return
     response_body, status = self._dispatch_mutation_response(method, route, body, spec)
     self._send_json(status, response_body)

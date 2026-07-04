@@ -509,6 +509,15 @@ class GatewaySecurityTest(unittest.TestCase):
         mutator({"controller": {}})
 
     class FakeRouter:
+      class FakeSoundEditorApi:
+        def import_dxsd(self, body, file_name):
+          return response.success({
+            "file_name": file_name,
+            "size": len(body),
+          }), 200
+
+      sound_editor_api = FakeSoundEditorApi()
+
       def persistent_state(self, _state):
         return {"vehicles": []}
 
@@ -563,6 +572,34 @@ class GatewaySecurityTest(unittest.TestCase):
       status, body = self.post(
         "/api/import/config",
         b"layout-bytes",
+        {
+          **IMPORT_CLIENT_HEADERS,
+          "X-Import-Format": "z21_layout_config",
+          "X-File-Name": "HXD1%20%E5%92%8C%E8%B0%90.z21",
+        },
+      )
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 200)
+      self.assertEqual(payload["data"]["file_name"], "HXD1 和谐.z21")
+
+      status, body = self.post(
+        "/api/sound/dxsd/import",
+        b"sound-bytes",
+        {
+          **IMPORT_CLIENT_HEADERS,
+          "X-File-Name": "6008%20%E5%92%8C%E8%B0%90.dxsd",
+        },
+      )
+      payload = json.loads(body.decode("utf-8"))
+      self.assertEqual(status, 200)
+      self.assertEqual(payload["data"], {
+        "file_name": "6008 和谐.dxsd",
+        "size": 11,
+      })
+
+      status, body = self.post(
+        "/api/import/config",
+        b"layout-bytes",
         {**IMPORT_CLIENT_HEADERS, "X-Import-Format": "z21_layout_config", "X-Import-Options": "[]"},
       )
       payload = json.loads(body.decode("utf-8"))
@@ -578,7 +615,7 @@ class GatewaySecurityTest(unittest.TestCase):
       payload = json.loads(body.decode("utf-8"))
       self.assertEqual(status, 404)
       self.assertEqual(payload["error"]["type"], "not_found")
-      self.assertEqual([persist({}) for persist in fake_store.persist_values], [{"vehicles": []}] * 3)
+      self.assertEqual([persist({}) for persist in fake_store.persist_values], [{"vehicles": []}] * 4)
 
   def test_import_config_route_uses_real_vehicle_store_persistence(self):
     with tempfile.TemporaryDirectory() as temp_dir_name:

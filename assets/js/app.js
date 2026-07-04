@@ -18,6 +18,8 @@ import {
   readCv,
   reorderVehicles,
   resetControllerConfig,
+  saveSoundLibrarySlot,
+  saveSoundLibrarySound,
   saveControllerSettings,
   setControllerTrackMode,
   setDcControl,
@@ -1260,6 +1262,8 @@ function renderActiveSoundEditorView() {
   renderSoundEditor(elements.soundEditorView, soundEditorState, {
     setStatus,
     triggerReplacementUpload: () => elements.soundReplaceUploadInput?.click(),
+    saveSoundLibrarySound,
+    saveSoundLibrarySlot,
     renderAll
   });
 }
@@ -1357,7 +1361,12 @@ async function loadSoundEditorMetadata() {
   try {
     const [chipProfiles, libraryCatalog] = await Promise.all([getSoundChipProfiles(), getSoundLibrary()]);
     soundEditorState.chipProfiles = chipProfiles;
-    soundEditorState.libraryCatalog = libraryCatalog;
+    soundEditorState.libraryCatalog = {
+      categories: libraryCatalog.categories || [],
+      sounds: libraryCatalog.sounds || []
+    };
+    soundEditorState.savedSoundLibrary = libraryCatalog.saved_sounds || [];
+    soundEditorState.slotLibrary = libraryCatalog.slot_library || soundEditorState.slotLibrary;
     soundEditorState.chipId ||= chipProfiles[0]?.chip_id || "";
     renderAll();
   } catch (error) {

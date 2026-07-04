@@ -610,6 +610,15 @@ class FrontendCoreContractTest(SourceAssertionsMixin, unittest.TestCase):
       "-webkit-box-orient: vertical;",
     ])
 
+  def test_controller_header_stays_visible_while_page_scrolls(self):
+    css = self.read_text("assets/css/app.css")
+    header_source = self.source_slice(css, ".controller-header {", ".header-controls {")
+    self.assert_source_contains_all(header_source, [
+      "position: sticky;",
+      "top: 0;",
+      "z-index:",
+    ])
+
   def test_header_status_keeps_detail_link_for_generic_fetch_failures(self):
     source = self.read_text("assets/js/app.js")
     format_error_source = self.source_function(source, "formatError")

@@ -58,6 +58,42 @@ assert.equal(importRequest.options.headers["X-Import-Format"], "z21_layout_confi
 assert.equal(importRequest.options.headers["X-File-Name"], "HO.z21");
 assert.equal(importRequest.options.headers["Content-Type"], "application/octet-stream");
 
+await gatewayApi.importConfig("z21_layout_config", {
+  name: "HXD1 和谐.z21",
+  async arrayBuffer() {
+    return new Uint8Array([4, 5, 6]).buffer;
+  }
+});
+const encodedImportRequest = requests.at(-1);
+assert.equal(encodedImportRequest.options.headers["X-File-Name"], "HXD1%20%E5%92%8C%E8%B0%90.z21");
+
+await gatewayApi.importSoundDxsd({
+  name: "6008 和谐.dxsd",
+  async arrayBuffer() {
+    return new Uint8Array([7, 8, 9]).buffer;
+  }
+});
+const soundImportRequest = requests.at(-1);
+assert.equal(soundImportRequest.path, "/api/sound/dxsd/import");
+assert.equal(soundImportRequest.options.headers["X-File-Name"], "6008%20%E5%92%8C%E8%B0%90.dxsd");
+assert.equal(soundImportRequest.options.headers["Content-Type"], "application/octet-stream");
+
+await gatewayApi.saveSoundLibrarySound({sound_id: "saved-horn", contentBase64: "AAAA"}, "horn");
+const soundLibrarySaveRequest = requests.at(-1);
+assert.equal(soundLibrarySaveRequest.path, "/api/sound/library/sounds");
+assert.deepEqual(jsonBody(soundLibrarySaveRequest), {
+  category: "horn",
+  sound: {sound_id: "saved-horn", contentBase64: "AAAA"}
+});
+
+await gatewayApi.saveSoundLibrarySlot({slot_library_id: "slot-horn", nodes: [], connectors: []}, "horn");
+const slotLibrarySaveRequest = requests.at(-1);
+assert.equal(slotLibrarySaveRequest.path, "/api/sound/library/slots");
+assert.deepEqual(jsonBody(slotLibrarySaveRequest), {
+  category: "horn",
+  slot: {slot_library_id: "slot-horn", nodes: [], connectors: []}
+});
+
 assert.deepEqual(cvDomain.cvNumbersFromSource({"7": true, "bad": true, "1025": true, "1": true}), [1, 7]);
 assert.deepEqual(cvDomain.cvNumbersFromSource([3, "2", 0, 1025, 3]), [3, 2, 3]);
 assert.deepEqual(cvDomain.sortedUniqueCvNumbers([3, 1, 3, 2]), [1, 2, 3]);

@@ -39,6 +39,10 @@ async function executeGatewayRequest(requestFactory, failureMessage) {
   }
 }
 
+function uploadFileNameHeader(file, fallbackName) {
+  return encodeURIComponent(file?.name || fallbackName);
+}
+
 function postJson(path, body, options = {}) {
   return requestJson(path, {
     method: "POST",
@@ -83,6 +87,14 @@ export function getSoundLibrary() {
   return requestJson("/api/sound/library", {method: "GET"});
 }
 
+export function saveSoundLibrarySound(sound, category = "custom") {
+  return postJson("/api/sound/library/sounds", {category, sound});
+}
+
+export function saveSoundLibrarySlot(slot, category = "power_unit") {
+  return postJson("/api/sound/library/slots", {category, slot});
+}
+
 export async function importSoundDxsd(file) {
   return executeGatewayRequest(async () => ({
     path: "/api/sound/dxsd/import",
@@ -91,11 +103,11 @@ export async function importSoundDxsd(file) {
       headers: {
         ...digsightClientHeader,
         "Content-Type": "application/octet-stream",
-        "X-File-Name": file.name || "sound.dxsd"
+        "X-File-Name": uploadFileNameHeader(file, "sound.dxsd")
       },
       body: await file.arrayBuffer()
     }
-  }), "DXSD 导入失败");
+  }), "音效工程导入失败");
 }
 
 export function buildSoundPackage(project) {
@@ -138,7 +150,7 @@ export async function importConfig(format, file) {
         ...digsightClientHeader,
         "Content-Type": "application/octet-stream",
         "X-Import-Format": format,
-        "X-File-Name": file.name
+        "X-File-Name": uploadFileNameHeader(file, "import.config")
       },
       body: await file.arrayBuffer()
     }

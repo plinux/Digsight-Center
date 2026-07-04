@@ -40,6 +40,8 @@ POST_ROUTES = {
   "/api/cv/write": "cv.write",
   "/api/chip-info/read": "chip_info.read",
   "/api/sound/dxsd/import": "sound.dxsd_import",
+  "/api/sound/library/sounds": "sound.library_sound",
+  "/api/sound/library/slots": "sound.library_slot",
   "/api/sound/package": "sound.package",
   "/api/address/read": "address.read",
   "/api/address/write": "address.write",
@@ -70,8 +72,15 @@ API_MUTATION_ROUTES = {
   "/api/sound/dxsd/import": {
     "json_body": False,
     "body_limit": MAX_SOUND_PROJECT_BODY_BYTES,
+    "gateway_handler": "sound_project_import",
   },
   "/api/sound/package": {
+    "body_limit": MAX_SOUND_PROJECT_BODY_BYTES,
+  },
+  "/api/sound/library/sounds": {
+    "body_limit": MAX_SOUND_PROJECT_BODY_BYTES,
+  },
+  "/api/sound/library/slots": {
     "body_limit": MAX_SOUND_PROJECT_BODY_BYTES,
   },
   "/api/vehicle-images": {

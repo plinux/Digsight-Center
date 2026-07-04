@@ -1,34 +1,60 @@
 import {
   addSoundConnector,
   addSoundNode,
+  applySlotLibraryEntry,
+  canPasteSoundSelection,
+  clearSoundSlot,
+  copySoundSelection,
+  defaultSlotLibraryCategories,
+  deleteSoundSelection,
+  deleteUnusedSoundFiles,
   ensureDefaultSoundEditorSelection,
   closeSoundFileEditor,
   deleteUnusedSoundFile,
   filterSoundLibrary,
+  filterSlotLibrary,
+  formatBitCount,
+  formatMegabitCount,
   markSoundEditorChanged,
   openSoundFileEditor,
   panSoundCanvas,
+  pasteSoundSelection,
   projectSoundFiles,
   replaceSoundFile,
   resetSoundCanvasViewport,
+  saveActiveSlotToLibrary,
+  saveSoundFileToLibrary,
   selectSoundForSlot,
+  selectSoundItemsInRect,
+  setCanvasSelectionMode,
+  setSoundPanelWidth,
   setNodeSoundFile,
   setSoundCanvasZoom,
+  soundPreviewUrl,
   soundUsageForProject,
+  soundCapacityUsageForState,
   soundCanvasBoundsForSlot,
   moveSoundNode,
   resizeSoundNode,
+  setSoundSelection,
+  sortSoundFiles,
+  toggleSoundFileSort,
   updateSoundConnectorEndpoint,
   updateSoundConnectorField,
   updateSoundNodeField,
   updateSelectedSlotField
 } from "./sound-editor-controller.js";
 
+let activeSoundPreview = null;
+let activeSoundPreviewFileId = 0;
+
 export function renderSoundEditor(root, state, handlers = {}) {
   if (!root) {
     return;
   }
   ensureDefaultSoundEditorSelection(state);
+  root.style.setProperty("--sound-slot-panel-width", `${Number(state.slotListWidthPx || 240)}px`);
+  root.style.setProperty("--sound-property-panel-width", `${Number(state.propertyPanelWidthPx || 300)}px`);
   renderChipProfiles(root, state);
   renderProjectSummary(root, state);
   renderSlots(root, state, handlers);
@@ -67,13 +93,21 @@ function renderProjectSummary(root, state) {
     return;
   }
   const counts = state.projectSummary?.counts || {};
+  const capacity = soundCapacityUsageForState(state);
+  const capacitySummary = capacity.known
+    ? [
+      `<span>音效空间 已用 ${formatMegabitCount(capacity.usedBits)} / 总计 ${formatMegabitCount(capacity.totalBits)}</span>`,
+      `<span>剩余 ${formatMegabitCount(capacity.remainingBits)}</span>`
+    ]
+    : [`<span>音效空间未确认，已用 ${formatMegabitCount(capacity.usedBits)}</span>`];
   summary.innerHTML = state.projectSummary ? [
     `<span>模块 ${esc(state.projectSummary.base_info?.decoder_module || "--")}</span>`,
     `<span>${counts.slots || 0} 个 Slot</span>`,
     `<span>${counts.nodes || 0} 个节点</span>`,
     `<span>${counts.connectors || 0} 条连接</span>`,
-    `<span>${counts.sound_files || 0} 个音频</span>`
-  ].join("") : "<span>未导入 DXSD，可直接从音效库创建新工程</span>";
+    `<span>${counts.sound_files || 0} 个音频</span>`,
+    ...capacitySummary
+  ].join("") : "<span>未导入音效工程，可直接从音效库创建新工程</span>";
 }
 
 function renderSlots(root, state, handlers) {
@@ -86,12 +120,22 @@ function renderSlots(root, state, handlers) {
     : fallbackSlots(state.selectedSlots);
   list.innerHTML = slots.map((slot) => {
     const selected = Number(slot.slot_id) === Number(state.activeSlotId);
-    return `<button type="button" class="sound-slot-row${selected ? " active" : ""}" data-slot-id="${slot.slot_id}">
-      <span class="sound-slot-number">${slot.slot_id}</span>
-      <span class="sound-slot-name">${esc(slot.slot_name || `Slot ${slot.slot_id}`)}</span>
-      <span class="sound-slot-meta">${esc(slot.functionKey || "")}</span>
-    </button>`;
+    const functionNumber = slotFunctionNumberForRow(state, slot);
+    return `<div class="sound-slot-row${selected ? " active" : ""}" data-slot-row="${slot.slot_id}">
+      <button type="button" class="sound-slot-select" data-slot-id="${slot.slot_id}" aria-pressed="${selected ? "true" : "false"}">
+        <span class="sound-slot-number">${slot.slot_id}</span>
+        <span class="sound-slot-name">${esc(slot.slot_name || `Slot ${slot.slot_id}`)}</span>
+      </button>
+      <label class="sound-slot-function-field" title="留空表示未映射；0 表示 F0，1-68 对应 DCC 功能键 F1-F68">
+        <span>F</span>
+        <input class="sound-slot-function-input" type="number" min="0" max="68" placeholder="-" value="${functionNumber ?? ""}" data-slot-function-input="${slot.slot_id}" aria-label="Slot ${slot.slot_id} 映射功能键">
+      </label>
+    </div>`;
   }).join("");
+  const slotAside = root.querySelector(".sound-slot-list");
+  if (slotAside && !slotAside.querySelector("[data-sound-panel-resizer='slots']")) {
+    slotAside.insertAdjacentHTML("beforeend", `<div class="sound-panel-resizer sound-panel-resizer-slots" data-sound-panel-resizer="slots" title="拖动调整 Slot 列表宽度"></div>`);
+  }
   list.querySelectorAll("[data-slot-id]").forEach((button) => {
     button.addEventListener("click", () => {
       state.activeSlotId = Number(button.dataset.slotId || 0);
@@ -100,6 +144,15 @@ function renderSlots(root, state, handlers) {
       handlers.renderAll?.();
     });
   });
+  list.querySelectorAll("[data-slot-function-input]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const slotId = Number(input.dataset.slotFunctionInput || 0);
+      state.activeSlotId = slotId;
+      updateSelectedSlotField(state, slotId, "functionNumber", input.value);
+      handlers.renderAll?.();
+    });
+  });
+  wirePanelResizers(root, state, handlers);
 }
 
 function renderCanvas(root, state, handlers) {
@@ -119,11 +172,18 @@ function renderCanvas(root, state, handlers) {
   const scaledHeight = Math.ceil(height * zoom);
   const connectorMarkup = connectors.map((connector) => connectorSvg(connector, nodes, state)).join("");
   const nodeMarkup = nodes.map((node) => nodeSvg(node, state)).join("");
+  const selectionModePressed = state.canvasSelectionMode ? "true" : "false";
+  const contextMenu = state.canvasContextMenu?.open ? `<div class="sound-canvas-menu" style="left:${Number(state.canvasContextMenu.x || 0)}px;top:${Number(state.canvasContextMenu.y || 0)}px" role="menu">
+    <button type="button" data-sound-canvas-command="copy" role="menuitem">复制</button>
+    <button type="button" data-sound-canvas-command="paste" role="menuitem"${canPasteSoundSelection(state) ? "" : " disabled"}>粘贴</button>
+    <button type="button" data-sound-canvas-command="delete" class="danger" role="menuitem">删除</button>
+  </div>` : "";
   canvas.innerHTML = `<div class="sound-canvas-toolbar" aria-label="节点图缩放">
     <button id="soundCanvasZoomOut" type="button" title="缩小">-</button>
     <span>${Math.round(zoom * 100)}%</span>
     <button id="soundCanvasZoomIn" type="button" title="放大">+</button>
     <button id="soundCanvasZoomReset" type="button">100%</button>
+    <button id="soundCanvasSelectModeButton" type="button" aria-pressed="${selectionModePressed}" title="启用后用鼠标拖框选择节点和连接">框选</button>
     <button id="soundAddNodeButton" type="button">添加节点</button>
     <button id="soundAddConnectorButton" type="button">添加连接</button>
   </div>
@@ -139,9 +199,32 @@ function renderCanvas(root, state, handlers) {
         <g>${connectorMarkup}</g>
         <g>${nodeMarkup}</g>
       </svg>
+      <div class="sound-selection-rect" hidden></div>
     </div>
-  </div>`;
+  </div>
+  ${contextMenu}`;
   wireCanvasViewport(canvas, state, handlers);
+  canvas.querySelector("#soundCanvasSelectModeButton")?.addEventListener("click", () => {
+    setCanvasSelectionMode(state, !state.canvasSelectionMode);
+    handlers.renderAll?.();
+  });
+  canvas.querySelectorAll("[data-sound-canvas-command]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const command = button.dataset.soundCanvasCommand || "";
+      if (command === "copy") {
+        const count = copySoundSelection(state);
+        handlers.setStatus?.(count ? `已复制 ${count} 个对象` : "没有可复制的节点或连接");
+      } else if (command === "paste") {
+        const result = pasteSoundSelection(state, slotId || 1, {x: 40, y: 40});
+        handlers.setStatus?.(`已粘贴 ${result.nodes} 个节点、${result.connectors} 条连接`);
+      } else if (command === "delete") {
+        const result = deleteSoundSelection(state);
+        handlers.setStatus?.(`已删除 ${result.nodes} 个节点、${result.connectors} 条连接`);
+      }
+      state.canvasContextMenu = {open: false, x: 0, y: 0};
+      handlers.renderAll?.();
+    });
+  });
   canvas.querySelector("#soundAddNodeButton")?.addEventListener("click", () => {
     addSoundNode(state, slotId || 1);
     handlers.setStatus?.("已添加节点");
@@ -159,6 +242,7 @@ function renderCanvas(root, state, handlers) {
     element.addEventListener("click", () => {
       state.selectedNodeKey = element.dataset.nodeKey || "";
       state.selectedConnectorId = 0;
+      setSoundSelection(state, [state.selectedNodeKey], []);
       handlers.renderAll?.();
     });
   });
@@ -166,6 +250,7 @@ function renderCanvas(root, state, handlers) {
     element.addEventListener("click", () => {
       state.selectedConnectorId = Number(element.dataset.connectorId || 0);
       state.selectedNodeKey = "";
+      setSoundSelection(state, [], [state.selectedConnectorId]);
       handlers.renderAll?.();
     });
   });
@@ -203,8 +288,25 @@ function wireCanvasViewport(canvas, state, handlers) {
     if (event.target.closest?.("[data-node-key], [data-connector-id]")) {
       return;
     }
+    state.canvasContextMenu = {open: false, x: 0, y: 0};
+    if (state.canvasSelectionMode) {
+      const start = canvasPointFromEvent(scroll, event, state.canvasViewport?.zoom || 1);
+      const selectionRect = scroll.querySelector(".sound-selection-rect");
+      dragState = {
+        pointerId: event.pointerId,
+        mode: "select",
+        startX: start.x,
+        startY: start.y,
+        selectionRect
+      };
+      updateSelectionRect(selectionRect, start.x, start.y, start.x, start.y, state.canvasViewport?.zoom || 1);
+      scroll.setPointerCapture?.(event.pointerId);
+      event.preventDefault();
+      return;
+    }
     dragState = {
       pointerId: event.pointerId,
+      mode: "pan",
       startX: event.clientX,
       startY: event.clientY,
       startLeft: scroll.scrollLeft,
@@ -217,6 +319,12 @@ function wireCanvasViewport(canvas, state, handlers) {
     if (!dragState || dragState.pointerId !== event.pointerId) {
       return;
     }
+    if (dragState.mode === "select") {
+      const current = canvasPointFromEvent(scroll, event, state.canvasViewport?.zoom || 1);
+      updateSelectionRect(dragState.selectionRect, dragState.startX, dragState.startY, current.x, current.y, state.canvasViewport?.zoom || 1);
+      event.preventDefault();
+      return;
+    }
     scroll.scrollLeft = dragState.startLeft - (event.clientX - dragState.startX);
     scroll.scrollTop = dragState.startTop - (event.clientY - dragState.startY);
     state.canvasViewport.offsetX = scroll.scrollLeft;
@@ -224,6 +332,21 @@ function wireCanvasViewport(canvas, state, handlers) {
   });
   const stopDragging = (event) => {
     if (!dragState || dragState.pointerId !== event.pointerId) {
+      return;
+    }
+    if (dragState.mode === "select") {
+      const current = canvasPointFromEvent(scroll, event, state.canvasViewport?.zoom || 1);
+      selectSoundItemsInRect(state, state.activeSlotId, {
+        x1: dragState.startX,
+        y1: dragState.startY,
+        x2: current.x,
+        y2: current.y
+      });
+      dragState.selectionRect.hidden = true;
+      scroll.releasePointerCapture?.(event.pointerId);
+      dragState = null;
+      handlers.renderAll?.();
+      event.preventDefault();
       return;
     }
     scroll.classList.remove("dragging");
@@ -235,6 +358,69 @@ function wireCanvasViewport(canvas, state, handlers) {
   scroll.addEventListener("scroll", () => {
     state.canvasViewport.offsetX = scroll.scrollLeft;
     state.canvasViewport.offsetY = scroll.scrollTop;
+  });
+  scroll.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    state.canvasContextMenu = {
+      open: true,
+      x: Math.max(8, event.clientX - rect.left),
+      y: Math.max(44, event.clientY - rect.top)
+    };
+    handlers.renderAll?.();
+  });
+}
+
+function canvasPointFromEvent(scroll, event, zoom) {
+  const rect = scroll.querySelector(".sound-node-canvas-content")?.getBoundingClientRect() || scroll.getBoundingClientRect();
+  const scale = Number(zoom || 1);
+  return {
+    x: (event.clientX - rect.left) / scale,
+    y: (event.clientY - rect.top) / scale
+  };
+}
+
+function updateSelectionRect(element, x1, y1, x2, y2, zoom) {
+  if (!element) {
+    return;
+  }
+  const scale = Number(zoom || 1);
+  const left = Math.min(x1, x2) * scale;
+  const top = Math.min(y1, y2) * scale;
+  const width = Math.abs(x2 - x1) * scale;
+  const height = Math.abs(y2 - y1) * scale;
+  element.hidden = false;
+  element.style.left = `${left}px`;
+  element.style.top = `${top}px`;
+  element.style.width = `${width}px`;
+  element.style.height = `${height}px`;
+}
+
+function wirePanelResizers(root, state, handlers) {
+  root.querySelectorAll("[data-sound-panel-resizer]").forEach((resizer) => {
+    resizer.onpointerdown = (event) => {
+      const panel = resizer.dataset.soundPanelResizer || "";
+      const startX = event.clientX;
+      const initialWidth = panel === "slots" ? Number(state.slotListWidthPx || 240) : Number(state.propertyPanelWidthPx || 300);
+      resizer.setPointerCapture?.(event.pointerId);
+      resizer.classList.add("dragging");
+      const move = (moveEvent) => {
+        const delta = moveEvent.clientX - startX;
+        setSoundPanelWidth(state, panel, panel === "slots" ? initialWidth + delta : initialWidth - delta);
+        root.style.setProperty("--sound-slot-panel-width", `${Number(state.slotListWidthPx || 240)}px`);
+        root.style.setProperty("--sound-property-panel-width", `${Number(state.propertyPanelWidthPx || 300)}px`);
+      };
+      const stop = (upEvent) => {
+        resizer.classList.remove("dragging");
+        resizer.releasePointerCapture?.(upEvent.pointerId);
+        document.removeEventListener("pointermove", move);
+        document.removeEventListener("pointerup", stop);
+        handlers.renderAll?.();
+      };
+      document.addEventListener("pointermove", move);
+      document.addEventListener("pointerup", stop);
+      event.preventDefault();
+    };
   });
 }
 
@@ -405,16 +591,47 @@ function renderProperties(root, state, handlers) {
   const node = selectedNode(state);
   const connector = selectedConnector(state);
   panel.innerHTML = [
+    `<div class="sound-panel-resizer sound-panel-resizer-properties" data-sound-panel-resizer="properties" title="拖动调整属性栏宽度"></div>`,
     `<h2>属性</h2>`,
-    slot ? slotEditor(slot) : `<p class="empty-state">选择 Slot 后编辑功能键和音效。</p>`,
+    slot ? slotEditor(slot, state) : `<p class="empty-state">选择 Slot 后编辑功能键和音效。</p>`,
     node ? nodeDetails(node, state) : "",
     connector ? connectorDetails(connector, state) : ""
   ].join("");
+  bindSoundPreviewControls(panel, state, handlers);
   panel.querySelectorAll("[data-slot-field]").forEach((input) => {
     input.addEventListener("change", () => {
       updateSelectedSlotField(state, state.activeSlotId, input.dataset.slotField, input.value);
       handlers.renderAll?.();
     });
+  });
+  panel.querySelector("[data-clear-slot]")?.addEventListener("click", () => {
+    if (typeof window.confirm === "function" && !window.confirm("清空当前 Slot 会删除其中所有节点、连接和功能键映射。确定继续？")) {
+      return;
+    }
+    clearSoundSlot(state, state.activeSlotId);
+    handlers.setStatus?.("已清空当前 Slot");
+    handlers.renderAll?.();
+  });
+  panel.querySelector("[data-save-slot-library]")?.addEventListener("click", async () => {
+    const category = panel.querySelector("[data-slot-library-category]")?.value || "power_unit";
+    const entry = saveActiveSlotToLibrary(state, category);
+    if (!entry) {
+      handlers.setStatus?.("当前 Slot 无法保存");
+      handlers.renderAll?.();
+      return;
+    }
+    try {
+      const saved = await handlers.saveSoundLibrarySlot?.(entry, category);
+      if (saved) {
+        replaceLibraryEntryByKey(state.slotLibrary?.slots || [], "slot_library_id", entry.slot_library_id, saved);
+      }
+      handlers.setStatus?.("已入库");
+    } catch (error) {
+      state.slotLibrary.slots = (state.slotLibrary?.slots || [])
+        .filter((slot) => slot.slot_library_id !== entry.slot_library_id);
+      handlers.setStatus?.(`保存 Slot 库失败：${error.message || error}`);
+    }
+    handlers.renderAll?.();
   });
   const fileSelect = panel.querySelector("#soundNodeFileSelect");
   fileSelect?.addEventListener("change", () => {
@@ -433,6 +650,7 @@ function renderProperties(root, state, handlers) {
       handlers.renderAll?.();
     });
   });
+  wirePanelResizers(root, state, handlers);
 }
 
 function renderSoundFileInventory(root, state, handlers) {
@@ -440,19 +658,29 @@ function renderSoundFileInventory(root, state, handlers) {
   if (!panel) {
     return;
   }
-  const files = soundUsageForProject(state);
+  const files = sortSoundFiles(soundUsageForProject(state), state.soundFileSort);
+  const unusedCount = files.filter((file) => !file.used_by.length).length;
+  const categoryOptions = soundLibraryCategoryOptions(state);
+  const header = (field, label) => {
+    const active = state.soundFileSort?.field === field;
+    const suffix = active ? (state.soundFileSort.direction === "desc" ? " ↓" : " ↑") : "";
+    return `<button type="button" class="sound-file-sort-button" data-sound-file-sort="${field}">${esc(label)}${suffix}</button>`;
+  };
   panel.innerHTML = `<div class="sound-file-inventory-header">
     <h2>当前音效包文件</h2>
-    <span>${files.length} 个文件</span>
+    <div class="sound-file-inventory-actions">
+      <span>${files.length} 个文件</span>
+      <button type="button" class="danger" data-delete-unused-sounds${unusedCount ? "" : " disabled"}>一键删除未使用音效</button>
+    </div>
   </div>
   ${files.length ? `<div class="sound-file-table" role="table" aria-label="当前音效包音频文件">
     <div class="sound-file-row sound-file-row-head" role="row">
-      <span role="columnheader">ID</span>
-      <span role="columnheader">文件</span>
-      <span role="columnheader">时长</span>
-      <span role="columnheader">大小</span>
-      <span role="columnheader">来源</span>
-      <span role="columnheader">使用位置</span>
+      <span role="columnheader">${header("file_id", "ID")}</span>
+      <span role="columnheader">${header("file_name", "文件")}</span>
+      <span role="columnheader">${header("duration_seconds", "时长")}</span>
+      <span role="columnheader">${header("size_bits", "大小")}</span>
+      <span role="columnheader">${header("source", "来源")}</span>
+      <span role="columnheader">${header("used_by", "使用位置")}</span>
       <span role="columnheader">操作</span>
     </div>
     ${files.map((file) => {
@@ -461,16 +689,31 @@ function renderSoundFileInventory(root, state, handlers) {
       <span role="cell">#${Number(file.file_id || 0)}</span>
       <span role="cell">${esc(file.file_name || "")}</span>
       <span role="cell">${formatDuration(file.duration_seconds)}</span>
-      <span role="cell">${formatBytes(file.pcm_bytes)}</span>
+      <span role="cell">${formatBitCount(Number(file.pcm_bytes || 0) * 8)}b</span>
       <span role="cell">${sourceLabel(file)}</span>
       <span role="cell">${file.used_by.length ? esc(file.used_by.join("，")) : "未使用"}</span>
       <span role="cell" class="sound-file-actions">
+        ${soundPreviewButton(file)}
         <button type="button" data-sound-file-edit="${Number(file.file_id || 0)}">编辑</button>
+        <select data-sound-file-save-category="${Number(file.file_id || 0)}" aria-label="保存音效分类">${categoryOptions}</select>
+        <button type="button" data-sound-file-save="${Number(file.file_id || 0)}">入库</button>
         <button type="button" class="danger" data-sound-file-delete="${Number(file.file_id || 0)}"${used ? " disabled title=\"已被 Slot 或节点引用，不能删除\"" : ""}>删除</button>
       </span>
     </div>`;
     }).join("")}
-  </div>` : `<p class="empty-state">导入 DXSD 或上传音频后显示文件用量。</p>`}`;
+  </div>` : `<p class="empty-state">导入音效工程或上传音频后显示文件用量。</p>`}`;
+  bindSoundPreviewControls(panel, state, handlers);
+  panel.querySelector("[data-delete-unused-sounds]")?.addEventListener("click", () => {
+    const deletedCount = deleteUnusedSoundFiles(state);
+    handlers.setStatus?.(deletedCount ? `已删除 ${deletedCount} 个未使用音效` : "没有未使用音效可删除");
+    handlers.renderAll?.();
+  });
+  panel.querySelectorAll("[data-sound-file-sort]").forEach((button) => {
+    button.addEventListener("click", () => {
+      toggleSoundFileSort(state, button.dataset.soundFileSort || "file_id");
+      handlers.renderAll?.();
+    });
+  });
   panel.querySelectorAll("[data-sound-file-edit]").forEach((button) => {
     button.addEventListener("click", () => {
       openSoundFileEditor(state, button.dataset.soundFileEdit);
@@ -485,6 +728,37 @@ function renderSoundFileInventory(root, state, handlers) {
       handlers.renderAll?.();
     });
   });
+  panel.querySelectorAll("[data-sound-file-save]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const fileId = Number(button.dataset.soundFileSave || 0);
+      const category = panel.querySelector(`[data-sound-file-save-category="${fileId}"]`)?.value || "custom";
+      const saved = saveSoundFileToLibrary(state, fileId, category);
+      if (!saved) {
+        handlers.setStatus?.("音效文件不存在，无法保存");
+        handlers.renderAll?.();
+        return;
+      }
+      try {
+        const persisted = await handlers.saveSoundLibrarySound?.(saved, category);
+        if (persisted) {
+          replaceLibraryEntryByKey(state.savedSoundLibrary || [], "sound_id", saved.sound_id, persisted);
+        }
+        handlers.setStatus?.("已入库");
+      } catch (error) {
+        state.savedSoundLibrary = (state.savedSoundLibrary || [])
+          .filter((sound) => sound.sound_id !== saved.sound_id);
+        handlers.setStatus?.(`保存音效库失败：${error.message || error}`);
+      }
+      handlers.renderAll?.();
+    });
+  });
+}
+
+function replaceLibraryEntryByKey(entries, key, keyValue, replacement) {
+  const index = entries.findIndex((entry) => entry?.[key] === keyValue);
+  if (index >= 0) {
+    entries[index] = replacement;
+  }
 }
 
 function renderSoundFileEditorDialog(root, state, handlers) {
@@ -502,7 +776,10 @@ function renderSoundFileEditorDialog(root, state, handlers) {
     content.replaceChildren();
     return;
   }
-  const librarySounds = state.libraryCatalog.sounds || [];
+  const librarySounds = filterSoundLibrary({
+    sounds: [...(state.libraryCatalog.sounds || []), ...(state.savedSoundLibrary || []), ...(state.customSounds || [])]
+  }, state.soundFileEditorFilter || {});
+  const editorCategories = `<option value="">全部分类</option>${soundLibraryCategoryOptions(state, state.soundFileEditorFilter?.category || "")}`;
   content.innerHTML = `<div class="sound-file-editor-header">
     <div>
       <h2>编辑音效文件 #${fileId}</h2>
@@ -513,8 +790,12 @@ function renderSoundFileEditorDialog(root, state, handlers) {
   <div class="sound-file-editor-actions">
     <button id="soundFileReplaceUploadButton" type="button">上传 WAV 替换</button>
   </div>
+  <div class="sound-file-editor-filters">
+    <select id="soundFileEditorCategory" aria-label="音效文件编辑分类">${editorCategories}</select>
+    <input id="soundFileEditorSearch" value="${esc(state.soundFileEditorFilter?.query || "")}" placeholder="过滤音效">
+  </div>
   <div class="sound-file-editor-library" aria-label="选择系统音效">
-    ${librarySounds.map((sound) => `<button type="button" class="sound-library-item" data-replacement-sound-id="${esc(sound.sound_id)}">
+    ${librarySounds.map((sound) => `<button type="button" class="sound-library-item compact" data-replacement-sound-id="${esc(sound.sound_id)}">
       <strong>${esc(sound.label)}</strong>
       <span>${esc(sound.description || "")}</span>
       <small>${sound.audio_available ? "含音频" : "仅元数据"}</small>
@@ -529,6 +810,14 @@ function renderSoundFileEditorDialog(root, state, handlers) {
   });
   content.querySelector("#soundFileReplaceUploadButton")?.addEventListener("click", () => {
     handlers.triggerReplacementUpload?.();
+  });
+  content.querySelector("#soundFileEditorCategory")?.addEventListener("change", (event) => {
+    state.soundFileEditorFilter.category = event.target.value || "";
+    handlers.renderAll?.();
+  });
+  content.querySelector("#soundFileEditorSearch")?.addEventListener("input", (event) => {
+    state.soundFileEditorFilter.query = event.target.value || "";
+    handlers.renderAll?.();
   });
   content.querySelectorAll("[data-replacement-sound-id]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -546,9 +835,12 @@ function renderSoundFileEditorDialog(root, state, handlers) {
 
 function renderLibrary(root, state, handlers) {
   const panel = root.querySelector("#soundLibraryPanel");
+  const soundItems = root.querySelector("#soundLibraryItems");
+  const slotHeader = root.querySelector("#soundSlotLibraryHeader");
+  const slotItems = root.querySelector("#soundSlotLibraryItems");
   const categorySelect = root.querySelector("#soundLibraryCategory");
   const searchInput = root.querySelector("#soundLibrarySearch");
-  if (!panel) {
+  if (!panel || !soundItems || !slotHeader || !slotItems) {
     return;
   }
   if (categorySelect) {
@@ -568,22 +860,51 @@ function renderLibrary(root, state, handlers) {
     };
   }
   const sounds = filterSoundLibrary({
-    sounds: [...(state.libraryCatalog.sounds || []), ...state.customSounds]
+    sounds: [...(state.libraryCatalog.sounds || []), ...(state.savedSoundLibrary || []), ...state.customSounds]
   }, state.libraryFilter);
-  panel.innerHTML = sounds.map((sound) => {
+  const slotCategories = state.slotLibrary?.categories || defaultSlotLibraryCategories();
+  const slotTemplates = filterSlotLibrary(state);
+  soundItems.innerHTML = sounds.map((sound) => {
     return `<button type="button" class="sound-library-item" data-sound-id="${esc(sound.sound_id)}">
       <strong>${esc(sound.label)}</strong>
       <span>${esc(sound.description || "")}</span>
       <small>${sound.audio_available ? "含音频" : "仅元数据"}</small>
     </button>`;
   }).join("") || `<p class="empty-state">没有匹配的音效。</p>`;
-  panel.querySelectorAll("[data-sound-id]").forEach((button) => {
+  slotHeader.innerHTML = `<h2>Slot 库</h2>
+    <select data-slot-library-filter-category aria-label="Slot 库分类">
+      <option value="">全部类型</option>
+      ${slotCategories.map((category) => `<option value="${esc(category.category)}"${state.slotLibraryFilter.category === category.category ? " selected" : ""}>${esc(category.label)}</option>`).join("")}
+    </select>
+    <input data-slot-library-filter-query value="${esc(state.slotLibraryFilter.query || "")}" placeholder="搜索 Slot">`;
+  slotItems.innerHTML = slotTemplates.map((slot) => `<button type="button" class="sound-library-item" data-slot-library-id="${esc(slot.slot_library_id)}">
+        <strong>${esc(slot.label)}</strong>
+        <span>${esc(slotCategoryLabel(slotCategories, slot.category))}</span>
+        <small>${Number(slot.nodes?.length || 0)} 个节点，${Number(slot.connectors?.length || 0)} 条连接</small>
+      </button>`).join("") || `<p class="empty-state">Slot 库为空，可在右侧属性栏保存当前 Slot。</p>`;
+  soundItems.querySelectorAll("[data-sound-id]").forEach((button) => {
     button.addEventListener("click", () => {
       const sound = sounds.find((entry) => entry.sound_id === button.dataset.soundId);
       if (!sound) {
         return;
       }
       selectSoundForSlot(state, state.activeSlotId || 1, sound);
+      handlers.renderAll?.();
+    });
+  });
+  slotHeader.querySelector("[data-slot-library-filter-category]")?.addEventListener("change", (event) => {
+    state.slotLibraryFilter.category = event.target.value || "";
+    handlers.renderAll?.();
+  });
+  slotHeader.querySelector("[data-slot-library-filter-query]")?.addEventListener("input", (event) => {
+    state.slotLibraryFilter.query = event.target.value || "";
+    handlers.renderAll?.();
+  });
+  slotItems.querySelectorAll("[data-slot-library-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (applySlotLibraryEntry(state, button.dataset.slotLibraryId, state.activeSlotId || 1)) {
+        handlers.setStatus?.("已应用 Slot 库模板");
+      }
       handlers.renderAll?.();
     });
   });
@@ -609,7 +930,8 @@ function connectorSvg(connector, nodes, state) {
   const y1 = nodeY(source) + nodeHeight(source) / 2;
   const x2 = nodeX(target);
   const y2 = nodeY(target) + nodeHeight(target) / 2;
-  const selected = Number(connector.connector_id) === Number(state.selectedConnectorId);
+  const selected = Number(connector.connector_id) === Number(state.selectedConnectorId)
+    || (state.selectedConnectorIds || []).map(Number).includes(Number(connector.connector_id));
   return `<g class="sound-connector-group${selected ? " selected" : ""}">
     <path class="sound-connector${selected ? " selected" : ""}" data-connector-id="${connector.connector_id}" d="M${x1} ${y1} C${x1 + 60} ${y1}, ${x2 - 60} ${y2}, ${x2} ${y2}" marker-end="url(#soundArrow)"></path>
     <circle class="sound-connector-handle source" data-connector-id="${connector.connector_id}" data-connector-end="source" cx="${x1}" cy="${y1}" r="6"></circle>
@@ -618,7 +940,7 @@ function connectorSvg(connector, nodes, state) {
 }
 
 function nodeSvg(node, state) {
-  const selected = node.node_key === state.selectedNodeKey;
+  const selected = node.node_key === state.selectedNodeKey || (state.selectedNodeKeys || []).includes(node.node_key);
   const x = nodeX(node);
   const y = nodeY(node);
   const w = nodeWidth(node);
@@ -642,11 +964,25 @@ function gridLines(width, height) {
   return lines.join("");
 }
 
-function slotEditor(slot) {
+function slotEditor(slot, state) {
+  const functionNumber = slotFunctionNumberInputValue(slot.functionNumber ?? slot.function_number);
+  const slotSoundFileId = Number(slot.sound?.fileId ?? slot.sound?.file_id ?? 0);
+  const file = projectSoundFiles(state).find((entry) => Number(entry.file_id) === slotSoundFileId);
+  const soundFileName = file?.file_name || slot.sound?.fileName || slot.sound?.file_name || "未选择";
+  const slotCategories = (state.slotLibrary?.categories || defaultSlotLibraryCategories()).map((category) => {
+    return `<option value="${esc(category.category)}">${esc(category.label)}</option>`;
+  }).join("");
   return `<div class="sound-property-block">
     <label>Slot 名称<input data-slot-field="slotName" value="${esc(slot.slotName || slot.slot_name || "")}"></label>
-    <label>功能键<input type="number" min="0" max="68" data-slot-field="functionNumber" value="${Number(slot.functionNumber || 0)}"></label>
-    <p>音效文件：${esc(slot.sound?.fileName || "未选择")}</p>
+    <label>功能键<input type="number" min="0" max="68" placeholder="-" data-slot-field="functionNumber" value="${functionNumber}"></label>
+    <p class="sound-property-file-line"><span>音效文件：${esc(soundFileName)}</span>${file ? soundPreviewButton(file, "compact") : ""}</p>
+    <div class="sound-property-actions">
+      <button type="button" class="danger" data-clear-slot>清空 Slot</button>
+    </div>
+    <div class="sound-slot-library-save">
+      <label>Slot 类型<select data-slot-library-category>${slotCategories}</select></label>
+      <button type="button" data-save-slot-library>入库</button>
+    </div>
   </div>`;
 }
 
@@ -664,14 +1000,16 @@ function nodeDetails(node, state) {
   return `<div class="sound-property-block">
     <h3>节点 ${Number(node.node_id)}</h3>
     <label>名称<input data-node-field="nodeName" value="${esc(node.node_name || "")}"></label>
-    <label>类型<input type="number" min="0" max="999" data-node-field="nodeType" value="${Number(node.node_type || 0)}"></label>
-    <label>重复次数<input type="number" min="0" max="9999" data-node-field="repeatAmount" value="${Number(node.repeat_amount || 0)}"></label>
-    <label>音量<input type="number" min="0" max="255" data-node-field="soundVolume" value="${Number(node.sound_volume || 0)}"></label>
+    <div class="sound-property-grid sound-property-grid-three">
+      <label>类型<input type="number" min="0" max="999" data-node-field="nodeType" value="${Number(node.node_type || 0)}"></label>
+      <label>重复次数<input type="number" min="0" max="9999" data-node-field="repeatAmount" value="${Number(node.repeat_amount || 0)}"></label>
+      <label>音量<input type="number" min="0" max="255" data-node-field="soundVolume" value="${Number(node.sound_volume || 0)}"></label>
+    </div>
     <div class="sound-property-grid">
       <label>宽<input type="number" min="80" max="500" data-node-field="width" value="${Number(node.width ?? 96)}"></label>
       <label>高<input type="number" min="56" max="300" data-node-field="height" value="${Number(node.height ?? 64)}"></label>
     </div>
-    <p>音频：${esc(file?.file_name || "无")}</p>
+    <p class="sound-property-file-line"><span>音频：${esc(file?.file_name || "无")}</span>${file ? soundPreviewButton(file, "compact") : ""}</p>
     <label>音效文件<select id="soundNodeFileSelect">${options}</select></label>
   </div>`;
 }
@@ -700,7 +1038,7 @@ function selectedSlotFromSummary(state) {
   return {
     slotId: slot.slot_id,
     slotName: slot.slot_name,
-    functionNumber: Number(String(slot.functionKey || "").replace(/^F/i, "")) || slot.slot_id,
+    functionNumber: slotFunctionNumberForRow(state, slot),
     sound: {}
   };
 }
@@ -720,11 +1058,31 @@ function selectedConnector(state) {
 }
 
 function fallbackSlots(selectedSlots) {
-  return (selectedSlots.length ? selectedSlots : [{slotId: 1, slotName: "Slot 1", functionNumber: 1}]).map((slot) => ({
+  return (selectedSlots.length ? selectedSlots : [{slotId: 1, slotName: "Slot 1", functionNumber: null}]).map((slot) => ({
     slot_id: slot.slotId,
     slot_name: slot.slotName,
-    functionKey: slot.functionNumber ? `F${slot.functionNumber}` : "",
+    functionKey: slot.functionNumber === null || slot.functionNumber === undefined ? "" : `F${slot.functionNumber}`,
   }));
+}
+
+function slotFunctionNumberForRow(state, slot) {
+  const slotId = Number(slot.slot_id || 0);
+  const selected = (state.selectedSlots || []).find((entry) => Number(entry.slotId) === slotId);
+  const mappedText = String(slot.functionKey || "").replace(/^F/i, "");
+  const mappedNumber = mappedText === "" ? null : Number(mappedText);
+  if (Number.isFinite(mappedNumber) && mappedNumber >= 0) {
+    return Math.min(68, Math.round(mappedNumber));
+  }
+  const selectedNumber = selected?.functionNumber;
+  return selectedNumber === null || selectedNumber === undefined || selectedNumber === "" ? null : Math.min(68, Math.max(0, Math.round(Number(selectedNumber))));
+}
+
+function slotFunctionNumberInputValue(value) {
+  if (value === null || value === undefined || value === "") {
+    return "";
+  }
+  const number = Number(value);
+  return Number.isFinite(number) ? String(Math.min(68, Math.max(0, Math.round(number)))) : "";
 }
 
 function fallbackNodesForSlot(slotId) {
@@ -780,7 +1138,108 @@ function sourceLabel(file) {
   if (file.source === "missing") {
     return "缺失";
   }
-  return "DXSD";
+  return "工程";
+}
+
+function soundLibraryCategoryOptions(state, selectedCategory = "") {
+  const categories = [
+    ...(state.libraryCatalog?.categories || []),
+    {category: "custom", label: "自定义上传"},
+  ];
+  return categories.map((category) => {
+    return `<option value="${esc(category.category)}"${selectedCategory === category.category ? " selected" : ""}>${esc(category.label)}</option>`;
+  }).join("");
+}
+
+function slotCategoryLabel(categories, value) {
+  return (categories || []).find((category) => category.category === value)?.label || value || "未分类";
+}
+
+function bindSoundPreviewControls(root, state, handlers) {
+  root.querySelectorAll("[data-sound-file-play]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const fileId = Number(button.dataset.soundFilePlay || 0);
+      const file = projectSoundFiles(state).find((entry) => Number(entry.file_id) === fileId);
+      playSoundPreview(file, handlers);
+    });
+  });
+  syncSoundPreviewButtons(root);
+}
+
+function playSoundPreview(file, handlers) {
+  const url = soundPreviewUrl(file);
+  if (!url) {
+    handlers.setStatus?.("该音效没有可试听音频数据");
+    return;
+  }
+  const fileId = Number(file?.file_id || 0);
+  if (activeSoundPreview && activeSoundPreviewFileId === fileId) {
+    if (activeSoundPreview.paused || activeSoundPreview.ended) {
+      resumeActiveSoundPreview(file, handlers);
+      return;
+    }
+    pauseActiveSoundPreview(file, handlers);
+    return;
+  }
+  activeSoundPreview?.pause?.();
+  activeSoundPreviewFileId = fileId;
+  activeSoundPreview = new Audio(url);
+  activeSoundPreview.addEventListener?.("ended", () => {
+    if (activeSoundPreviewFileId === fileId) {
+      activeSoundPreview = null;
+      activeSoundPreviewFileId = 0;
+      syncSoundPreviewButtons();
+    }
+  });
+  resumeActiveSoundPreview(file, handlers);
+}
+
+function pauseActiveSoundPreview(file, handlers) {
+  activeSoundPreview?.pause?.();
+  syncSoundPreviewButtons();
+  handlers.setStatus?.(`已暂停试听 ${file.file_name || `音效 ${file.file_id}`}`);
+}
+
+function resumeActiveSoundPreview(file, handlers) {
+  if (activeSoundPreview?.ended) {
+    activeSoundPreview.currentTime = 0;
+  }
+  activeSoundPreview.play()
+    .then(() => handlers.setStatus?.(`正在试听 ${file.file_name || `音效 ${file.file_id}`}`))
+    .then(() => syncSoundPreviewButtons())
+    .catch((error) => {
+      activeSoundPreview = null;
+      activeSoundPreviewFileId = 0;
+      syncSoundPreviewButtons();
+      handlers.setStatus?.(`试听失败：${error.message || String(error)}`);
+    });
+}
+
+function soundPreviewButton(file, variant = "") {
+  const fileId = Number(file?.file_id || 0);
+  const canPlay = Boolean(soundPreviewUrl(file));
+  const className = `sound-preview-button${variant ? ` ${variant}` : ""}`;
+  const soundName = file?.file_name || `音效 ${fileId}`;
+  const label = `试听 ${soundName}`;
+  return `<button type="button" class="${className}" data-sound-file-play="${fileId}" data-sound-file-name="${esc(soundName)}" aria-label="${esc(label)}" aria-pressed="false" title="${canPlay ? esc(label) : "该音效没有可试听音频数据"}"${canPlay ? "" : " disabled"}>▶</button>`;
+}
+
+function syncSoundPreviewButtons(scope = document) {
+  if (!scope?.querySelectorAll) {
+    return;
+  }
+  scope.querySelectorAll("[data-sound-file-play]").forEach((button) => {
+    const fileId = Number(button.dataset.soundFilePlay || 0);
+    const soundName = button.dataset.soundFileName || `音效 ${fileId}`;
+    const sameFile = Boolean(activeSoundPreview && activeSoundPreviewFileId === fileId);
+    const isPlaying = sameFile && !activeSoundPreview.paused && !activeSoundPreview.ended;
+    const action = isPlaying ? "暂停" : sameFile ? "继续试听" : "试听";
+    button.textContent = isPlaying ? "⏸" : "▶";
+    button.classList.toggle("playing", isPlaying);
+    button.setAttribute("aria-pressed", isPlaying ? "true" : "false");
+    button.setAttribute("aria-label", `${action} ${soundName}`);
+    button.title = `${action} ${soundName}`;
+  });
 }
 
 function esc(value) {

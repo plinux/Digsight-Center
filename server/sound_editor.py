@@ -4,16 +4,87 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+import uuid
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 
 
-DXSD_BODY_LIMIT_BYTES = 64 * 1024 * 1024
+SOUND_PROJECT_BODY_LIMIT_BYTES = 64 * 1024 * 1024
+SOUND_PROJECT_INPUT_EXTENSIONS = {".dxsd", ".dxsp"}
 DEFAULT_TOTAL_VOLUME = 180
 SOUND_PROJECT_MIME_TYPE = "application/xml"
+LEGACY_DXSP_FLASH_SIZE = 33_554_432
+UNMAPPED_SLOT_FUNCTION_CV_VALUE = 255
+USER_SOUND_LIBRARY_PATH = Path("data/sound-library.json")
+
+
+def _megabits_to_bits(megabits: int) -> int:
+  return megabits * 1024 * 1024
+
+
+def _megabits_to_bytes(megabits: int) -> int:
+  return _megabits_to_bits(megabits) // 8
+
+
+def _sound_chip_profile_60_80(
+  model: str,
+  series_label: str,
+  interface_name: str,
+  storage_megabits: int,
+  audio_bits: int,
+  fixed_slot_count: int,
+  slot_count_evidence: str,
+) -> dict[str, Any]:
+  return {
+    "chip_id": f"digsight_{model}",
+    "label": f"动芯 {model} {series_label}",
+    "decoder_module": model,
+    "supported_decoder_modules": [model],
+    "interfaces": [interface_name],
+    "dcc_speed_steps": [14, 28, 128],
+    "simultaneous_sound_channels": 4,
+    "speaker_impedance_ohm": "4-32",
+    "storage_bits": _megabits_to_bits(storage_megabits),
+    "storage_bytes": _megabits_to_bytes(storage_megabits),
+    "storage_unit": "Mb",
+    "fixed_slot_count": fixed_slot_count,
+    "slot_count_evidence": slot_count_evidence,
+    "evidence_status": "official_capacity_confirmed",
+    "project_extension": "dxsd",
+    "audio_format": {"sample_rate_hz": 44100, "bits": audio_bits, "channels": 1},
+    "notes": [
+      f"60/80 系列手册确认 {model} 存储空间为 {storage_megabits}Mb。",
+      f"{series_label} {model} 按当前厂商答复和产品目录固定为 {fixed_slot_count} 个可编辑 Slot。",
+    ],
+  }
+
+
+def _sound_chip_profile_6x(model: str, interface_name: str) -> dict[str, Any]:
+  return _sound_chip_profile_60_80(
+    model,
+    "龟趺Ⅲ",
+    interface_name,
+    64,
+    12,
+    16,
+    "2026 产品目录图确认电跌/龟趺Ⅲ 6 系列支持 16 个可编辑音轨。",
+  )
+
+
+def _sound_chip_profile_8x(model: str, interface_name: str, storage_megabits: int) -> dict[str, Any]:
+  return _sound_chip_profile_60_80(
+    model,
+    "逑音",
+    interface_name,
+    storage_megabits,
+    16,
+    64,
+    "2026 产品目录图确认逑音 8 系列支持 64 个可编辑音轨；8004 DXSD 样例也解析出 64 个 Slot。",
+  )
 
 
 _CHIP_PROFILES = [
@@ -26,12 +97,19 @@ _CHIP_PROFILES = [
     "dcc_speed_steps": [14, 28, 128],
     "simultaneous_sound_channels": 4,
     "speaker_impedance_ohm": "4-32",
+    "storage_bits": None,
     "storage_bytes": None,
-    "evidence_status": "needs_official_or_real_device_confirmation",
+    "storage_unit": "Mb",
+    "fixed_slot_count": 28,
+    "slot_count_evidence": "2026-07-02 厂商答复确认 5313/5323 固定 28 个 Slot。",
+    "evidence_status": "needs_storage_capacity_confirmation",
+    "project_extension": "dxsp",
+    "legacy_software_version": "22",
     "audio_format": {"sample_rate_hz": 11025, "bits": 8, "channels": 1},
     "notes": [
       "官网说明支持声音文件刷新、F1-F28 声音控制和 4 声道混音。",
       "公开网页未确认声音存储容量，生成时不得把容量作为已验证限制。",
+      "厂商已确认 5313/5323 固定 28 个 Slot。",
     ],
   },
   {
@@ -43,48 +121,29 @@ _CHIP_PROFILES = [
     "dcc_speed_steps": [14, 28, 128],
     "simultaneous_sound_channels": 4,
     "speaker_impedance_ohm": "4-32",
+    "storage_bits": None,
     "storage_bytes": None,
-    "evidence_status": "needs_official_or_real_device_confirmation",
+    "storage_unit": "Mb",
+    "fixed_slot_count": 28,
+    "slot_count_evidence": "2026-07-02 厂商答复确认 5313/5323 固定 28 个 Slot。",
+    "evidence_status": "needs_storage_capacity_confirmation",
+    "project_extension": "dxsp",
+    "legacy_software_version": "25",
     "audio_format": {"sample_rate_hz": 11025, "bits": 8, "channels": 1},
     "notes": [
       "系列说明书覆盖 5313/5323，公开资料未给出可验证声音存储容量。",
+      "厂商已确认 5313/5323 固定 28 个 Slot。",
     ],
   },
-  {
-    "chip_id": "digsight_8004",
-    "label": "动芯 8004 DXSD 音效工程",
-    "decoder_module": "8004",
-    "supported_decoder_modules": ["8004"],
-    "interfaces": ["DXSD sample evidence"],
-    "dcc_speed_steps": [14, 28, 128],
-    "simultaneous_sound_channels": 4,
-    "speaker_impedance_ohm": None,
-    "storage_bytes": 128 * 1024 * 1024 // 8,
-    "evidence_status": "official_capacity_confirmed",
-    "audio_format": {"sample_rate_hz": 44100, "bits": 16, "channels": 1},
-    "notes": [
-      "8004_HW2_SS7C_V37_KF.dxsd 样例显示 Base_Info.Decoder_Moudle=8004。",
-      "60/80 系列手册确认 8004 存储空间为 128Mb。",
-      "样例音频为 base64 PCM，按 44.1kHz/16-bit/mono 估算时长。",
-    ],
-  },
-  {
-    "chip_id": "digsight_8005",
-    "label": "动芯 8005 逑音音效工程",
-    "decoder_module": "8005",
-    "supported_decoder_modules": ["8005"],
-    "interfaces": ["DXSD editor reference"],
-    "dcc_speed_steps": [14, 28, 128],
-    "simultaneous_sound_channels": 4,
-    "speaker_impedance_ohm": None,
-    "storage_bytes": 256 * 1024 * 1024 // 8,
-    "evidence_status": "official_capacity_confirmed",
-    "audio_format": {"sample_rate_hz": 44100, "bits": 16, "channels": 1},
-    "notes": [
-      "参考编辑器页面标题包含 Decoder 8005。",
-      "60/80 系列手册确认 8005 存储空间为 256Mb。",
-    ],
-  },
+  _sound_chip_profile_6x("6003", "PluX22"),
+  _sound_chip_profile_6x("6005", "21MTC"),
+  _sound_chip_profile_6x("6006", "NEXT18"),
+  _sound_chip_profile_6x("6008", "E24"),
+  _sound_chip_profile_8x("8003", "PluX22", 256),
+  _sound_chip_profile_8x("8004", "NEXT18", 128),
+  _sound_chip_profile_8x("8005", "21MTC", 256),
+  _sound_chip_profile_8x("8006", "NEXT18", 256),
+  _sound_chip_profile_8x("8008", "E24", 256),
 ]
 
 
@@ -106,19 +165,29 @@ _SOUND_LIBRARY = [
   ("door-close-warning", "关门提示", "station_announcement", "关门提示音和蜂鸣", ["车门", "提示"]),
 ]
 
+_SOUND_LIBRARY_CATEGORIES = [
+  {"category": "traction_engine", "label": "主音效", "description": "内燃、电力、电机、风机和空压机等持续或循环声音"},
+  {"category": "horn", "label": "鸣笛", "description": "风笛、电笛、长鸣、短鸣和组合鸣笛"},
+  {"category": "rail_wheel", "label": "轮轨声", "description": "轨缝、道岔、曲线和轮缘摩擦声"},
+  {"category": "radio", "label": "司机手台", "description": "司机、调度、车站值班交流声"},
+  {"category": "station_announcement", "label": "广播与提示", "description": "车站广播、到站提醒、关门提示和客室提示音"},
+]
+
+_SLOT_LIBRARY_CATEGORIES = [
+  {"category": "power_unit", "label": "动力单元"},
+  {"category": "horn", "label": "鸣笛"},
+  {"category": "mechanical_unit", "label": "机械单元"},
+  {"category": "running_sound", "label": "行驶音效"},
+  {"category": "radio_control", "label": "联控音效"},
+  {"category": "announcement", "label": "广播音效"},
+]
+
 
 def sound_chip_profiles() -> list[dict[str, Any]]:
   return [dict(profile) for profile in _CHIP_PROFILES]
 
 
-def sound_library_catalog() -> dict[str, Any]:
-  categories = [
-    {"category": "traction_engine", "label": "主音效", "description": "内燃、电力、电机、风机和空压机等持续或循环声音"},
-    {"category": "horn", "label": "鸣笛", "description": "风笛、电笛、长鸣、短鸣和组合鸣笛"},
-    {"category": "rail_wheel", "label": "轮轨声", "description": "轨缝、道岔、曲线和轮缘摩擦声"},
-    {"category": "radio", "label": "司机手台", "description": "司机、调度、车站值班交流声"},
-    {"category": "station_announcement", "label": "广播与提示", "description": "车站广播、到站提醒、关门提示和客室提示音"},
-  ]
+def sound_library_catalog(user_library: dict[str, Any] | None = None) -> dict[str, Any]:
   sounds = []
   for sound_id, label, category, description, tags in _SOUND_LIBRARY:
     sounds.append({
@@ -131,33 +200,196 @@ def sound_library_catalog() -> dict[str, Any]:
       "asset_source": "metadata_only",
       "license": "pending_user_or_project_asset",
     })
-  return {"categories": categories, "sounds": sounds}
+  library = normalized_user_sound_library(user_library or load_user_sound_library())
+  return {
+    "categories": [dict(category) for category in _SOUND_LIBRARY_CATEGORIES],
+    "sounds": sounds,
+    "saved_sounds": library["saved_sounds"],
+    "slot_library": library["slot_library"],
+  }
+
+
+def default_user_sound_library() -> dict[str, Any]:
+  return {
+    "saved_sounds": [],
+    "slot_library": {
+      "categories": [dict(category) for category in _SLOT_LIBRARY_CATEGORIES],
+      "slots": [],
+    },
+  }
+
+
+def load_user_sound_library(store_path: Path | str = USER_SOUND_LIBRARY_PATH) -> dict[str, Any]:
+  path = Path(store_path)
+  if not path.exists():
+    return default_user_sound_library()
+  try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+  except (OSError, json.JSONDecodeError):
+    return default_user_sound_library()
+  return normalized_user_sound_library(payload)
+
+
+def normalized_user_sound_library(payload: dict[str, Any]) -> dict[str, Any]:
+  library = default_user_sound_library()
+  if not isinstance(payload, dict):
+    return library
+  library["saved_sounds"] = [
+    _normalize_saved_sound(sound)
+    for sound in payload.get("saved_sounds", [])
+    if isinstance(sound, dict)
+  ]
+  slot_library = payload.get("slot_library", {})
+  if isinstance(slot_library, dict):
+    categories = slot_library.get("categories")
+    if isinstance(categories, list) and categories:
+      library["slot_library"]["categories"] = [
+        {"category": str(category.get("category", "")), "label": str(category.get("label", ""))}
+        for category in categories
+        if isinstance(category, dict) and category.get("category")
+      ] or library["slot_library"]["categories"]
+    library["slot_library"]["slots"] = [
+      _normalize_slot_library_entry(slot)
+      for slot in slot_library.get("slots", [])
+      if isinstance(slot, dict)
+    ]
+  return library
+
+
+def save_user_sound_library_sound(sound: dict[str, Any], store_path: Path | str = USER_SOUND_LIBRARY_PATH) -> dict[str, Any]:
+  entry = _normalize_saved_sound(sound)
+  library = load_user_sound_library(store_path)
+  library["saved_sounds"] = _upsert_by_key(library["saved_sounds"], entry, "sound_id")
+  _write_user_sound_library(library, store_path)
+  return entry
+
+
+def save_user_sound_library_slot(slot: dict[str, Any], store_path: Path | str = USER_SOUND_LIBRARY_PATH) -> dict[str, Any]:
+  entry = _normalize_slot_library_entry(slot)
+  library = load_user_sound_library(store_path)
+  library["slot_library"]["slots"] = _upsert_by_key(library["slot_library"]["slots"], entry, "slot_library_id")
+  _write_user_sound_library(library, store_path)
+  return entry
+
+
+def _write_user_sound_library(library: dict[str, Any], store_path: Path | str) -> None:
+  path = Path(store_path)
+  path.parent.mkdir(parents=True, exist_ok=True)
+  normalized = normalized_user_sound_library(library)
+  tmp_path = path.with_suffix(path.suffix + ".tmp")
+  tmp_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+  tmp_path.replace(path)
+
+
+def _upsert_by_key(entries: list[dict[str, Any]], entry: dict[str, Any], key: str) -> list[dict[str, Any]]:
+  entry_key = entry.get(key)
+  return [current for current in entries if current.get(key) != entry_key] + [entry]
+
+
+def _normalize_saved_sound(sound: dict[str, Any]) -> dict[str, Any]:
+  category = str(sound.get("category") or "custom").strip() or "custom"
+  file_name = str(sound.get("fileName") or sound.get("file_name") or sound.get("label") or "sound.wav")
+  content_base64 = str(sound.get("contentBase64") or sound.get("content_base64") or "")
+  content_encoding = str(sound.get("contentEncoding") or sound.get("content_encoding") or "")
+  preview_format = sound.get("previewFormat", sound.get("preview_format"))
+  pcm_bytes = int(sound.get("pcmBytes", sound.get("pcm_bytes", 0)) or 0)
+  sound_id = str(sound.get("sound_id") or f"saved-sound-{uuid.uuid4().hex}")
+  label = str(sound.get("label") or file_name)
+  return {
+    "sound_id": sound_id,
+    "label": label,
+    "category": category,
+    "description": str(sound.get("description") or f"用户保存的音效 {file_name}"),
+    "tags": [str(tag) for tag in sound.get("tags", []) if str(tag).strip()],
+    "audio_available": bool(sound.get("audio_available") or content_base64),
+    "asset_source": str(sound.get("asset_source") or "saved_project_sound"),
+    "license": str(sound.get("license") or "user_saved_asset"),
+    "fileName": file_name,
+    "file_name": file_name,
+    "contentBase64": content_base64,
+    "content_base64": content_base64,
+    "contentEncoding": content_encoding,
+    "content_encoding": content_encoding,
+    "previewFormat": preview_format,
+    "preview_format": preview_format,
+    "pcmBytes": pcm_bytes,
+    "pcm_bytes": pcm_bytes,
+  }
+
+
+def _normalize_slot_library_entry(slot: dict[str, Any]) -> dict[str, Any]:
+  category = str(slot.get("category") or "power_unit").strip() or "power_unit"
+  slot_id = str(slot.get("slot_library_id") or f"slot-template-{uuid.uuid4().hex}")
+  nodes = [_plain_dict(node) for node in slot.get("nodes", []) if isinstance(node, dict)]
+  connectors = [_plain_dict(connector) for connector in slot.get("connectors", []) if isinstance(connector, dict)]
+  sound_files = [_plain_dict(sound_file) for sound_file in slot.get("sound_files", []) if isinstance(sound_file, dict)]
+  sound_file_ids = [
+    int(value)
+    for value in slot.get("sound_file_ids", [])
+    if str(value).strip().isdigit()
+  ]
+  return {
+    "slot_library_id": slot_id,
+    "category": category,
+    "label": str(slot.get("label") or "未命名 Slot"),
+    "source_slot_id": int(slot.get("source_slot_id") or 0),
+    "nodes": nodes,
+    "connectors": connectors,
+    "sound_files": sound_files,
+    "sound_file_ids": sound_file_ids,
+  }
+
+
+def _plain_dict(value: dict[str, Any]) -> dict[str, Any]:
+  return {str(key): item for key, item in value.items() if isinstance(key, str)}
+
+
+def parse_sound_project_summary(project_bytes: bytes, file_name: str = "sound.dxsd") -> dict[str, Any]:
+  if len(project_bytes) > SOUND_PROJECT_BODY_LIMIT_BYTES:
+    raise ValueError(f"音效工程文件超过 {SOUND_PROJECT_BODY_LIMIT_BYTES} 字节限制")
+  _validate_sound_project_file_name(file_name)
+  if project_bytes[:4] == b"PK\x03\x04":
+    raise ValueError("不支持直接导入 ZIP；官方 ZIP 只是下载容器，请先解压后选择 .dxsd 或 .dxsp 工程文件")
+  return parse_dxsd_summary(project_bytes, file_name)
 
 
 def parse_dxsd_summary(xml_bytes: bytes, file_name: str = "sound.dxsd") -> dict[str, Any]:
-  if len(xml_bytes) > DXSD_BODY_LIMIT_BYTES:
-    raise ValueError(f"DXSD 文件超过 {DXSD_BODY_LIMIT_BYTES} 字节限制")
+  if len(xml_bytes) > SOUND_PROJECT_BODY_LIMIT_BYTES:
+    raise ValueError(f"音效工程 XML 超过 {SOUND_PROJECT_BODY_LIMIT_BYTES} 字节限制")
   _reject_unsafe_xml(xml_bytes)
   records = _stream_dxsd_records(xml_bytes)
-  base_info = _normalize_base_info(_first(records, "Base_Info"))
-  slots = [_normalize_slot(row) for row in records.get("Slot_Table", [])]
-  nodes = [_normalize_node(row) for row in records.get("Node_Table", [])]
-  judgments = [_normalize_judgment(row) for row in records.get("Judgment_Table", [])]
-  actions = [_normalize_action(row) for row in records.get("Action_Table", [])]
-  judgment_counts = _counts_by(judgments, "connector_id")
-  action_counts = _counts_by(actions, "connector_id")
-  connectors = [
-    _normalize_connector(row, judgment_counts=judgment_counts, action_counts=action_counts)
-    for row in records.get("Connector_Table", [])
-  ]
+  is_legacy_dxsp = bool(records.get("Project_Base_Info")) and not records.get("Base_Info")
+  project_format = "dxsp_legacy" if is_legacy_dxsp else "dxsd"
+  base_info = _normalize_base_info(_base_info_row(records))
+  if is_legacy_dxsp:
+    slots = _legacy_dxsp_slots(records)
+    nodes = []
+    connectors = []
+    judgments = []
+    actions = []
+  else:
+    slots = [_normalize_slot(row) for row in records.get("Slot_Table", [])]
+    nodes = [_normalize_node(row) for row in records.get("Node_Table", [])]
+    judgments = [_normalize_judgment(row) for row in records.get("Judgment_Table", [])]
+    actions = [_normalize_action(row) for row in records.get("Action_Table", [])]
+    judgment_counts = _counts_by(judgments, "connector_id")
+    action_counts = _counts_by(actions, "connector_id")
+    connectors = [
+      _normalize_connector(row, judgment_counts=judgment_counts, action_counts=action_counts)
+      for row in records.get("Connector_Table", [])
+    ]
   sound_files = [
     _normalize_sound_file(row, base_info.get("decoder_module", ""))
     for row in records.get("SoundFile_Table", [])
   ]
   cv_entries = [_normalize_cv(row) for row in records.get("Random_CV_Table", [])]
-  function_mappings = _function_mappings(cv_entries, {slot["slot_id"]: slot for slot in slots})
+  if is_legacy_dxsp:
+    function_mappings = _legacy_dxsp_function_mappings(slots)
+  else:
+    function_mappings = _function_mappings(cv_entries, {slot["slot_id"]: slot for slot in slots})
   return {
     "file_name": Path(file_name or "sound.dxsd").name,
+    "project_format": project_format,
     "base_info": base_info,
     "counts": {
       "slots": len(slots),
@@ -188,10 +420,14 @@ def build_dxsd_package(project: dict[str, Any]) -> dict[str, Any]:
   if not isinstance(slots, list):
     raise ValueError("slots must be a JSON array")
   warnings = []
-  xml = _build_package_xml(chip, package_name, slots, warnings)
+  project_extension = str(chip.get("project_extension") or "dxsd")
+  if project_extension == "dxsp":
+    xml = _build_dxsp_package_xml(chip, package_name, slots, warnings)
+  else:
+    xml = _build_package_xml(chip, package_name, slots, warnings)
   content = xml.encode("utf-8")
   return {
-    "file_name": f"{package_name}.dxsd",
+    "file_name": f"{package_name}.{project_extension}",
     "mime_type": SOUND_PROJECT_MIME_TYPE,
     "content_base64": base64.b64encode(content).decode("ascii"),
     "byte_length": len(content),
@@ -233,12 +469,19 @@ def _first(records: dict[str, list[dict[str, str]]], table_name: str) -> dict[st
   return values[0] if values else {}
 
 
+def _base_info_row(records: dict[str, list[dict[str, str]]]) -> dict[str, str]:
+  return _first(records, "Base_Info") or _first(records, "Project_Base_Info")
+
+
 def _normalize_base_info(row: dict[str, str]) -> dict[str, Any]:
   return {
     "decoder_module": row.get("Decoder_Moudle", ""),
+    "flash_size": _int(row.get("Flash_Size")),
     "software_version": row.get("SoftWare_Version", ""),
     "dealer_id": row.get("Dealer_ID", ""),
     "engine_type": _int(row.get("Engine_Type")),
+    "random_interval": _int(row.get("Random_Interval")),
+    "sound_config": _int(row.get("Sound_Config")),
     "sound_name": row.get("Sound_Name", ""),
     "sound_mac_id": row.get("Sound_Mac_ID", ""),
     "model_id": _int(row.get("Model_ID")),
@@ -335,6 +578,9 @@ def _normalize_sound_file(row: dict[str, str], decoder_module: str) -> dict[str,
     "start_address": _int(row.get("Start_Address")),
     "file_flag": _int(row.get("File_Flag")),
     "has_audio_data": bool(file_data),
+    "content_base64": _clean_base64(file_data),
+    "content_encoding": "pcm",
+    "preview_format": _audio_preview_format(decoder_module),
     "pcm_bytes": pcm_bytes,
     "duration_seconds": duration,
   }
@@ -353,15 +599,77 @@ def _function_mappings(cv_entries: list[dict[str, Any]], slots_by_id: dict[int, 
   for entry in cv_entries:
     cv_address = entry["cv_address"]
     value = entry["cv_value"]
-    if 171 <= cv_address <= 234 and value not in {0, 255}:
-      slot_id = cv_address - 170
-      mappings.append({
-        "cv_address": cv_address,
-        "slot_id": slot_id,
-        "slot_name": slots_by_id.get(slot_id, {}).get("slot_name", ""),
-        "function_key": f"F{value}",
-        "function_number": value,
-      })
+    function_number = _slot_function_number(value)
+    if not (171 <= cv_address <= 234 and function_number is not None):
+      continue
+    slot_id = cv_address - 170
+    slot = slots_by_id.get(slot_id)
+    if slot is None:
+      continue
+    mappings.append({
+      "cv_address": cv_address,
+      "slot_id": slot_id,
+      "slot_name": slot.get("slot_name", ""),
+      "function_key": f"F{function_number}",
+      "function_number": function_number,
+      "is_assigned": True,
+    })
+  return mappings
+
+
+def _slot_function_number(value: Any) -> int | None:
+  number = _int(value)
+  return number if 0 <= number <= 68 else None
+
+
+def _legacy_dxsp_slots(records: dict[str, list[dict[str, str]]]) -> list[dict[str, Any]]:
+  slots = []
+  for index, row in enumerate(records.get("User_Sound_Table", [])[:28], start=1):
+    file_ids = _legacy_sound_file_ids(row)
+    slots.append({
+      "slot_id": index,
+      "slot_priority": index,
+      "slot_start_node": 0,
+      "is_use": bool(file_ids),
+      "start_address": 0,
+      "slot_name": str(row.get("User_Function_Name") or f"F{index} 音效"),
+      "legacy_table": "User_Sound_Table",
+      "legacy_user_type": _int(row.get("User_Type")),
+      "legacy_user_volume": _int(row.get("User_Volume")),
+      "legacy_file_ids": file_ids,
+    })
+  return slots
+
+
+def _legacy_sound_file_ids(row: dict[str, str]) -> list[int]:
+  file_ids = []
+  for index in range(8):
+    key = f"File_{index}"
+    if key not in row:
+      continue
+    file_id = _int(row.get(key))
+    if file_id not in {0, 255}:
+      file_ids.append(file_id)
+    elif file_id == 0:
+      file_ids.append(file_id)
+  return file_ids
+
+
+def _legacy_dxsp_function_mappings(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+  mappings = []
+  for slot in slots:
+    function_number = _slot_function_number(slot["slot_id"])
+    if not function_number:
+      continue
+    mappings.append({
+      "cv_address": 0,
+      "slot_id": slot["slot_id"],
+      "slot_name": slot.get("slot_name", ""),
+      "function_key": f"F{function_number}",
+      "function_number": function_number,
+      "is_assigned": True,
+      "source": "dxsp_user_sound_table",
+    })
   return mappings
 
 
@@ -387,12 +695,15 @@ def _build_package_xml(chip: dict[str, Any], package_name: str, slots: list[Any]
     if not isinstance(raw_slot, dict):
       raise ValueError("each slot must be a JSON object")
     slot_id = _bounded_int(raw_slot.get("slot_id"), index, 1, 64)
-    function_key = _bounded_int(raw_slot.get("function_key"), slot_id, 0, 68)
+    function_key = _function_cv_value(raw_slot.get("function_key"))
     slot_name = str(raw_slot.get("slot_name") or f"Sound slot {slot_id}")
     sound = raw_slot.get("sound") if isinstance(raw_slot.get("sound"), dict) else {}
-    lines.extend(_slot_xml(slot_id, slot_name))
     raw_nodes = raw_slot.get("nodes") if isinstance(raw_slot.get("nodes"), list) else []
     raw_connectors = raw_slot.get("connectors") if isinstance(raw_slot.get("connectors"), list) else []
+    raw_sound_files = raw_slot.get("sound_files") if isinstance(raw_slot.get("sound_files"), list) else []
+    has_default_sound = _slot_has_default_sound(sound)
+    slot_is_use = _boolish(raw_slot.get("is_use"), bool(raw_nodes or raw_connectors or raw_sound_files or has_default_sound))
+    lines.extend(_slot_xml(slot_id, slot_name, slot_is_use))
     if raw_nodes:
       for raw_node in raw_nodes:
         if not isinstance(raw_node, dict):
@@ -424,7 +735,6 @@ def _build_package_xml(chip: dict[str, Any], package_name: str, slots: list[Any]
           source_port_index=_bounded_int(raw_connector.get("source_port_index"), 1, 0, 999),
           start_address=_bounded_int(raw_connector.get("start_address"), 0, 0, 999999),
         ))
-      raw_sound_files = raw_slot.get("sound_files") if isinstance(raw_slot.get("sound_files"), list) else []
       for raw_sound_file in raw_sound_files:
         if not isinstance(raw_sound_file, dict):
           continue
@@ -440,7 +750,7 @@ def _build_package_xml(chip: dict[str, Any], package_name: str, slots: list[Any]
           sound_payload["content_base64"],
         ))
         emitted_sound_file_ids.add(file_id)
-    else:
+    elif has_default_sound:
       file_id = index
       sound_payload = _sound_payload_for_slot(chip, slot_id, slot_name, sound, warnings)
       total_audio_bytes += sound_payload["audio_bytes"]
@@ -456,13 +766,126 @@ def _build_package_xml(chip: dict[str, Any], package_name: str, slots: list[Any]
   return "\n".join(lines) + "\n"
 
 
-def _slot_xml(slot_id: int, slot_name: str) -> list[str]:
+def _build_dxsp_package_xml(chip: dict[str, Any], package_name: str, slots: list[Any], warnings: list[dict[str, str]]) -> str:
+  fixed_slot_count = int(chip.get("fixed_slot_count") or 28)
+  slot_map: dict[int, dict[str, Any]] = {}
+  for index, raw_slot in enumerate(slots, start=1):
+    if not isinstance(raw_slot, dict):
+      raise ValueError("each slot must be a JSON object")
+    slot_id = _bounded_int(raw_slot.get("slot_id"), index, 1, fixed_slot_count)
+    slot_map[slot_id] = raw_slot
+
+  lines = [
+    '<?xml version="1.0" standalone="yes"?>',
+    "<NewDataSet>",
+    "  <Project_Base_Info>",
+    f"    <Decoder_Moudle>{_xml(chip['decoder_module'])}</Decoder_Moudle>",
+    f"    <Flash_Size>{LEGACY_DXSP_FLASH_SIZE}</Flash_Size>",
+    f"    <SoftWare_Version>{_xml(chip.get('legacy_software_version') or '1')}</SoftWare_Version>",
+    "    <Engine_Type>0</Engine_Type>",
+    "    <Random_Interval>4</Random_Interval>",
+    "    <Sound_Config>254</Sound_Config>",
+    f"    <Sound_Name>{_xml(package_name)}</Sound_Name>",
+    "    <Sound_Mac_ID>4294967295</Sound_Mac_ID>",
+    "    <Model_ID>0</Model_ID>",
+    f"    <Decoder_Name>{_xml(chip['decoder_module'])}</Decoder_Name>",
+    "  </Project_Base_Info>",
+  ]
+  sound_file_rows: list[str] = []
+  total_audio_bytes = 0
+  next_file_id = 0
+  for slot_id in range(1, fixed_slot_count + 1):
+    raw_slot = slot_map.get(slot_id, {})
+    slot_name = str(raw_slot.get("slot_name") or f"F{slot_id} 音效")
+    if raw_slot.get("nodes") or raw_slot.get("connectors"):
+      warnings.append({
+        "type": "dxsp_graph_not_supported",
+        "slot_id": str(slot_id),
+        "message": f"5313/5323 的 .dxsp 旧格式不保存节点图，Slot {slot_id} 只导出首个音频引用。",
+      })
+    sound_source = _slot_sound_source(raw_slot)
+    sound_file_id: int | None = None
+    if sound_source:
+      payload = _sound_payload_for_slot(chip, slot_id, slot_name, sound_source, warnings)
+      if payload["content_base64"]:
+        sound_file_id = next_file_id
+        next_file_id += 1
+        total_audio_bytes += payload["audio_bytes"]
+        sound_file_rows.extend(_dxsp_sound_file_xml(
+          sound_file_id,
+          payload["file_name"],
+          payload["file_length"],
+          payload["content_base64"],
+        ))
+    lines.extend(_dxsp_user_sound_xml(slot_id, slot_name, sound_file_id))
+  _validate_total_sound_size(chip, total_audio_bytes, warnings)
+  lines.extend(sound_file_rows)
+  lines.append("</NewDataSet>")
+  return "\n".join(lines) + "\n"
+
+
+def _validate_sound_project_file_name(file_name: str) -> None:
+  suffix = Path(file_name or "").suffix.lower()
+  if suffix not in SOUND_PROJECT_INPUT_EXTENSIONS:
+    raise ValueError("音效工程只支持 .dxsd 或 .dxsp 文件；官方 ZIP 请先解压后再导入")
+
+
+def _function_cv_value(value: Any) -> int:
+  if value is None:
+    return UNMAPPED_SLOT_FUNCTION_CV_VALUE
+  text = str(value).strip()
+  if not text:
+    return UNMAPPED_SLOT_FUNCTION_CV_VALUE
+  if text.lower().startswith("f"):
+    text = text[1:].strip()
+  number = _int(text, UNMAPPED_SLOT_FUNCTION_CV_VALUE)
+  if number < 0:
+    return UNMAPPED_SLOT_FUNCTION_CV_VALUE
+  return min(68, number)
+
+
+def _slot_sound_source(raw_slot: dict[str, Any]) -> dict[str, Any]:
+  raw_sound_files = raw_slot.get("sound_files") if isinstance(raw_slot.get("sound_files"), list) else []
+  for raw_sound_file in raw_sound_files:
+    if isinstance(raw_sound_file, dict) and _slot_has_default_sound(raw_sound_file):
+      return raw_sound_file
+  sound = raw_slot.get("sound") if isinstance(raw_slot.get("sound"), dict) else {}
+  return sound if _slot_has_default_sound(sound) else {}
+
+
+def _dxsp_user_sound_xml(slot_id: int, slot_name: str, file_id: int | None) -> list[str]:
+  is_used = file_id is not None
+  return [
+    "  <User_Sound_Table>",
+    f"    <User_Type>{1 if is_used else 0}</User_Type>",
+    f"    <User_Volume>{255 if is_used else 0}</User_Volume>",
+    "    <User_Label>1</User_Label>",
+    f"    <User_Function_Name>{_xml(slot_name)}</User_Function_Name>",
+    f"    <File_0>{file_id if file_id is not None else 255}</File_0>",
+    "    <File_1>255</File_1>",
+    "    <File_2>255</File_2>",
+    "  </User_Sound_Table>",
+  ]
+
+
+def _dxsp_sound_file_xml(file_id: int, file_name: str, file_length: int, content_base64: str) -> list[str]:
+  return [
+    "  <SoundFile_Table>",
+    f"    <File_ID>{file_id}</File_ID>",
+    f"    <File_Name>{_xml(file_name)}</File_Name>",
+    f"    <File_Length>{file_length}</File_Length>",
+    f"    <File_Data>{content_base64}</File_Data>",
+    "  </SoundFile_Table>",
+  ]
+
+
+def _slot_xml(slot_id: int, slot_name: str, is_use: bool = True) -> list[str]:
   return [
     "  <Slot_Table>",
     f"    <Slot_ID>{slot_id}</Slot_ID>",
     f"    <Slot_Priority>{slot_id}</Slot_Priority>",
     "    <Slot_StartNode>0</Slot_StartNode>",
-    "    <Is_Use>true</Is_Use>",
+    f"    <Is_Use>{str(bool(is_use)).lower()}</Is_Use>",
     "    <Start_Address>0</Start_Address>",
     f"    <Slot_Name>{_xml(slot_name)}</Slot_Name>",
     "  </Slot_Table>",
@@ -691,6 +1114,16 @@ def _audio_format(decoder_module: str) -> dict[str, int]:
   return {"sample_rate_hz": 44100, "bits": 16, "channels": 1}
 
 
+def _audio_preview_format(decoder_module: str) -> dict[str, int]:
+  audio_format = _audio_format(decoder_module)
+  preview_bits = 8 if int(audio_format.get("bits", 16)) <= 8 else 16
+  return {
+    "sample_rate_hz": int(audio_format.get("sample_rate_hz", 44100)),
+    "bits": preview_bits,
+    "channels": int(audio_format.get("channels", 1)),
+  }
+
+
 def _base64_len(value: str) -> int:
   if not value:
     return 0
@@ -733,6 +1166,33 @@ def _float(value: Any, default: float = 0.0) -> float:
 
 def _bool(value: Any) -> bool:
   return str(value).strip().lower() == "true"
+
+
+def _boolish(value: Any, default: bool) -> bool:
+  if value is None:
+    return default
+  if isinstance(value, bool):
+    return value
+  if isinstance(value, (int, float)):
+    return bool(value)
+  text = str(value).strip().lower()
+  if text in {"true", "1", "yes", "y"}:
+    return True
+  if text in {"false", "0", "no", "n", ""}:
+    return False
+  return default
+
+
+def _slot_has_default_sound(sound: dict[str, Any]) -> bool:
+  return any(str(sound.get(field_name) or "").strip() for field_name in [
+    "content_base64",
+    "contentBase64",
+    "library_id",
+    "libraryId",
+    "file_name",
+    "fileName",
+    "label",
+  ])
 
 
 def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:

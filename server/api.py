@@ -152,6 +152,8 @@ class ApiRouter:
       "cv.write": lambda route, body, state: self.cv_programming_api.write_cv(body, state),
       "chip_info.read": lambda route, body, state: self.cv_programming_api.read_chip_info(body, state),
       "sound.dxsd_import": lambda route, body, state: self.sound_editor_api.import_dxsd(body),
+      "sound.library_sound": lambda route, body, state: self.sound_editor_api.save_library_sound(body),
+      "sound.library_slot": lambda route, body, state: self.sound_editor_api.save_library_slot(body),
       "sound.package": lambda route, body, state: self.sound_editor_api.build_package(body),
       "address.read": lambda route, body, state: self.cv_programming_api.read_address(body, state),
       "address.write": lambda route, body, state: self.cv_programming_api.write_address(body, state),
