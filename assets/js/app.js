@@ -65,6 +65,7 @@ import {sortedConsistMembers} from "./consist-helpers.js";
 import {renderSoundEditor} from "./sound-editor-view.js";
 import {
   createSoundEditorState,
+  hasPendingSoundExport,
   wireSoundEditorEvents as attachSoundEditorEvents
 } from "./sound-editor-controller.js";
 
@@ -124,6 +125,7 @@ const elements = {
   soundImportDxsdButton: document.getElementById("soundImportDxsdButton"),
   soundGeneratePackageButton: document.getElementById("soundGeneratePackageButton"),
   soundUploadInput: document.getElementById("soundUploadInput"),
+  soundReplaceUploadInput: document.getElementById("soundReplaceUploadInput"),
   connectionStatusText: document.getElementById("connectionStatusText")
 };
 
@@ -1256,8 +1258,19 @@ function renderActiveControllerView() {
 
 function renderActiveSoundEditorView() {
   renderSoundEditor(elements.soundEditorView, soundEditorState, {
+    setStatus,
+    triggerReplacementUpload: () => elements.soundReplaceUploadInput?.click(),
     renderAll
   });
+}
+
+function warnBeforeClosingWithPendingSoundExport(event) {
+  if (!hasPendingSoundExport(soundEditorState)) {
+    return undefined;
+  }
+  event.preventDefault();
+  event.returnValue = "";
+  return "";
 }
 
 async function sendDcControl() {
@@ -1411,6 +1424,10 @@ wireAppEvents({
   handleVehicleKeyboard,
   handleVehicleKeyboardRelease
 });
+
+if (typeof globalThis.addEventListener === "function") {
+  globalThis.addEventListener("beforeunload", warnBeforeClosingWithPendingSoundExport);
+}
 
 const digitShortcutMap = {
   Digit0: 0,

@@ -121,7 +121,7 @@
       </div>
       <div class="sound-editor-layout">
         <aside class="sound-slot-list" aria-label="音效 Slot">
-          <h2>Slots</h2>
+          <h2>Slot</h2>
           <div id="soundSlotList"></div>
         </aside>
         <section class="sound-node-panel" aria-label="节点图">
@@ -136,9 +136,13 @@
           <select id="soundLibraryCategory" aria-label="音效分类"></select>
           <input id="soundLibrarySearch" placeholder="搜索音效">
           <input id="soundUploadInput" type="file" accept="audio/*,.wav,.pcm" multiple>
+          <input id="soundReplaceUploadInput" type="file" accept=".wav,audio/wav,audio/x-wav">
         </div>
         <div id="soundLibraryPanel" class="sound-library-grid"></div>
       </section>
+      <dialog id="soundFileEditorDialog" class="sound-file-editor-dialog" aria-label="编辑音效文件">
+        <div id="soundFileEditorDialogContent"></div>
+      </dialog>
       <ul id="soundPackageWarnings" class="sound-warning-list"></ul>
     </section>
   </main>

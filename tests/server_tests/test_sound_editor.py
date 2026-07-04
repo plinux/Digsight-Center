@@ -1,5 +1,6 @@
 import base64
 import json
+import struct
 import unittest
 
 from server.api import ApiRouter
@@ -11,6 +12,24 @@ from server.sound_editor import (
   sound_chip_profiles,
   sound_library_catalog,
 )
+import server.sound_editor as sound_editor_module
+
+
+def wav_bytes(sample_rate=44100, bits=16, channels=1, data=b"\x00\x00\x01\x00") -> bytes:
+  byte_rate = sample_rate * channels * bits // 8
+  block_align = channels * bits // 8
+  fmt = struct.pack("<HHIIHH", 1, channels, sample_rate, byte_rate, block_align, bits)
+  return (
+    b"RIFF"
+    + struct.pack("<I", 4 + (8 + len(fmt)) + (8 + len(data)))
+    + b"WAVE"
+    + b"fmt "
+    + struct.pack("<I", len(fmt))
+    + fmt
+    + b"data"
+    + struct.pack("<I", len(data))
+    + data
+  )
 
 
 def minimal_dxsd_xml() -> bytes:
@@ -164,7 +183,7 @@ class SoundEditorDomainTest(unittest.TestCase):
       self.assertFalse(entry["audio_available"])
 
   def test_build_dxsd_package_outputs_minimal_digsight_project(self):
-    sound_payload = base64.b64encode(b"\x00\x00\x01\x00").decode("ascii")
+    sound_payload = base64.b64encode(wav_bytes()).decode("ascii")
     package = build_dxsd_package({
       "chip_id": "digsight_8004",
       "package_name": "测试音效",
@@ -174,7 +193,7 @@ class SoundEditorDomainTest(unittest.TestCase):
           "slot_name": "短风笛",
           "function_key": 2,
           "sound": {
-            "file_name": "horn.pcm",
+            "file_name": "horn.wav",
             "content_base64": sound_payload,
           },
         },
@@ -189,9 +208,136 @@ class SoundEditorDomainTest(unittest.TestCase):
     self.assertIn("<Node_Table>", xml)
     self.assertIn("<Connector_Table>", xml)
     self.assertIn("<SoundFile_Table>", xml)
+    self.assertIn("<File_Length>4</File_Length>", xml)
     self.assertIn("<CV_Address>171</CV_Address>", xml)
     self.assertIn("<CV_Value>2</CV_Value>", xml)
     self.assertEqual(package["warnings"], [])
+
+  def test_build_dxsd_package_preserves_edited_graph_payload(self):
+    sound_payload = base64.b64encode(wav_bytes()).decode("ascii")
+
+    package = build_dxsd_package({
+      "chip_id": "digsight_8004",
+      "package_name": "节点编辑",
+      "slots": [
+        {
+          "slot_id": 3,
+          "slot_name": "自定义流程",
+          "function_key": 9,
+          "nodes": [
+            {"node_id": 0, "node_name": "入口", "node_type": 1, "file_id": 0, "x": 40, "y": 80, "width": 96, "height": 64},
+            {"node_id": 1, "node_name": "播放 A", "node_type": 1, "file_id": 21, "x": 220, "y": 80, "width": 120, "height": 70, "sound_volume": 180, "repeat_amount": 2},
+            {"node_id": 2, "node_name": "播放 B", "node_type": 1, "file_id": 0, "x": 420, "y": 120, "width": 120, "height": 70},
+          ],
+          "connectors": [
+            {"connector_id": 31, "source_node_id": 0, "target_node_id": 1, "source_port_index": 1, "connector_type": 0},
+            {"connector_id": 32, "source_node_id": 1, "target_node_id": 2, "source_port_index": 1, "connector_type": 0},
+          ],
+          "sound_files": [
+            {"file_id": 21, "file_name": "custom.wav", "content_base64": sound_payload},
+          ],
+        },
+      ],
+    })
+    xml = base64.b64decode(package["content_base64"]).decode("utf-8")
+
+    self.assertIn("<Slot_ID>3</Slot_ID>", xml)
+    self.assertIn("<CV_Address>173</CV_Address>", xml)
+    self.assertIn("<CV_Value>9</CV_Value>", xml)
+    self.assertIn("<Node_ID>2</Node_ID>", xml)
+    self.assertIn("<Node_Name>播放 B</Node_Name>", xml)
+    self.assertIn("<Sound_Volume>180</Sound_Volume>", xml)
+    self.assertIn("<Repeat_Amount>2</Repeat_Amount>", xml)
+    self.assertIn("<Node_X>420</Node_X>", xml)
+    self.assertIn("<Connector_ID>32</Connector_ID>", xml)
+    self.assertIn("<OUT_Node_ID>2</OUT_Node_ID>", xml)
+    self.assertIn("<File_ID>21</File_ID>", xml)
+    self.assertIn("<File_Name>custom.wav</File_Name>", xml)
+    self.assertEqual(package["warnings"], [])
+
+  def test_build_dxsd_package_rejects_wrong_wav_format_for_chip(self):
+    sound_payload = base64.b64encode(wav_bytes(sample_rate=22050)).decode("ascii")
+
+    with self.assertRaises(ValueError) as context:
+      build_dxsd_package({
+        "chip_id": "digsight_8004",
+        "package_name": "错误格式",
+        "slots": [{
+          "slot_id": 1,
+          "slot_name": "短风笛",
+          "function_key": 2,
+          "sound": {
+            "file_name": "horn.wav",
+            "content_base64": sound_payload,
+          },
+        }],
+      })
+
+    self.assertIn("44100Hz / 16bit / 1声道", str(context.exception))
+
+  def test_build_dxsd_package_rejects_wrong_bit_depth_for_chip(self):
+    sound_payload = base64.b64encode(wav_bytes(bits=8, data=b"\x00\x01")).decode("ascii")
+
+    with self.assertRaises(ValueError) as context:
+      build_dxsd_package({
+        "chip_id": "digsight_8004",
+        "package_name": "错误位深",
+        "slots": [{
+          "slot_id": 1,
+          "slot_name": "短风笛",
+          "function_key": 2,
+          "sound": {
+            "file_name": "horn.wav",
+            "content_base64": sound_payload,
+          },
+        }],
+      })
+
+    self.assertIn("44100Hz / 16bit / 1声道", str(context.exception))
+
+  def test_build_dxsd_package_warns_when_capacity_is_unknown(self):
+    sound_payload = base64.b64encode(wav_bytes(sample_rate=11025, bits=8, data=b"\x00\x01")).decode("ascii")
+
+    package = build_dxsd_package({
+      "chip_id": "digsight_5313",
+      "package_name": "未知容量",
+      "slots": [{
+        "slot_id": 1,
+        "slot_name": "短风笛",
+        "function_key": 2,
+        "sound": {
+          "file_name": "horn.wav",
+          "content_base64": sound_payload,
+        },
+      }],
+    })
+
+    self.assertIn("sound_capacity_unconfirmed", {warning["type"] for warning in package["warnings"]})
+
+  def test_build_dxsd_package_rejects_known_capacity_overflow(self):
+    profile = next(profile for profile in sound_editor_module._CHIP_PROFILES if profile["chip_id"] == "digsight_8004")
+    original_storage = profile["storage_bytes"]
+    profile["storage_bytes"] = 1
+    try:
+      sound_payload = base64.b64encode(wav_bytes()).decode("ascii")
+      with self.assertRaises(ValueError) as context:
+        build_dxsd_package({
+          "chip_id": "digsight_8004",
+          "package_name": "超容量",
+          "slots": [{
+            "slot_id": 1,
+            "slot_name": "短风笛",
+            "function_key": 2,
+            "sound": {
+              "file_name": "horn.wav",
+              "content_base64": sound_payload,
+            },
+          }],
+        })
+    finally:
+      profile["storage_bytes"] = original_storage
+
+    self.assertIn("超过芯片容量", str(context.exception))
 
   def test_build_dxsd_package_allows_metadata_only_sounds_with_warning(self):
     package = build_dxsd_package({

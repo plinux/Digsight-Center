@@ -22,6 +22,9 @@ class SoundEditorContractTest(SourceAssertionsMixin, unittest.TestCase):
       "soundFileInventoryPanel",
       "soundLibraryPanel",
       "soundUploadInput",
+      "soundReplaceUploadInput",
+      "soundFileEditorDialog",
+      "soundFileEditorDialogContent",
       "soundPackageWarnings",
     ]:
       self.assertIn(f'id="{element_id}"', html)
@@ -66,11 +69,85 @@ class SoundEditorContractTest(SourceAssertionsMixin, unittest.TestCase):
   def test_sound_editor_node_file_replacement_controls_exist(self):
     view_source = self.read_text("assets/js/sound-editor-view.js")
     controller_source = self.read_text("assets/js/sound-editor-controller.js")
+    css = self.read_text("assets/css/app.css")
 
     self.assertIn("soundNodeFileSelect", view_source)
     self.assertIn("renderSoundFileInventory", view_source)
+    self.assertIn("renderSoundFileEditorDialog", view_source)
     self.assertIn("setNodeSoundFile", controller_source)
+    self.assertIn("addSoundNode", controller_source)
+    self.assertIn("moveSoundNode", controller_source)
+    self.assertIn("resizeSoundNode", controller_source)
+    self.assertIn("updateSoundNodeField", controller_source)
+    self.assertIn("addSoundConnector", controller_source)
+    self.assertIn("updateSoundConnectorEndpoint", controller_source)
+    self.assertIn("updateSoundConnectorField", controller_source)
     self.assertIn("soundUsageForProject", controller_source)
+    self.assertIn("deleteUnusedSoundFile", controller_source)
+    self.assertIn("replaceSoundFile", controller_source)
+    self.assertIn("openSoundFileEditor", controller_source)
+    self.assertIn("closeSoundFileEditor", controller_source)
+    self.assertIn("data-sound-file-delete", view_source)
+    self.assertIn("data-sound-file-edit", view_source)
+    self.assertIn("已被 Slot 或节点引用，不能删除", view_source)
+    self.assertIn("data-replacement-sound-id", view_source)
+    self.assertIn("soundReplaceUploadInput", controller_source)
+    self.assertIn("soundCanvasZoomOut", view_source)
+    self.assertIn("soundCanvasZoomIn", view_source)
+    self.assertIn("soundCanvasZoomReset", view_source)
+    self.assertIn("sound-node-canvas-content", view_source)
+    self.assertIn("soundAddNodeButton", view_source)
+    self.assertIn("soundAddConnectorButton", view_source)
+    self.assertIn("data-node-resize-key", view_source)
+    self.assertIn("data-connector-end", view_source)
+    self.assertIn("wireConnectorEndpointDragging", view_source)
+    self.assertIn("resizeSoundNode", view_source)
+    self.assertIn("updateSoundConnectorEndpoint", view_source)
+    self.assertIn("soundConnectorSourceSelect", view_source)
+    self.assertIn("soundConnectorTargetSelect", view_source)
+    self.assertIn("data-node-field", view_source)
+    self.assertIn("data-connector-field", view_source)
+    self.assertIn("wheel", view_source)
+    self.assertIn("pointerdown", view_source)
+    self.assertIn("moveSoundNode", view_source)
+    self.assertIn("setSoundCanvasZoom", controller_source)
+    self.assertIn("panSoundCanvas", controller_source)
+    self.assertIn("soundCanvasBoundsForSlot", controller_source)
+    self.assertIn("pendingSoundExport", controller_source)
+    self.assertIn("hasPendingSoundExport", controller_source)
+    self.assertIn("markSoundEditorExportStarted", controller_source)
+    self.assertIn("markSoundEditorExported", controller_source)
+    self.assertNotIn("editRevision", controller_source)
+    self.assertNotIn("lastExportedRevision", controller_source)
+    self.assertIn(".sound-node-canvas-scroll", css)
+    self.assertIn("overflow: auto;", css)
+
+  def test_sound_editor_visible_labels_use_chinese_terms(self):
+    html = self.read_text("index.html")
+    view_source = self.read_text("assets/js/sound-editor-view.js")
+    readme = self.read_text("README.md")
+    manual = self.read_text("manual/MANUAL.html")
+    combined_visible_text = "\n".join([html, view_source, readme, manual])
+
+    for text in ["Slot", "添加节点", "添加连接", "节点", "连接"]:
+      self.assertIn(text, combined_visible_text)
+    for text in ["添加 Node", ">Slots<", ">Node ", ">Connection "]:
+      self.assertNotIn(text, combined_visible_text)
+
+  def test_sound_editor_warns_before_closing_with_unexported_changes(self):
+    app_source = self.read_text("assets/js/app.js")
+    bootstrap_source = self.read_text("assets/js/app-bootstrap.js")
+    controller_source = self.read_text("assets/js/sound-editor-controller.js")
+    sound_events_source = self.source_function(controller_source, "wireSoundEditorEvents")
+
+    self.assertIn("hasPendingSoundExport", app_source)
+    self.assertIn("warnBeforeClosingWithPendingSoundExport", app_source)
+    self.assertIn("addEventListener(\"beforeunload\"", app_source)
+    self.assertIn("markSoundEditorExportStarted(state)", sound_events_source)
+    self.assertIn("markSoundEditorExported(state)", sound_events_source)
+    self.assertIn("markSoundEditorExportFailed(state)", sound_events_source)
+    self.assertIn("markSoundEditorChanged(state)", sound_events_source)
+    self.assertIn("wireSoundEditorEvents?.();", bootstrap_source)
 
   def test_sound_editor_is_available_only_for_digsight_controller(self):
     app_source = self.read_text("assets/js/app.js")

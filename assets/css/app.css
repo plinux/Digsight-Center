@@ -2772,7 +2772,8 @@ body.function-icon-picker-open {
   font-size: 12px;
 }
 
-#soundDxsdFileInput {
+#soundDxsdFileInput,
+#soundReplaceUploadInput {
   position: absolute;
   inline-size: 1px;
   block-size: 1px;
@@ -2853,14 +2854,55 @@ body.function-icon-picker-open {
 }
 
 .sound-node-canvas {
+  height: 100%;
   min-height: 460px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  background: #f8fafb;
+}
+
+.sound-canvas-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 8px;
+  border-bottom: 1px solid var(--line);
+  background: #fff;
+}
+
+.sound-canvas-toolbar button {
+  min-width: 34px;
+  min-height: 30px;
+  padding: 4px 8px;
+}
+
+.sound-canvas-toolbar span {
+  min-width: 44px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.sound-node-canvas-scroll {
+  min-height: 0;
+  overflow: auto;
+  cursor: grab;
+  touch-action: none;
+}
+
+.sound-node-canvas-scroll.dragging {
+  cursor: grabbing;
+}
+
+.sound-node-canvas-content {
+  min-width: 100%;
+  min-height: 100%;
   background: #f8fafb;
 }
 
 .sound-node-canvas svg {
-  width: 100%;
-  height: 100%;
-  min-height: 460px;
   display: block;
 }
 
@@ -2873,10 +2915,16 @@ body.function-icon-picker-open {
   fill: #ffffff;
   stroke: #60717f;
   stroke-width: 1.5;
+  cursor: move;
 }
 
 .sound-node.selected rect {
   stroke: #176b87;
+  stroke-width: 3;
+}
+
+.sound-node.dragging rect {
+  stroke: #b42318;
   stroke-width: 3;
 }
 
@@ -2891,6 +2939,24 @@ body.function-icon-picker-open {
   font-size: 11px;
 }
 
+.sound-node .sound-node-resize-handle {
+  fill: #176b87;
+  stroke: #ffffff;
+  stroke-width: 1.5;
+  cursor: nwse-resize;
+  pointer-events: all;
+}
+
+.sound-node.selected .sound-node-resize-handle,
+.sound-node.dragging .sound-node-resize-handle {
+  stroke: #ffffff;
+  stroke-width: 1.5;
+}
+
+.sound-node-resize-handle.dragging {
+  fill: #b42318;
+}
+
 .sound-connector {
   fill: none;
   stroke: #176b87;
@@ -2901,6 +2967,18 @@ body.function-icon-picker-open {
 .sound-connector.selected {
   stroke: #b42318;
   stroke-width: 3;
+}
+
+.sound-connector-handle {
+  fill: #ffffff;
+  stroke: #176b87;
+  stroke-width: 2;
+  cursor: crosshair;
+  pointer-events: all;
+}
+
+.sound-connector-group.selected .sound-connector-handle {
+  stroke: #b42318;
 }
 
 .sound-property-panel {
@@ -2927,6 +3005,12 @@ body.function-icon-picker-open {
   display: grid;
   gap: 5px;
   color: var(--muted);
+}
+
+.sound-property-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .sound-library-section {
@@ -2968,10 +3052,10 @@ body.function-icon-picker-open {
 
 .sound-file-row {
   display: grid;
-  grid-template-columns: 56px minmax(160px, 1.2fr) 80px 80px 72px minmax(180px, 1.4fr);
+  grid-template-columns: 56px minmax(160px, 1.2fr) 80px 80px 72px minmax(180px, 1.4fr) minmax(124px, max-content);
   gap: 8px;
   align-items: center;
-  min-width: 760px;
+  min-width: 920px;
   padding: 8px 10px;
   background: #fff;
   font-size: 12px;
@@ -2988,6 +3072,80 @@ body.function-icon-picker-open {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.sound-file-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.sound-file-actions button {
+  min-width: 48px;
+  min-height: 28px;
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+.sound-file-editor-dialog {
+  width: min(760px, calc(100vw - 32px));
+  max-height: min(720px, calc(100vh - 32px));
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.sound-file-editor-dialog[open] {
+  display: grid;
+}
+
+.sound-file-editor-dialog::backdrop {
+  background: rgba(15, 23, 42, 0.32);
+}
+
+#soundFileEditorDialogContent {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 12px;
+}
+
+.sound-file-editor-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sound-file-editor-header h2,
+.sound-file-editor-header p {
+  margin: 0;
+}
+
+.sound-file-editor-header p {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sound-file-editor-header button {
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0;
+  font-size: 20px;
+}
+
+.sound-file-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.sound-file-editor-library {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px;
+  overflow: auto;
 }
 
 .sound-library-grid {
@@ -3037,7 +3195,7 @@ body.function-icon-picker-open {
   }
 
   .sound-node-canvas,
-  .sound-node-canvas svg {
+  .sound-node-canvas-content {
     min-height: 360px;
   }
 }

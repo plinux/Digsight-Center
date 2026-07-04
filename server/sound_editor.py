@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -58,11 +59,12 @@ _CHIP_PROFILES = [
     "dcc_speed_steps": [14, 28, 128],
     "simultaneous_sound_channels": 4,
     "speaker_impedance_ohm": None,
-    "storage_bytes": None,
-    "evidence_status": "needs_official_or_real_device_confirmation",
+    "storage_bytes": 128 * 1024 * 1024 // 8,
+    "evidence_status": "official_capacity_confirmed",
     "audio_format": {"sample_rate_hz": 44100, "bits": 16, "channels": 1},
     "notes": [
       "8004_HW2_SS7C_V37_KF.dxsd 样例显示 Base_Info.Decoder_Moudle=8004。",
+      "60/80 系列手册确认 8004 存储空间为 128Mb。",
       "样例音频为 base64 PCM，按 44.1kHz/16-bit/mono 估算时长。",
     ],
   },
@@ -75,11 +77,12 @@ _CHIP_PROFILES = [
     "dcc_speed_steps": [14, 28, 128],
     "simultaneous_sound_channels": 4,
     "speaker_impedance_ohm": None,
-    "storage_bytes": None,
-    "evidence_status": "needs_official_or_real_device_confirmation",
+    "storage_bytes": 256 * 1024 * 1024 // 8,
+    "evidence_status": "official_capacity_confirmed",
     "audio_format": {"sample_rate_hz": 44100, "bits": 16, "channels": 1},
     "notes": [
-      "参考编辑器页面标题包含 Decoder 8005；公开页面未确认存储容量。",
+      "参考编辑器页面标题包含 Decoder 8005。",
+      "60/80 系列手册确认 8005 存储空间为 256Mb。",
     ],
   },
 ]
@@ -378,29 +381,75 @@ def _build_package_xml(chip: dict[str, Any], package_name: str, slots: list[Any]
     "  </Base_Info>",
   ]
   sound_file_rows = []
+  emitted_sound_file_ids: set[int] = set()
+  total_audio_bytes = 0
   for index, raw_slot in enumerate(slots, start=1):
     if not isinstance(raw_slot, dict):
       raise ValueError("each slot must be a JSON object")
     slot_id = _bounded_int(raw_slot.get("slot_id"), index, 1, 64)
     function_key = _bounded_int(raw_slot.get("function_key"), slot_id, 0, 68)
     slot_name = str(raw_slot.get("slot_name") or f"Sound slot {slot_id}")
-    file_id = index
     sound = raw_slot.get("sound") if isinstance(raw_slot.get("sound"), dict) else {}
-    file_name = str(sound.get("file_name") or sound.get("label") or f"sound-{slot_id}.pcm")
-    content_base64 = _clean_base64(str(sound.get("content_base64") or ""))
-    file_length = _base64_len(content_base64)
-    if not content_base64:
-      warnings.append({
-        "type": "metadata_only_sound",
-        "slot_id": str(slot_id),
-        "message": f"Slot {slot_id}「{slot_name}」没有实际音频数据，仅生成工程占位。",
-      })
     lines.extend(_slot_xml(slot_id, slot_name))
-    lines.extend(_node_xml(slot_id, 0, 0, "入口", 40, 60))
-    lines.extend(_node_xml(slot_id, 1, file_id, slot_name, 180, 60))
-    lines.extend(_connector_xml(slot_id, index, 0, 1))
-    sound_file_rows.extend(_sound_file_xml(file_id, file_name, file_length, content_base64))
+    raw_nodes = raw_slot.get("nodes") if isinstance(raw_slot.get("nodes"), list) else []
+    raw_connectors = raw_slot.get("connectors") if isinstance(raw_slot.get("connectors"), list) else []
+    if raw_nodes:
+      for raw_node in raw_nodes:
+        if not isinstance(raw_node, dict):
+          continue
+        lines.extend(_node_xml(
+          slot_id,
+          _bounded_int(raw_node.get("node_id"), 0, 0, 999),
+          _bounded_int(raw_node.get("file_id"), 0, 0, 999999),
+          str(raw_node.get("node_name") or f"Node {_bounded_int(raw_node.get('node_id'), 0, 0, 999)}"),
+          _bounded_int(raw_node.get("x"), 40, 0, 999999),
+          _bounded_int(raw_node.get("y"), 60, 0, 999999),
+          node_type=_bounded_int(raw_node.get("node_type"), 1, 0, 999),
+          node_config=_bounded_int(raw_node.get("node_config"), 0, 0, 999999),
+          repeat_amount=_bounded_int(raw_node.get("repeat_amount"), 1, 0, 999999),
+          sound_volume=_bounded_int(raw_node.get("sound_volume"), 255, 0, 255),
+          width=_bounded_int(raw_node.get("width"), 96, 1, 999999),
+          height=_bounded_int(raw_node.get("height"), 64, 1, 999999),
+          start_address=_bounded_int(raw_node.get("start_address"), 0, 0, 999999),
+        ))
+      for raw_connector in raw_connectors:
+        if not isinstance(raw_connector, dict):
+          continue
+        lines.extend(_connector_xml(
+          slot_id,
+          _bounded_int(raw_connector.get("connector_id"), index, 1, 999999),
+          _bounded_int(raw_connector.get("source_node_id"), 0, 0, 999),
+          _bounded_int(raw_connector.get("target_node_id"), 0, 0, 999),
+          connector_type=_bounded_int(raw_connector.get("connector_type"), 0, 0, 999),
+          source_port_index=_bounded_int(raw_connector.get("source_port_index"), 1, 0, 999),
+          start_address=_bounded_int(raw_connector.get("start_address"), 0, 0, 999999),
+        ))
+      raw_sound_files = raw_slot.get("sound_files") if isinstance(raw_slot.get("sound_files"), list) else []
+      for raw_sound_file in raw_sound_files:
+        if not isinstance(raw_sound_file, dict):
+          continue
+        file_id = _bounded_int(raw_sound_file.get("file_id"), 0, 0, 999999)
+        if not file_id or file_id in emitted_sound_file_ids:
+          continue
+        sound_payload = _sound_payload_for_slot(chip, slot_id, slot_name, raw_sound_file, warnings)
+        total_audio_bytes += sound_payload["audio_bytes"]
+        sound_file_rows.extend(_sound_file_xml(
+          file_id,
+          sound_payload["file_name"],
+          sound_payload["file_length"],
+          sound_payload["content_base64"],
+        ))
+        emitted_sound_file_ids.add(file_id)
+    else:
+      file_id = index
+      sound_payload = _sound_payload_for_slot(chip, slot_id, slot_name, sound, warnings)
+      total_audio_bytes += sound_payload["audio_bytes"]
+      lines.extend(_node_xml(slot_id, 0, 0, "入口", 40, 60))
+      lines.extend(_node_xml(slot_id, 1, file_id, slot_name, 180, 60))
+      lines.extend(_connector_xml(slot_id, index, 0, 1))
+      sound_file_rows.extend(_sound_file_xml(file_id, sound_payload["file_name"], sound_payload["file_length"], sound_payload["content_base64"]))
     lines.extend(_cv_xml(170 + slot_id, function_key, f"Slot{slot_id}响应功能"))
+  _validate_total_sound_size(chip, total_audio_bytes, warnings)
   lines.extend(_cv_xml(113, DEFAULT_TOTAL_VOLUME, "总音量"))
   lines.extend(sound_file_rows)
   lines.append("</NewDataSet>")
@@ -420,36 +469,60 @@ def _slot_xml(slot_id: int, slot_name: str) -> list[str]:
   ]
 
 
-def _node_xml(slot_id: int, node_id: int, file_id: int, name: str, x: int, y: int) -> list[str]:
+def _node_xml(
+  slot_id: int,
+  node_id: int,
+  file_id: int,
+  name: str,
+  x: int,
+  y: int,
+  *,
+  node_type: int = 1,
+  node_config: int = 0,
+  repeat_amount: int = 1,
+  sound_volume: int = 255,
+  width: int = 96,
+  height: int = 64,
+  start_address: int = 0,
+) -> list[str]:
   return [
     "  <Node_Table>",
     f"    <Node_ID>{node_id}</Node_ID>",
     f"    <Slot_ID>{slot_id}</Slot_ID>",
-    "    <Node_Type>1</Node_Type>",
+    f"    <Node_Type>{node_type}</Node_Type>",
     f"    <File_ID>{file_id}</File_ID>",
-    "    <Node_Config>0</Node_Config>",
-    "    <Repeat_Amount>1</Repeat_Amount>",
-    "    <Sound_Volume>255</Sound_Volume>",
+    f"    <Node_Config>{node_config}</Node_Config>",
+    f"    <Repeat_Amount>{repeat_amount}</Repeat_Amount>",
+    f"    <Sound_Volume>{sound_volume}</Sound_Volume>",
     f"    <Node_X>{x}</Node_X>",
     f"    <Node_Y>{y}</Node_Y>",
-    "    <Node_W>96</Node_W>",
-    "    <Node_H>64</Node_H>",
+    f"    <Node_W>{width}</Node_W>",
+    f"    <Node_H>{height}</Node_H>",
     f"    <Node_Name>{_xml(name)}</Node_Name>",
-    "    <Start_Address>0</Start_Address>",
+    f"    <Start_Address>{start_address}</Start_Address>",
     "  </Node_Table>",
   ]
 
 
-def _connector_xml(slot_id: int, connector_id: int, source_node_id: int, target_node_id: int) -> list[str]:
+def _connector_xml(
+  slot_id: int,
+  connector_id: int,
+  source_node_id: int,
+  target_node_id: int,
+  *,
+  connector_type: int = 0,
+  source_port_index: int = 1,
+  start_address: int = 0,
+) -> list[str]:
   return [
     "  <Connector_Table>",
     f"    <Connector_ID>{connector_id}</Connector_ID>",
-    "    <Connector_Type>0</Connector_Type>",
+    f"    <Connector_Type>{connector_type}</Connector_Type>",
     f"    <Node_ID>{source_node_id}</Node_ID>",
-    "    <Node_Index_ID>1</Node_Index_ID>",
+    f"    <Node_Index_ID>{source_port_index}</Node_Index_ID>",
     f"    <Slot_ID>{slot_id}</Slot_ID>",
     f"    <OUT_Node_ID>{target_node_id}</OUT_Node_ID>",
-    "    <Start_Address>0</Start_Address>",
+    f"    <Start_Address>{start_address}</Start_Address>",
     "  </Connector_Table>",
   ]
 
@@ -465,6 +538,116 @@ def _sound_file_xml(file_id: int, file_name: str, file_length: int, content_base
     "    <File_Flag>0</File_Flag>",
     "  </SoundFile_Table>",
   ]
+
+
+def _sound_payload_for_slot(
+  chip: dict[str, Any],
+  slot_id: int,
+  slot_name: str,
+  sound: dict[str, Any],
+  warnings: list[dict[str, str]],
+) -> dict[str, Any]:
+  file_name = str(sound.get("file_name") or sound.get("label") or f"sound-{slot_id}.wav")
+  content_base64 = _clean_base64(str(sound.get("content_base64") or ""))
+  if not content_base64:
+    warnings.append({
+      "type": "metadata_only_sound",
+      "slot_id": str(slot_id),
+      "message": f"Slot {slot_id}「{slot_name}」没有实际音频数据，仅生成工程占位。",
+    })
+    return {
+      "file_name": file_name,
+      "file_length": 0,
+      "content_base64": "",
+      "audio_bytes": 0,
+    }
+  if not file_name.lower().endswith(".wav"):
+    raise ValueError(f"Slot {slot_id}「{slot_name}」的音效文件必须是 WAV 格式")
+  wav_bytes = _decode_base64_bytes(content_base64)
+  metadata = _wav_metadata(wav_bytes)
+  _validate_wav_for_chip(metadata, chip, slot_id, slot_name)
+  data_start = metadata["data_offset"]
+  data_end = data_start + metadata["data_bytes"]
+  return {
+    "file_name": file_name,
+    "file_length": metadata["data_bytes"],
+    "content_base64": base64.b64encode(wav_bytes[data_start:data_end]).decode("ascii"),
+    "audio_bytes": metadata["data_bytes"],
+  }
+
+
+def _decode_base64_bytes(value: str) -> bytes:
+  try:
+    return base64.b64decode(_clean_base64(value), validate=True)
+  except (ValueError, binascii.Error) as exc:
+    raise ValueError("WAV 音频数据不是有效的 base64") from exc
+
+
+def _wav_metadata(wav_bytes: bytes) -> dict[str, int]:
+  if len(wav_bytes) < 44 or wav_bytes[:4] != b"RIFF" or wav_bytes[8:12] != b"WAVE":
+    raise ValueError("音效文件必须是 WAV 格式")
+  offset = 12
+  fmt: dict[str, int] | None = None
+  data_offset = 0
+  data_bytes = 0
+  while offset + 8 <= len(wav_bytes):
+    chunk_id = wav_bytes[offset:offset + 4]
+    chunk_size = int.from_bytes(wav_bytes[offset + 4:offset + 8], "little")
+    chunk_data = offset + 8
+    if chunk_data + chunk_size > len(wav_bytes):
+      raise ValueError("WAV 文件结构不完整")
+    if chunk_id == b"fmt ":
+      if chunk_size < 16:
+        raise ValueError("WAV fmt chunk 不完整")
+      fmt = {
+        "audio_format": int.from_bytes(wav_bytes[chunk_data:chunk_data + 2], "little"),
+        "channels": int.from_bytes(wav_bytes[chunk_data + 2:chunk_data + 4], "little"),
+        "sample_rate_hz": int.from_bytes(wav_bytes[chunk_data + 4:chunk_data + 8], "little"),
+        "bits": int.from_bytes(wav_bytes[chunk_data + 14:chunk_data + 16], "little"),
+      }
+    elif chunk_id == b"data":
+      data_offset = chunk_data
+      data_bytes = chunk_size
+    offset = chunk_data + chunk_size + (chunk_size % 2)
+  if not fmt or not data_bytes:
+    raise ValueError("WAV 文件缺少 fmt 或 data chunk")
+  if fmt["audio_format"] != 1:
+    raise ValueError("仅支持 PCM WAV 音频")
+  return {
+    **fmt,
+    "data_offset": data_offset,
+    "data_bytes": data_bytes,
+  }
+
+
+def _validate_wav_for_chip(metadata: dict[str, int], chip: dict[str, Any], slot_id: int, slot_name: str) -> None:
+  expected = chip["audio_format"]
+  if (
+    metadata["sample_rate_hz"] != expected["sample_rate_hz"]
+    or metadata["bits"] != expected["bits"]
+    or metadata["channels"] != expected["channels"]
+  ):
+    raise ValueError(
+      f"Slot {slot_id}「{slot_name}」WAV 格式必须是 "
+      f"{expected['sample_rate_hz']}Hz / {expected['bits']}bit / {expected['channels']}声道"
+    )
+
+
+def _validate_total_sound_size(chip: dict[str, Any], total_audio_bytes: int, warnings: list[dict[str, str]]) -> None:
+  if not total_audio_bytes:
+    return
+  storage_bytes = chip.get("storage_bytes")
+  if storage_bytes is None:
+    warnings.append({
+      "type": "sound_capacity_unconfirmed",
+      "chip_id": str(chip.get("chip_id", "")),
+      "message": "当前芯片公开资料未确认音效存储容量，请用官方工具或实物验证容量。",
+    })
+    return
+  if total_audio_bytes > int(storage_bytes):
+    raise ValueError(
+      f"音效数据 {total_audio_bytes} 字节超过芯片容量 {int(storage_bytes)} 字节"
+    )
 
 
 def _cv_xml(address: int, value: int, description: str) -> list[str]:
