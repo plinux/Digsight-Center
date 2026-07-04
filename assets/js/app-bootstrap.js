@@ -54,6 +54,7 @@ export function wireAppEvents({
   runControllerStatusRetry,
   setTrackPower,
   readControllerInfo,
+  handleControllerKindChange,
   resetSelectedControllerConfig,
   setStatus,
   operationModeName,
@@ -63,18 +64,21 @@ export function wireAppEvents({
   createNewVehicle,
   deleteSelectedVehicles,
   clearAllVehicles,
+  wireSoundEditorEvents,
   handleVehicleKeyboard,
   handleVehicleKeyboardRelease
 }) {
   elements.navVehicleControl.addEventListener("click", () => setActiveView("vehicle"));
   elements.navCvProgramming.addEventListener("click", () => setActiveView("cv"));
   elements.navControllerSettings.addEventListener("click", () => setActiveView("controller"));
+  elements.navSoundEditor.addEventListener("click", () => setActiveView("sound"));
   for (const button of elements.operationModeButtons) {
     button.addEventListener("click", () => setOperationMode(button.dataset.trackMode));
   }
   for (const button of elements.programmingTargetButtons) {
     button.addEventListener("click", () => setProgrammingTarget(button.dataset.programmingTarget));
   }
+  elements.controllerKindSelect.addEventListener("change", handleControllerKindChange);
 
   globalThis.addEventListener?.("digsight:gateway-busy", (event) => {
     setGatewayBusy(Boolean(event.detail?.active));
@@ -128,6 +132,7 @@ export function wireAppEvents({
   elements.addVehicleButton.addEventListener("click", createNewVehicle);
   elements.deleteVehiclesButton.addEventListener("click", deleteSelectedVehicles);
   elements.clearVehiclesButton.addEventListener("click", clearAllVehicles);
+  wireSoundEditorEvents?.();
 
   document.addEventListener("keydown", handleVehicleKeyboard);
   document.addEventListener("keyup", handleVehicleKeyboardRelease);

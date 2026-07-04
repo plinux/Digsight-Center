@@ -1,11 +1,5 @@
 import assert from "node:assert/strict";
-import {readFile} from "node:fs/promises";
-
-async function importSourceModule(path) {
-  const source = await readFile(path, "utf8");
-  const encoded = Buffer.from(source, "utf8").toString("base64");
-  return import(`data:text/javascript;base64,${encoded}`);
-}
+import {importSourceModule} from "./module_import_helpers.mjs";
 
 function jsonBody(request) {
   return JSON.parse(String(request.options.body || "{}"));

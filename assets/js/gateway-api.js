@@ -75,6 +75,33 @@ export function getControllerInfo() {
   return requestJson("/api/controller/info", {method: "GET"});
 }
 
+export function getSoundChipProfiles() {
+  return requestJson("/api/sound/chips", {method: "GET"});
+}
+
+export function getSoundLibrary() {
+  return requestJson("/api/sound/library", {method: "GET"});
+}
+
+export async function importSoundDxsd(file) {
+  return executeGatewayRequest(async () => ({
+    path: "/api/sound/dxsd/import",
+    options: {
+      method: "POST",
+      headers: {
+        ...digsightClientHeader,
+        "Content-Type": "application/octet-stream",
+        "X-File-Name": file.name || "sound.dxsd"
+      },
+      body: await file.arrayBuffer()
+    }
+  }), "DXSD 导入失败");
+}
+
+export function buildSoundPackage(project) {
+  return postJson("/api/sound/package", project);
+}
+
 export function readControllerInfo() {
   return postJson("/api/controller/read-info", {});
 }

@@ -6,8 +6,12 @@ import {
   getCapabilities,
   getControllerInfo,
   getCvMetadata,
+  getSoundChipProfiles,
+  getSoundLibrary,
   getState,
   importConfig,
+  importSoundDxsd,
+  buildSoundPackage,
   readAddress,
   readChipInfo as readChipInfoFromController,
   readControllerInfo,
@@ -47,7 +51,8 @@ import {
   persistentConfigurationStatus,
   resetSelectedControllerConfig,
   runControllerStatusRetry,
-  syncControllerDescriptorControls
+  syncControllerDescriptorControls,
+  syncSelectedControllerEndpointInput
 } from "./controller-workflow.js";
 import {renderImportCapabilities, runImportConfigWorkflow} from "./import-workflow.js";
 import {buildVehicleEditorActions} from "./vehicle-editor-actions.js";
@@ -57,6 +62,11 @@ import {
 } from "./vehicle-cab-view.js";
 import {renderVehicleEditor} from "./vehicle-editor-view.js";
 import {sortedConsistMembers} from "./consist-helpers.js";
+import {renderSoundEditor} from "./sound-editor-view.js";
+import {
+  createSoundEditorState,
+  wireSoundEditorEvents as attachSoundEditorEvents
+} from "./sound-editor-controller.js";
 
 const elements = {
   controllerHeader: document.getElementById("controllerHeader"),
@@ -82,6 +92,7 @@ const elements = {
   navVehicleControl: document.getElementById("navVehicleControl"),
   navCvProgramming: document.getElementById("navCvProgramming"),
   navControllerSettings: document.getElementById("navControllerSettings"),
+  navSoundEditor: document.getElementById("navSoundEditor"),
   importConfigFileInput: document.getElementById("importConfigFileInput"),
   importFormatSelect: document.getElementById("importFormatSelect"),
   importConfigButton: document.getElementById("importConfigButton"),
@@ -107,6 +118,12 @@ const elements = {
   controllerSettingsView: document.getElementById("controllerSettingsView"),
   controllerInfoPanel: document.getElementById("controllerInfoPanel"),
   trackProfilePanel: document.getElementById("trackProfilePanel"),
+  soundEditorView: document.getElementById("soundEditorView"),
+  soundDxsdFileInput: document.getElementById("soundDxsdFileInput"),
+  soundChipSelect: document.getElementById("soundChipSelect"),
+  soundImportDxsdButton: document.getElementById("soundImportDxsdButton"),
+  soundGeneratePackageButton: document.getElementById("soundGeneratePackageButton"),
+  soundUploadInput: document.getElementById("soundUploadInput"),
   connectionStatusText: document.getElementById("connectionStatusText")
 };
 
@@ -128,6 +145,8 @@ const cvState = {
   address: null,
   programmingVehicleId: ""
 };
+
+const soundEditorState = createSoundEditorState();
 
 const cvDomain = createCvDomainModel({appState, cvState, formatError, newCvReadSessionId});
 const cvRuntimeActions = buildCvRuntimeActions({
@@ -389,6 +408,13 @@ function setActiveView(view) {
     appState.activeView = "vehicle";
     appState.vehicleSubview = "registry";
     setStatus("CV 编程只支持 N、HO 或 G 的 DCC 数码模式");
+    renderAll();
+    return;
+  }
+  if (view === "sound" && !soundEditorAvailableForController()) {
+    appState.activeView = "vehicle";
+    appState.vehicleSubview = "registry";
+    setStatus("当前控制器不支持音效编辑，请切换到动芯控制器后再打开");
     renderAll();
     return;
   }
@@ -790,16 +816,22 @@ function syncVehicleSelectionToolbar(visibleVehicles) {
 
 function setNavState() {
   elements.navCvProgramming.disabled = !isDccProgrammingMode();
+  elements.navSoundEditor.disabled = !soundEditorAvailableForController();
+  elements.navSoundEditor.title = elements.navSoundEditor.disabled
+    ? "当前控制器不支持音效编辑，请切换到动芯控制器后再打开"
+    : "";
   for (const [view, button] of [
     ["vehicle", elements.navVehicleControl],
     ["cv", elements.navCvProgramming],
-    ["controller", elements.navControllerSettings]
+    ["controller", elements.navControllerSettings],
+    ["sound", elements.navSoundEditor]
   ]) {
     button.classList.toggle("active", appState.activeView === view);
   }
   elements.vehicleControlView.hidden = appState.activeView !== "vehicle";
   elements.cvProgrammingView.hidden = appState.activeView !== "cv";
   elements.controllerSettingsView.hidden = appState.activeView !== "controller";
+  elements.soundEditorView.hidden = appState.activeView !== "sound";
 }
 
 function setVehicleSubviewState() {
@@ -861,6 +893,11 @@ function isDcOperationMode(trackMode = currentOperationMode()) {
   return trackMode === "dc";
 }
 
+function soundEditorAvailableForController() {
+  const descriptor = controllerDescriptor(appState.capabilities, appState.controller?.kind);
+  return Boolean(descriptor.capabilities?.sound_editor);
+}
+
 function currentTrackProfile(trackMode = currentOperationMode()) {
   const stateProfiles = appState.controller.track_profiles || {};
   const infoProfiles = appState.controllerInfo.track_profiles || {};
@@ -881,6 +918,24 @@ async function syncControllerEndpoint() {
   appState.controller.kind = result.kind ?? kind;
   appState.controller.ip = result.ip ?? ip;
   appState.controller.transport = result.transport ?? appState.controller.transport;
+}
+
+async function handleControllerKindChange() {
+  syncSelectedControllerEndpointInput(elements, appState);
+  try {
+    setStatus("正在切换控制器并读取控制器信息");
+    await syncControllerEndpoint();
+    await refreshState();
+    try {
+      const result = await readControllerInfo();
+      setStatus(controllerReadStatusMessage(result), controllerReadStatusDetail(result));
+    } catch (error) {
+      setStatus(formatError(error));
+    }
+    await refreshState();
+  } catch (error) {
+    setStatus(formatError(error));
+  }
 }
 
 async function handleResetSelectedControllerConfig() {
@@ -1012,8 +1067,15 @@ function buildControllerSettingsHandlers() {
     },
     onSave: async (changes) => {
       try {
-        const result = await saveControllerSettings({...changes, apply_to_device: true});
-        setStatus(result.applied_to_device ? "参数已保存到控制器" : "参数已保存为本地待应用配置");
+        await syncControllerEndpoint();
+        await refreshState();
+        const filteredChanges = controllerSettingsChangesForControllerInfo(changes, appState.controllerInfo);
+        const capabilities = appState.controllerInfo?.controller_capabilities || {};
+        const canApplyToDevice = controllerSettingsShouldApplyToDevice(filteredChanges, capabilities);
+        const result = await saveControllerSettings({...filteredChanges, apply_to_device: canApplyToDevice});
+        setStatus(result.applied_to_device
+          ? "参数已保存到控制器"
+          : "参数已保存到本地控制器配置");
         await refreshState();
       } catch (error) {
         setStatus(formatError(error));
@@ -1022,10 +1084,49 @@ function buildControllerSettingsHandlers() {
   };
 }
 
+function controllerSettingsShouldApplyToDevice(changes, capabilities = {}) {
+  if (!capabilities.controller_settings) {
+    return false;
+  }
+  const settings = changes?.settings || {};
+  if (hasOwn(settings, "railcom_enabled") || hasOwn(settings, "railcomplus_enabled")) {
+    return true;
+  }
+  return !Boolean(capabilities.profile_settings_on_track_mode);
+}
+
+function controllerSettingsChangesForControllerInfo(changes, controllerInfo = {}) {
+  const filteredChanges = {...(changes || {})};
+  const originalSettings = filteredChanges.settings || {};
+  if (!originalSettings || typeof originalSettings !== "object") {
+    return filteredChanges;
+  }
+  const settings = {...originalSettings};
+  const railComSetting = controllerInfo.railcom_setting || {};
+  if (!railComSetting.railcomplus?.available) {
+    delete settings.railcomplus_enabled;
+  }
+  if (Object.keys(settings).length) {
+    filteredChanges.settings = settings;
+  } else {
+    delete filteredChanges.settings;
+  }
+  return filteredChanges;
+}
+
+function hasOwn(source, key) {
+  return Object.prototype.hasOwnProperty.call(source || {}, key);
+}
+
 function renderAll() {
   const context = buildRenderContext();
   syncVisibleState(context);
   renderControllerShell(context);
+  if (appState.activeView === "sound") {
+    renderActiveSoundEditorView();
+    setVehicleSubviewState();
+    return;
+  }
   if (context.isDcMode) {
     renderDcModeView(context);
     return;
@@ -1054,6 +1155,10 @@ function syncVisibleState({digitalMode, visibleVehicles}) {
   syncCvProgrammingVehicle(visibleVehicles);
   syncCabSelectionForVisibleVehicles(visibleVehicles);
   syncVehicleSelectionToolbar(visibleVehicles);
+  if (appState.activeView === "sound" && !soundEditorAvailableForController()) {
+    appState.activeView = "vehicle";
+    appState.vehicleSubview = "registry";
+  }
   if (!digitalMode && appState.activeView === "cv") {
     appState.activeView = "vehicle";
   }
@@ -1149,6 +1254,12 @@ function renderActiveControllerView() {
   renderControllerSettings(elements, appState.controllerInfo, buildControllerSettingsHandlers());
 }
 
+function renderActiveSoundEditorView() {
+  renderSoundEditor(elements.soundEditorView, soundEditorState, {
+    renderAll
+  });
+}
+
 async function sendDcControl() {
   try {
     const voltageV = Number(appState.dcControl.voltageV || 0);
@@ -1229,6 +1340,18 @@ async function refreshState() {
   renderAll();
 }
 
+async function loadSoundEditorMetadata() {
+  try {
+    const [chipProfiles, libraryCatalog] = await Promise.all([getSoundChipProfiles(), getSoundLibrary()]);
+    soundEditorState.chipProfiles = chipProfiles;
+    soundEditorState.libraryCatalog = libraryCatalog;
+    soundEditorState.chipId ||= chipProfiles[0]?.chip_id || "";
+    renderAll();
+  } catch (error) {
+    setStatus(formatError(error));
+  }
+}
+
 async function initialize() {
   await initializeApp({
     appState,
@@ -1249,6 +1372,7 @@ async function initialize() {
     formatError,
     persistentConfigurationStatus: () => persistentConfigurationStatus(appState)
   });
+  await loadSoundEditorMetadata();
 }
 
 wireAppEvents({
@@ -1265,6 +1389,7 @@ wireAppEvents({
   runControllerStatusRetry,
   setTrackPower,
   readControllerInfo,
+  handleControllerKindChange,
   resetSelectedControllerConfig: handleResetSelectedControllerConfig,
   setStatus,
   operationModeName,
@@ -1274,6 +1399,15 @@ wireAppEvents({
   createNewVehicle,
   deleteSelectedVehicles,
   clearAllVehicles,
+  wireSoundEditorEvents: () => attachSoundEditorEvents({
+    elements,
+    state: soundEditorState,
+    importSoundDxsd,
+    buildSoundPackage,
+    setStatus,
+    formatError,
+    renderAll
+  }),
   handleVehicleKeyboard,
   handleVehicleKeyboardRelease
 });
