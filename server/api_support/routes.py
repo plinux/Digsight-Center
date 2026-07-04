@@ -4,6 +4,7 @@
 MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
 MAX_VEHICLE_IMAGE_JSON_BODY_BYTES = 3 * 1024 * 1024
 MAX_IMPORT_BODY_BYTES = 64 * 1024 * 1024
+MAX_SOUND_PROJECT_BODY_BYTES = 64 * 1024 * 1024
 
 LOCK_MODE_STATEFUL = "stateful"
 LOCK_MODE_SNAPSHOT = "snapshot"
@@ -19,6 +20,8 @@ GET_ROUTES = {
   "/api/consists": "consists.list",
   "/api/cv/metadata": "cv_metadata.get",
   "/api/controller/info": "controller.info",
+  "/api/sound/chips": "sound.chips",
+  "/api/sound/library": "sound.library",
 }
 
 POST_ROUTES = {
@@ -36,6 +39,8 @@ POST_ROUTES = {
   "/api/cv/read-all/cancel": "cv.read_all_cancel",
   "/api/cv/write": "cv.write",
   "/api/chip-info/read": "chip_info.read",
+  "/api/sound/dxsd/import": "sound.dxsd_import",
+  "/api/sound/package": "sound.package",
   "/api/address/read": "address.read",
   "/api/address/write": "address.write",
   "/api/loco/speed": "loco.speed",
@@ -62,6 +67,13 @@ API_MUTATION_ROUTES = {
     "body_limit": MAX_IMPORT_BODY_BYTES,
     "gateway_handler": "import_config",
   },
+  "/api/sound/dxsd/import": {
+    "json_body": False,
+    "body_limit": MAX_SOUND_PROJECT_BODY_BYTES,
+  },
+  "/api/sound/package": {
+    "body_limit": MAX_SOUND_PROJECT_BODY_BYTES,
+  },
   "/api/vehicle-images": {
     "body_limit": MAX_VEHICLE_IMAGE_JSON_BODY_BYTES,
   },
@@ -71,6 +83,7 @@ API_MUTATION_ROUTES = {
   "/api/cv/read-all/cancel": {
     "lock_mode": LOCK_MODE_SNAPSHOT,
   },
+  "/api/controller/track-mode": {"lock_mode": LOCK_MODE_HARDWARE},
   "/api/controller/read-info": {"lock_mode": LOCK_MODE_HARDWARE},
   "/api/controller/probe": {"lock_mode": LOCK_MODE_HARDWARE},
   "/api/track-power": {"lock_mode": LOCK_MODE_HARDWARE},

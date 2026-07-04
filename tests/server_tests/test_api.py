@@ -101,6 +101,11 @@ class ApiRouterTest(unittest.TestCase):
     self.assertNotEqual(empty_prefix_spec["lock_mode"], LOCK_MODE_HARDWARE)
     self.assertNotEqual(empty_id_spec["lock_mode"], LOCK_MODE_HARDWARE)
 
+  def test_track_mode_switch_uses_hardware_lock_for_voltage_sync(self):
+    route_spec = mutation_route_spec("PATCH", "/api/controller/track-mode")
+
+    self.assertEqual(route_spec["lock_mode"], LOCK_MODE_HARDWARE)
+
   def test_controller_settings_apply_to_device_lock_policy_lives_in_controller_support(self):
     route_spec = mutation_route_spec("PATCH", "/api/controller/settings")
     routes_source = Path("server/api_support/routes.py").read_text(encoding="utf-8")
@@ -471,6 +476,20 @@ class ApiRouterTest(unittest.TestCase):
     self.assertEqual(status, 200)
     self.assertEqual(payload["data"]["track_mode"], "ho")
     self.assertEqual(state["controller"]["track_mode"], "ho")
+
+  def test_track_mode_switch_rejects_disabled_controller_profile(self):
+    state = default_state()
+    state["controller"]["track_profiles"]["dc"]["enabled"] = False
+    body, status = ApiRouter(None).handle_json(
+      "PATCH",
+      "/api/controller/track-mode",
+      b'{"track_mode":"dc"}',
+      state,
+    )
+    payload = json.loads(body.decode("utf-8"))
+    self.assertEqual(status, 400)
+    self.assertEqual(payload["error"]["type"], "unsupported_controller_track_mode")
+    self.assertEqual(state["controller"]["track_mode"], "n")
 
   def test_persistent_write_routes_do_not_fail_with_operation_token_error(self):
     with temporary_vehicle_router() as (router, _store, state):

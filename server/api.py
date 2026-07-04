@@ -15,6 +15,7 @@ from server.api_support.import_config import ConfigImportApiSupport
 from server.api_support.loco_control import LocoControlApiSupport
 from server.api_support.resources import ResourceApiSupport
 from server.api_support.routes import handler_for
+from server.api_support.sound_editor import SoundEditorApiSupport
 from server.api_support.vehicle_library import VehicleLibraryApiSupport
 from server.capabilities import gateway_capabilities
 from server.controller_service import ControllerService
@@ -77,6 +78,7 @@ class ApiRouter:
     self.vehicle_api = VehicleLibraryApiSupport(self.context)
     self.resource_api = ResourceApiSupport(self.context)
     self.import_api = ConfigImportApiSupport(self.context)
+    self.sound_editor_api = SoundEditorApiSupport()
     self.cv_programming_api = CvProgrammingApiSupport(self.context, self.controller_service, self.controller_api, self.vehicle_api)
     self.cv_read_all_api = CvReadAllApiSupport(self.context, self.controller_service, self.controller_api, self.cv_programming_api)
     self.loco_control_api = LocoControlApiSupport(self.context, self.controller_service, self.controller_api, self.vehicle_api)
@@ -126,6 +128,8 @@ class ApiRouter:
       "categories.list": lambda route, body, state: self.vehicle_api.list_categories(state),
       "cv_metadata.get": lambda route, body, state: http_helpers.success(cv_metadata()),
       "controller.info": lambda route, body, state: http_helpers.success(self.controller_api.controller_info(state)),
+      "sound.chips": lambda route, body, state: self.sound_editor_api.list_chip_profiles(),
+      "sound.library": lambda route, body, state: self.sound_editor_api.list_library(),
       "vehicles.create": lambda route, body, state: self.vehicle_api.create_vehicle(body, state),
       "vehicles.patch": lambda route, body, state: self.vehicle_api.patch_vehicle(route, body, state),
       "vehicles.delete": lambda route, body, state: self.vehicle_api.delete_vehicle(route, state),
@@ -147,6 +151,8 @@ class ApiRouter:
       "cv.read_all_cancel": lambda route, body, state: self.cv_read_all_api.cancel(body),
       "cv.write": lambda route, body, state: self.cv_programming_api.write_cv(body, state),
       "chip_info.read": lambda route, body, state: self.cv_programming_api.read_chip_info(body, state),
+      "sound.dxsd_import": lambda route, body, state: self.sound_editor_api.import_dxsd(body),
+      "sound.package": lambda route, body, state: self.sound_editor_api.build_package(body),
       "address.read": lambda route, body, state: self.cv_programming_api.read_address(body, state),
       "address.write": lambda route, body, state: self.cv_programming_api.write_address(body, state),
       "loco.speed": lambda route, body, state: self.loco_control_api.handle(route, body, state),
