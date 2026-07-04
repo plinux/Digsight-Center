@@ -399,12 +399,18 @@ class ExampleControllerAdapterTest(unittest.TestCase):
     self.assertEqual(descriptor_kinds, ["example_controller"])
     self.assertIsInstance(registry.get("example_controller"), ExampleControllerAdapter)
     default_kinds = [descriptor["kind"] for descriptor in default_controller_registry().descriptors()]
-    self.assertEqual(default_kinds, ["digsight_controller"])
+    self.assertEqual(default_kinds, [
+      "digsight_controller",
+      "ecos_50200_controller",
+    ])
     self.assertNotIn("example_controller", default_kinds)
 
   def test_example_adapter_is_kept_as_code_sample_but_not_default(self):
     default_kinds = [descriptor["kind"] for descriptor in default_controller_registry().descriptors()]
-    self.assertEqual(default_kinds, ["digsight_controller"])
+    self.assertEqual(default_kinds, [
+      "digsight_controller",
+      "ecos_50200_controller",
+    ])
     self.assertNotIn("example_controller", default_kinds)
     self.assertEqual(ExampleControllerAdapter().kind, "example_controller")
 

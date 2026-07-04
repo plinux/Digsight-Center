@@ -2,6 +2,7 @@
 
 from server.controllers.base import controller_display_name, controller_protocol
 from server.controllers.digsight import DigsightDXDCNetControllerAdapter
+from server.controllers.ecos import ECoSControllerAdapter
 from server.descriptor_paths import validate_descriptor_file_name
 from server.public_paths import CONTROLLER_CONFIG_PUBLIC_PREFIX, CONTROLLER_CONFIG_RELATIVE_PREFIX
 
@@ -84,4 +85,5 @@ class ControllerRegistry:
 def default_controller_registry():
   registry = ControllerRegistry()
   registry.register(DigsightDXDCNetControllerAdapter(), default=True)
+  registry.register(ECoSControllerAdapter())
   return registry

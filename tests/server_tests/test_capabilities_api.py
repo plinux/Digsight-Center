@@ -28,7 +28,10 @@ class CapabilitiesApiTest(unittest.TestCase):
     data = payload["data"]
     self.assertEqual(data["default_controller_kind"], "digsight_controller")
     self.assertEqual(data["default_import_format"], "z21_layout_config")
-    self.assertEqual([item["kind"] for item in data["controllers"]], ["digsight_controller"])
+    self.assertEqual([item["kind"] for item in data["controllers"]], [
+      "digsight_controller",
+      "ecos_50200_controller",
+    ])
     self.assertEqual([item["format"] for item in data["import_formats"]], ["z21_layout_config"])
     self.assertNotIn("example_controller", [item["kind"] for item in data["controllers"]])
     self.assertNotIn("example_layout_config", [item["format"] for item in data["import_formats"]])
