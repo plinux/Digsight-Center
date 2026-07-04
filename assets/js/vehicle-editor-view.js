@@ -12,6 +12,31 @@ import {
   vehicleImage
 } from "./vehicle-view.js";
 
+const TRACK_MODE_OPTIONS = [["ho", "HO"], ["n", "N"], ["g", "G"]];
+const CONTROL_PROTOCOL_OPTIONS = [["dcc", "DCC"], ["motorola", "Motorola"], ["m4", "M4"]];
+const CONTROL_PROTOCOL_SPEED_STEP_OPTIONS = {
+  dcc: [["14", "DCC 14"], ["28", "DCC 28"], ["128", "DCC 128"]],
+  motorola: [["1", "MM1"], ["2", "MM2"], ["28", "MM28"]],
+  m4: [["128", "M4 128"]]
+};
+
+function speedStepOptionsForProtocol(controlProtocol) {
+  return CONTROL_PROTOCOL_SPEED_STEP_OPTIONS[controlProtocol] || CONTROL_PROTOCOL_SPEED_STEP_OPTIONS.dcc;
+}
+
+function refreshSpeedStepOptions(select, controlProtocol) {
+  const currentValue = select.value;
+  const options = speedStepOptionsForProtocol(controlProtocol);
+  select.replaceChildren();
+  for (const [value, label] of options) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    select.append(option);
+  }
+  select.value = options.some(([value]) => value === currentValue) ? currentValue : options[options.length - 1][0];
+}
+
 export function renderVehicleEditor(container, vehicle, functions, handlers = {}) {
   container.replaceChildren();
   if (!vehicle) {
@@ -56,7 +81,9 @@ function renderNormalVehicleBasicInfo(vehicle, handlers) {
   const name = inputField("车辆名称", "text", vehicle.name || "");
   const address = inputField("车辆编号", "number", vehicle.address || 3, {min: 1, max: 9999});
   const fullName = inputField("完整名称", "text", vehicle.full_name || "");
-  const scale = selectField("比例", vehicle.track_mode || "ho", [["ho", "HO"], ["n", "N"]]);
+  const scale = selectField("比例", vehicle.track_mode || "ho", TRACK_MODE_OPTIONS);
+  const controlProtocol = selectField("控制协议", vehicle.control_protocol || "dcc", CONTROL_PROTOCOL_OPTIONS);
+  const speedSteps = selectField("速度级", String(vehicle.speed_steps || 128), speedStepOptionsForProtocol(controlProtocol.input.value));
   const vehicleType = selectField("车辆类型", String(vehicle.type ?? 0), vehicleTypeOptions());
   const energyType = renderVehicleKindChoiceField("能源类型", vehicle.energy_type || "electric", ["diesel", "electric", "steam", "hybrid"]);
   const carSubtype = renderVehicleKindChoiceField("车厢子类", vehicle.car_subtype || "passenger", ["passenger", "engineering", "inspection", "crane"]);
@@ -73,6 +100,8 @@ function renderNormalVehicleBasicInfo(vehicle, handlers) {
   name.label.classList.add("vehicle-field-name");
   fullName.label.classList.add("vehicle-field-full-name");
   scale.label.classList.add("vehicle-field-scale");
+  controlProtocol.label.classList.add("vehicle-field-control-protocol");
+  speedSteps.label.classList.add("vehicle-field-speed-steps");
   vehicleType.label.classList.add("vehicle-field-type");
   energyType.label.classList.add("vehicle-kind-field", "vehicle-energy-field");
   carSubtype.label.classList.add("vehicle-kind-field", "vehicle-car-subtype-field");
@@ -105,6 +134,9 @@ function renderNormalVehicleBasicInfo(vehicle, handlers) {
     updateKindFieldVisibility();
     handlers.onTypeChange?.(Number(vehicleType.input.value));
   });
+  controlProtocol.input.addEventListener("change", () => {
+    refreshSpeedStepOptions(speedSteps.input, controlProtocol.input.value);
+  });
 
   const nameRow = document.createElement("div");
   nameRow.className = "vehicle-editor-name-row";
@@ -115,6 +147,9 @@ function renderNormalVehicleBasicInfo(vehicle, handlers) {
   const runningRow = document.createElement("div");
   runningRow.className = "vehicle-editor-running-row";
   runningRow.append(address.label, scale.label, maxSpeed.label, railway.label);
+  const protocolRow = document.createElement("div");
+  protocolRow.className = "vehicle-editor-protocol-row";
+  protocolRow.append(controlProtocol.label, speedSteps.label);
   const modelRow = document.createElement("div");
   modelRow.className = "vehicle-editor-model-row";
   modelRow.append(brand.label, articleNumber.label, decoderType.label);
@@ -123,6 +158,7 @@ function renderNormalVehicleBasicInfo(vehicle, handlers) {
     nameRow,
     kindRow,
     runningRow,
+    protocolRow,
     modelRow,
     description.label,
     categoryEditor
@@ -137,6 +173,8 @@ function renderNormalVehicleBasicInfo(vehicle, handlers) {
       address,
       fullName,
       scale,
+      controlProtocol,
+      speedSteps,
       vehicleType,
       energyType,
       carSubtype,
@@ -156,6 +194,8 @@ function normalVehicleSavePayload(fields, vehicle, categoryEditor, functionEdito
     address,
     fullName,
     scale,
+    controlProtocol,
+    speedSteps,
     vehicleType,
     energyType,
     carSubtype,
@@ -171,6 +211,8 @@ function normalVehicleSavePayload(fields, vehicle, categoryEditor, functionEdito
     address: Number(address.input.value),
     full_name: fullName.input.value.trim(),
     track_mode: scale.input.value,
+    control_protocol: controlProtocol.input.value,
+    speed_steps: Number(speedSteps.input.value),
     type: Number(vehicleType.input.value),
     sync_function_control: false,
     energy_type: Number(vehicleType.input.value) === 0 ? energyType.input.value : "",
@@ -249,12 +291,19 @@ function renderConsistBasicInfo(vehicle, handlers, existingConsist) {
   const basicInfo = document.createElement("div");
   basicInfo.className = "vehicle-editor-basic-info vehicle-consist-basic-info";
   const name = inputField("编组名称", "text", vehicle.name || existingConsist?.name || "");
-  const scale = selectField("比例", vehicle.track_mode || "ho", [["ho", "HO"], ["n", "N"]]);
+  const scale = selectField("比例", vehicle.track_mode || "ho", TRACK_MODE_OPTIONS);
+  const controlProtocol = selectField("控制协议", vehicle.control_protocol || "dcc", CONTROL_PROTOCOL_OPTIONS);
+  const speedSteps = selectField("速度级", String(vehicle.speed_steps || 128), speedStepOptionsForProtocol(controlProtocol.input.value));
   const consistKind = renderConsistKindChoiceField(vehicle.consist_kind || existingConsist?.consist_kind || "multiple_unit");
   const syncFunctionControl = checkboxField("同步控制功能", Boolean(vehicle.sync_function_control));
   syncFunctionControl.label.classList.add("sync-toggle-inline");
   name.label.classList.add("vehicle-field-name");
   scale.label.classList.add("vehicle-field-scale");
+  controlProtocol.label.classList.add("vehicle-field-control-protocol");
+  speedSteps.label.classList.add("vehicle-field-speed-steps");
+  controlProtocol.input.addEventListener("change", () => {
+    refreshSpeedStepOptions(speedSteps.input, controlProtocol.input.value);
+  });
   const categoryEditor = renderCategoryEditor(vehicle, handlers.categories || []);
   const memberEditor = renderConsistMemberEditor(existingConsist, vehicle, handlers.vehicles || []);
 
@@ -264,9 +313,13 @@ function renderConsistBasicInfo(vehicle, handlers, existingConsist) {
   const consistKindRow = document.createElement("div");
   consistKindRow.className = "vehicle-editor-kind-row vehicle-consist-kind-row";
   consistKindRow.append(consistKind.label);
+  const consistProtocolRow = document.createElement("div");
+  consistProtocolRow.className = "vehicle-editor-protocol-row vehicle-consist-protocol-row";
+  consistProtocolRow.append(controlProtocol.label, speedSteps.label);
   basicInfo.append(
     consistNameRow,
     consistKindRow,
+    consistProtocolRow,
     categoryEditor,
     memberEditor
   );
@@ -277,6 +330,8 @@ function renderConsistBasicInfo(vehicle, handlers, existingConsist) {
     fields: {
       name,
       scale,
+      controlProtocol,
+      speedSteps,
       consistKind,
       syncFunctionControl
     }
@@ -284,13 +339,15 @@ function renderConsistBasicInfo(vehicle, handlers, existingConsist) {
 }
 
 function consistVehicleSavePayload(fields, vehicle, existingConsist, memberEditor, categoryEditor, functionEditor) {
-  const {name, scale, consistKind, syncFunctionControl} = fields;
+  const {name, scale, controlProtocol, speedSteps, consistKind, syncFunctionControl} = fields;
   const members = collectConsistMembers(memberEditor);
   return {
     name: name.input.value.trim(),
     address: Number(vehicle.address || 3),
     full_name: "",
     track_mode: scale.input.value,
+    control_protocol: controlProtocol.input.value,
+    speed_steps: Number(speedSteps.input.value),
     type: 3,
     sync_function_control: syncFunctionControl.input.checked,
     energy_type: "",

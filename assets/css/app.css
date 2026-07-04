@@ -1844,6 +1844,7 @@ button.danger.cab-economic-stop {
 .vehicle-editor-name-row,
 .vehicle-editor-kind-row,
 .vehicle-editor-running-row,
+.vehicle-editor-protocol-row,
 .vehicle-editor-model-row {
   display: grid;
   gap: 10px;
@@ -1860,6 +1861,10 @@ button.danger.cab-economic-stop {
 
 .vehicle-editor-running-row {
   grid-template-columns: minmax(5.5rem, 0.65fr) minmax(4.25rem, 0.45fr) minmax(6.25rem, 0.7fr) minmax(0, 1.2fr);
+}
+
+.vehicle-editor-protocol-row {
+  grid-template-columns: minmax(7rem, 1fr) minmax(6rem, 1fr);
 }
 
 .vehicle-editor-model-row {
@@ -2070,6 +2075,7 @@ button.danger.cab-economic-stop {
 .vehicle-editor-name-row label,
 .vehicle-editor-kind-row label,
 .vehicle-editor-running-row label,
+.vehicle-editor-protocol-row label,
 .vehicle-editor-model-row label,
 .profile-grid label,
 #addressPanel label,
@@ -2722,6 +2728,7 @@ body.function-icon-picker-open {
   .vehicle-editor-name-row,
   .vehicle-editor-kind-row,
   .vehicle-editor-running-row,
+  .vehicle-editor-protocol-row,
   .vehicle-editor-model-row {
     grid-template-columns: 1fr;
   }

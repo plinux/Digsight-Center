@@ -27,6 +27,8 @@ VEHICLE_FIELDS = (
   "custom_sort_order",
   "name",
   "address",
+  "control_protocol",
+  "speed_steps",
   "image_name",
   "image_path",
   "type",
@@ -659,12 +661,12 @@ class VehicleStore:
     con.execute(
       """
       INSERT INTO vehicles (
-        id, source, source_format, source_key, source_vehicle_id, track_mode, source_position, custom_sort_order, name, address, image_name, image_path,
+        id, source, source_format, source_key, source_vehicle_id, track_mode, source_position, custom_sort_order, name, address, control_protocol, speed_steps, image_name, image_path,
         type, sync_function_control, energy_type, car_subtype, consist_kind, max_speed, brand, full_name, railway, article_number, decoder_type, buffer_length,
         model_buffer_length, service_weight, model_weight, rmin, description,
         created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       """,
       (data["id"], *values),
     )
@@ -793,6 +795,8 @@ class VehicleStore:
     vehicle["energy_type"] = self._validate_energy_type(vehicle.get("energy_type", ""), vehicle["type"])
     vehicle["car_subtype"] = self._validate_car_subtype(vehicle.get("car_subtype", ""), vehicle["type"])
     vehicle["consist_kind"] = self._validate_vehicle_consist_kind(vehicle.get("consist_kind", ""), vehicle["type"])
+    vehicle["control_protocol"] = models.validate_control_protocol(vehicle.get("control_protocol"))
+    vehicle["speed_steps"] = models.validate_speed_steps(vehicle["control_protocol"], vehicle.get("speed_steps"))
     return vehicle
 
   def _category_from_row(self, row) -> dict:
@@ -901,6 +905,8 @@ class VehicleStore:
       int(data.get("custom_sort_order", data.get("source_position", data.get("position", 0))) or 0),
       self._required_text(data.get("name"), "vehicle name"),
       self._validate_address(data.get("address")),
+      models.validate_control_protocol(data.get("control_protocol")),
+      models.validate_speed_steps(data.get("control_protocol"), data.get("speed_steps")),
       data.get("image_name", ""),
       self._validate_image_path(data.get("image_path", data.get("image", ""))),
       vehicle_type,

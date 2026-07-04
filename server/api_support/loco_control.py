@@ -243,6 +243,8 @@ class LocoControlApiSupport:
         "vehicle_id": member_vehicle.get("id"),
         "name": member_vehicle.get("name", ""),
         "address": member.get("address", member_vehicle.get("address")),
+        "control_protocol": member_vehicle.get("control_protocol"),
+        "speed_steps": member_vehicle.get("speed_steps"),
         "member_direction": member.get("direction", "forward"),
       })
     return targets
@@ -252,4 +254,6 @@ class LocoControlApiSupport:
       "vehicle_id": vehicle.get("id"),
       "name": vehicle.get("name", ""),
       "address": vehicle.get("address"),
+      "control_protocol": vehicle.get("control_protocol"),
+      "speed_steps": vehicle.get("speed_steps"),
     }

@@ -7,6 +7,7 @@ from server.controllers.base import (
   LocoFunctionRequest,
   LocoSpeedRequest,
 )
+from server import models
 from server.controller_services.results import ServiceResult
 from train_dcc.address import validate_loco_address, validate_loco_speed_128
 
@@ -77,6 +78,8 @@ class LocoCommandService:
           status=504,
           debug={"request_hex": "", "vehicle_id": target.get("vehicle_id")},
         )
+      except ControllerOperationNotSupported as exc:
+        return None, self.operation_not_supported_response(exc)
       except ControllerProtocolNotSupported as exc:
         return None, self.protocol_not_supported_response(exc)
       except (OSError, ValueError) as exc:
@@ -111,7 +114,12 @@ class LocoCommandService:
     control_grant = adapter.request_loco_control_grant(
       self.controller_session_for(controller),
       controller,
-      LocoControlGrantRequest(address=address, client_id=command_request.client_id),
+      LocoControlGrantRequest(
+        address=address,
+        client_id=command_request.client_id,
+        control_protocol=command_request.control_protocol,
+        speed_steps=command_request.speed_steps,
+      ),
       transport=self.controller_transport,
     )
     denied = self._loco_control_denied_response(control_grant, target)
@@ -147,12 +155,16 @@ class LocoCommandService:
         speed=self.validate_loco_speed_value(speed),
         direction=self._consist_target_direction(direction, target),
         client_id=client_id,
+        control_protocol=models.validate_control_protocol(target.get("control_protocol")),
+        speed_steps=models.validate_speed_steps(target.get("control_protocol"), target.get("speed_steps")),
       )
     return LocoFunctionRequest(
       address=address,
       function_states=dict(function_states or {}),
       client_id=client_id,
       function_number=int(function_number),
+      control_protocol=models.validate_control_protocol(target.get("control_protocol")),
+      speed_steps=models.validate_speed_steps(target.get("control_protocol"), target.get("speed_steps")),
     )
 
   def _send_loco_command(self, adapter, controller: dict, command_request, loco_command_kind: str):

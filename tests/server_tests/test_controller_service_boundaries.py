@@ -14,6 +14,7 @@ from server.controller_services.results import ServiceResult
 from server.controller_services.cv_programming import CvProgrammingService
 from server.controller_services.loco_control import LocoCommandService
 from server.controller_services.track_power import TrackPowerService
+from server.controllers.base import ControllerOperationNotSupported, LocoSpeedRequest
 from server.controllers.digsight import DigsightDXDCNetControllerAdapter
 from server.controllers.dxdcnet_info_parser import DXDCNetControllerInfoParser
 from server.controllers.registry import ControllerRegistry
@@ -365,6 +366,23 @@ class ControllerServiceBoundaryTest(unittest.TestCase):
     self.assertNotIn("build_parameter_read_frame(", router_source)
     self.assertNotIn("build_loco_speed_frame(", router_source)
     self.assertNotIn("build_loco_function_frames(", router_source)
+
+  def test_digsight_loco_control_rejects_non_dcc_protocol_before_exchange(self):
+    adapter = DigsightDXDCNetControllerAdapter()
+    request = LocoSpeedRequest(
+      address=3,
+      speed=42,
+      direction="forward",
+      client_id=0,
+      control_protocol="motorola",
+      speed_steps=28,
+    )
+
+    with self.assertRaises(ControllerOperationNotSupported) as context:
+      adapter.send_loco_speed_request(object(), {"ip": "192.0.2.10"}, request)
+
+    self.assertEqual(context.exception.controller_kind, "digsight_controller")
+    self.assertEqual(context.exception.operation, "loco_protocol_motorola_28")
 
   def test_controller_service_resolves_default_adapter(self):
     service = ControllerService(

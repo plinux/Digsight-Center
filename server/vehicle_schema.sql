@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS vehicles (
   custom_sort_order INTEGER DEFAULT 0,
   name TEXT NOT NULL,
   address INTEGER NOT NULL,
+  control_protocol TEXT NOT NULL DEFAULT 'dcc',
+  speed_steps INTEGER NOT NULL DEFAULT 128,
   image_name TEXT,
   image_path TEXT,
   type INTEGER DEFAULT 0,

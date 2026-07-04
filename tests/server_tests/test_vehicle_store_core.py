@@ -56,6 +56,8 @@ class VehicleStoreCoreTest(unittest.TestCase):
         self.assertEqual(vehicles_by_mode[mode][2]["id"], f"seed-test-vehicle-{mode}-3-4-consist")
         self.assertEqual(vehicles_by_mode[mode][2]["consist_kind"], "consist")
         self.assertTrue(vehicles_by_mode[mode][2]["sync_function_control"])
+        self.assertTrue(all(vehicle["control_protocol"] == "dcc" for vehicle in vehicles_by_mode[mode]))
+        self.assertTrue(all(vehicle["speed_steps"] == 128 for vehicle in vehicles_by_mode[mode]))
       self.assertEqual(store.list_categories(), [])
       consists = store.list_consists()
       self.assertEqual(len(consists), 3)
@@ -87,7 +89,13 @@ class VehicleStoreCoreTest(unittest.TestCase):
       configs = store.list_controller_default_configs()
 
       configs_by_kind = {config["kind"]: config for config in configs}
-      self.assertIn("digsight_controller", configs_by_kind)
+      self.assertEqual(set(configs_by_kind), {
+        "digsight_controller",
+        "ecos_50200_controller",
+        "z21_std_controller",
+        "z21_start_controller",
+        "z21_xl_controller",
+      })
       digsight_config = configs_by_kind["digsight_controller"]
       self.assertEqual(digsight_config["config_file_name"], "Digsight_D9000.json")
       self.assertEqual(digsight_config["sort_order"], 0)
@@ -99,6 +107,11 @@ class VehicleStoreCoreTest(unittest.TestCase):
       self.assertEqual(payload["transport"]["local_udp_port"], 6667)
       self.assertEqual(payload["transport"]["udp_checksum_algorithm"], "xor")
       self.assertEqual(set(payload["track_profiles"].keys()), {"n", "ho", "g", "dc"})
+      self.assertEqual(configs_by_kind["ecos_50200_controller"]["config"]["transport"]["tcp_port"], 15471)
+      self.assertEqual(configs_by_kind["z21_std_controller"]["config"]["transport"]["udp_port"], 21105)
+      self.assertEqual(configs_by_kind["z21_start_controller"]["config"]["track_profiles"]["g"]["enabled"], False)
+      self.assertNotIn("target_current_limit_ma", configs_by_kind["z21_xl_controller"]["config"]["track_profiles"]["g"])
+      self.assertNotIn("max_target_current_limit_ma", configs_by_kind["z21_std_controller"]["config"]["track_profiles"]["ho"])
 
       con = sqlite3.connect(store.path)
       try:
@@ -239,6 +252,8 @@ class VehicleStoreCoreTest(unittest.TestCase):
       vehicle = store.create_vehicle({
         "name": "BR 103",
         "address": 103,
+        "control_protocol": "motorola",
+        "speed_steps": 28,
         "source": "manual",
         "source_vehicle_id": None,
         "source_position": 7,
@@ -261,6 +276,8 @@ class VehicleStoreCoreTest(unittest.TestCase):
       stored = store.get_vehicle(vehicle["id"])
       self.assertEqual(stored["name"], "BR 103")
       self.assertEqual(stored["address"], 103)
+      self.assertEqual(stored["control_protocol"], "motorola")
+      self.assertEqual(stored["speed_steps"], 28)
       self.assertEqual(stored["article_number"], "39150")
       self.assertEqual(stored["buffer_length"], "192")
       self.assertEqual(stored["track_mode"], "ho")
@@ -457,10 +474,19 @@ class VehicleStoreCoreTest(unittest.TestCase):
       store = VehicleStore(Path(temp_dir) / "vehicles.sqlite3")
       with self.assertRaisesRegex(ValueError, "energy type must be diesel, electric, steam or hybrid"):
         store.create_vehicle({"name": "bad", "address": 3, "type": 0, "energy_type": "solar"})
+      with self.assertRaisesRegex(ValueError, "control protocol must be one of"):
+        store.create_vehicle({"name": "bad protocol", "address": 3, "type": 0, "control_protocol": "abc"})
+      with self.assertRaisesRegex(ValueError, "dcc speed steps must be one of"):
+        store.create_vehicle({"name": "bad steps", "address": 3, "type": 0, "control_protocol": "dcc", "speed_steps": 2})
       vehicle = store.create_vehicle({"name": "default energy", "address": 4, "type": 0})
       self.assertEqual(vehicle["energy_type"], "electric")
+      self.assertEqual(vehicle["control_protocol"], "dcc")
+      self.assertEqual(vehicle["speed_steps"], 128)
       car = store.create_vehicle({"name": "car", "address": 5, "type": 1})
       self.assertEqual(car["car_subtype"], "passenger")
+      motorola = store.create_vehicle({"name": "MM 车", "address": 6, "type": 0, "control_protocol": "motorola", "speed_steps": 2})
+      self.assertEqual(motorola["control_protocol"], "motorola")
+      self.assertEqual(motorola["speed_steps"], 2)
 
   def test_sync_function_control_only_persists_for_consist_control_vehicle(self):
     with tempfile.TemporaryDirectory() as temp_dir:
